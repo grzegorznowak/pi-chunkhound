@@ -109,7 +109,7 @@ export const WORKTREE_FLAGS = [
  * Repo to complete branches from: the cwd's repo, or — when cwd is not inside
  * one — the nearest repo ancestor of the first positional (path) argument.
  */
-async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise<string> {
+async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise<string | null> {
 	const fromCwd = await gitRootOrNull(cwd);
 	if (fromCwd) return fromCwd;
 	const first = tokens.find((t) => t && !t.startsWith("-"));
@@ -119,7 +119,7 @@ async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise
 		const found = await findRepoRoot(probe);
 		if (found) return found;
 	}
-	return cwd; // no repo — branchCompletions will return []
+	return null; // no repo anywhere — the command cannot run; show no branch items
 }
 
 /**
@@ -142,7 +142,6 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	const base = raw.slice(0, raw.length - current.length);
 	const withBase = (items: CompletionItem[]): CompletionItem[] => items.map((i) => ({ ...i, value: base + i.value }));
 	const repo = await resolveRepoForCompletions(cwd, nonEmpty);
-
 	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
 
 	// Flag value positions — the flag may be the LAST token (trailing space:
@@ -152,7 +151,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	// -b takes a NEW branch name — free typing, no existing-branch suggestions
 	// (git refuses -b with a name that already exists).
 	if (valueFlag === "-b") return [];
-	if (valueFlag === "--from") return withBase(await branchCompletions(repo, true));
+	if (valueFlag === "--from") return repo ? withBase(await branchCompletions(repo, true)) : [];
 
 	// Flag name position ("wt --f" → "wt --force-reindex")
 	if (!hasTrailingSpace && current.startsWith("-")) {
@@ -161,6 +160,9 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 
 	if (position <= 0) return withBase(dirCompletions(current, cwd, { paramLabel: "worktree path (required)" }));
 	if (position === 1) {
+		// No repo anywhere near cwd or the typed path → the command cannot run;
+		// showing branch/new-branch items would advertise a dead end.
+		if (!repo) return [];
 		// NEW-BRANCH-FIRST: creating a new worktree is the primary intent — lead
 		// with a create-new-branch item; existing branches are secondary.
 		const branches = (await branchCompletions(repo)).filter((b) => !current || b.value.startsWith(current));

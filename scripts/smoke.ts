@@ -115,7 +115,10 @@ async function main(): Promise<void> {
 		check("arg completions name the parameter", arg0.length > 0 && arg0[0]!.description === "worktree path (required)", JSON.stringify(arg0[0]));
 		const argBranch = await worktreeArgumentCompletions("wt ", proj);
 		check("arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
-		check("branch position leads with new-branch item", argBranch[0]!.value === "wt -b " && argBranch[0]!.label === "new branch (-b)", JSON.stringify(argBranch[0]));
+		const argNoRepo = await worktreeArgumentCompletions("wt ", proj);
+		check("no repo → no branch/new-branch items", argNoRepo.length === 0, JSON.stringify(argNoRepo));
+		const argNoRepoName = await worktreeArgumentCompletions("wt something", proj);
+		check("no repo → no create-branch item", argNoRepoName.length === 0, JSON.stringify(argNoRepoName));
 		const argBDash = await worktreeArgumentCompletions("wt -b ", proj);
 		check("-b value position → no existing-branch suggestions", argBDash.length === 0, JSON.stringify(argBDash));
 		const argConfigTrailing = await worktreeArgumentCompletions("wt --config ", proj);

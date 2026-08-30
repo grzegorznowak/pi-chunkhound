@@ -60,8 +60,12 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			}
 			if (!repoRoot) {
 				notify(
-					`No git repo found: ${ctx.cwd} is not inside one and ${requestedPath} does not resolve to one. ` +
-						`Run /chworktree from inside a repo, or pick a path inside/next to one.`,
+					[`No git repo found: ${ctx.cwd} is not inside one and ${requestedPath} does not resolve to one.`,
+						"/chworktree creates a worktree OF an existing git repo.",
+						"Try: run it from inside the repo, or pick the repo's own directory as the path",
+						"(a sibling <repo>-wt is derived automatically). If the project should be a repo:",
+						`git init ${wtArg} && git -C ${wtArg} add -A && git -C ${wtArg} commit -m init, then retry.`,
+					].join("\n"),
 					"error",
 				);
 				return;
