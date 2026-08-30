@@ -72,13 +72,14 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 
 	const emb = obj.embedding as Record<string, unknown> | undefined;
 	if (emb && typeof emb === "object") {
-		if (emb.api_key) {
-			warnings.push("embedding.api_key present — stripped (never stored). Export CHHOUND_EMBEDDING__API_KEY or pass --api-key.");
-		}
 		const e: EmbeddingSettings = {};
 		if (typeof emb.provider === "string") e.provider = emb.provider;
 		if (typeof emb.model === "string") e.model = emb.model;
 		if (typeof emb.rerank_model === "string") e.rerankModel = emb.rerank_model;
+		if (typeof emb.api_key === "string" && emb.api_key) {
+			e.apiKey = emb.api_key;
+			warnings.push("embedding.api_key adopted — stored in settings.json and materialized chhound.json (0600).");
+		}
 		if (Object.keys(e).length > 0) adopted.embedding = e;
 	}
 
@@ -110,11 +111,12 @@ export function foldAdoptedInto(settings: ChhoundSettings, adopted: AdoptedConfi
 
 function embeddingBlock(settings: ChhoundSettings): Record<string, unknown> | undefined {
 	const e = settings.embedding;
-	if (!e || (!e.provider && !e.model && !e.rerankModel)) return undefined;
+	if (!e || (!e.provider && !e.model && !e.rerankModel && !e.apiKey)) return undefined;
 	const out: Record<string, unknown> = {};
 	if (e.provider) out.provider = e.provider;
 	if (e.model) out.model = e.model;
 	if (e.rerankModel) out.rerank_model = e.rerankModel;
+	if (e.apiKey) out.api_key = e.apiKey;
 	return out;
 }
 
@@ -153,13 +155,16 @@ export function materializeConfig(dir: string, opts: MaterializeOptions): string
 	const p = path.join(dir, "chhound.json");
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(p, JSON.stringify(config, null, 2) + "\n", "utf8");
+	// May contain the api key (v1) — restrict access.
+	fs.chmodSync(p, 0o600);
 	return p;
 }
 
-/** Materialize a throwaway config into a temp dir (for --verify preflight). */
-export function materializeTempConfig(settings: ChhoundSettings): string {
+/** Materialize a throwaway config into a temp dir (for --verify preflight). Returns dir for cleanup. */
+export function materializeTempConfig(settings: ChhoundSettings): { configPath: string; dir: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chhound-verify-"));
-	return materializeConfig(dir, { settings, dbDir: path.join(dir, ".chhound.db") });
+	const configPath = materializeConfig(dir, { settings, dbDir: path.join(dir, ".chhound.db") });
+	return { configPath, dir };
 }
 
 /** Convenience: parse `--config <file>` out of raw command args. */

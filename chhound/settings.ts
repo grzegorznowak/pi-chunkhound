@@ -77,5 +77,11 @@ export function saveSettings(settings: ChhoundSettings, scope: "global" | "proje
 	const tmp = `${p}.${process.pid}.${Date.now()}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", "utf8");
 	fs.renameSync(tmp, p);
+	// Settings may hold the api key (v1) — restrict access.
+	try {
+		fs.chmodSync(p, 0o600);
+	} catch {
+		// best-effort
+	}
 	return p;
 }

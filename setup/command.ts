@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { runChhound } from "../chhound/cli.js";
@@ -81,10 +82,12 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				}
 			}
 
-			// Secret: memory only — never persisted.
+			// Secret: persisted (v1 decision) — settings.json + materialized configs, 0600.
 			if (typeof flags["api-key"] === "string") {
+				settings.embedding = { ...(settings.embedding ?? {}), apiKey: flags["api-key"] };
 				state.apiKey = flags["api-key"];
-				summary.push("api key captured in memory (not stored)");
+				summary.push("api key saved to settings (0600)");
+				updates.push("api-key");
 			}
 
 			// Mode C: interactive wizard (TUI only)
@@ -111,7 +114,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
-				const key = await ask("API key (kept in memory only — or set CHHOUND_EMBEDDING__API_KEY)", state.apiKey ?? "");
+				const key = await ask("API key (saved to settings — or leave empty and use CHHOUND_EMBEDDING__API_KEY)", settings.embedding?.apiKey ?? "");
 				if (key === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
@@ -127,9 +130,12 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					model,
 					...(rerank ? { rerankModel: rerank } : {}),
 				};
-				if (key) state.apiKey = key;
+				if (key) {
+					state.apiKey = key;
+					settings.embedding = { ...(settings.embedding ?? {}), apiKey: key };
+				}
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
-				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""}`, key ? "api key captured in memory (not stored)" : "api key: use CHHOUND_EMBEDDING__API_KEY env");
+				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""}`, key ? "api key saved to settings (0600)" : "api key: use CHHOUND_EMBEDDING__API_KEY env");
 				updates.push("interactive");
 			}
 
@@ -145,7 +151,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					`settings: ${globalSettingsPath()}${loaded.projectPath ? ` + ${loaded.projectPath}` : ""}`,
 					`embedding: ${settings.embedding?.provider ?? "—"}/${settings.embedding?.model ?? "—"}`,
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
-					`api key: ${state.apiKey ? "in memory ✓" : process.env.CHHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
+					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
@@ -157,17 +163,21 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 			// Preflight: validate the materialized config against the real CLI.
 			if (flags["verify"]) {
 				ctx.ui.notify("Verifying configuration…", "info");
-				const tmpConfig = materializeTempConfig(settings);
-				const env = state.apiKey ? { CHHOUND_EMBEDDING__API_KEY: state.apiKey } : undefined;
-				const r = await runChhound(["index", ctx.cwd, "--show-setup", "--config", tmpConfig], { cwd: ctx.cwd, env });
-				if (r.code === 0) {
-					ctx.ui.notify("✓ Configuration verified.", "info");
-				} else {
-					const tail = (r.stderr || r.stdout).split("\n").slice(-4).join("\n");
-					const hint = settings.embedding?.provider && settings.embedding?.model
-						? ""
-						: "No embedding provider configured — run /ch-setup (wizard) or /ch-setup --provider <p> --model <m> first.\n";
-					ctx.ui.notify(`${hint}Configuration check failed:\n${tail}`, "error");
+				const tmp = materializeTempConfig(settings);
+				try {
+					const env = state.apiKey ? { CHHOUND_EMBEDDING__API_KEY: state.apiKey } : undefined;
+					const r = await runChhound(["index", ctx.cwd, "--show-setup", "--config", tmp.configPath], { cwd: ctx.cwd, env });
+					if (r.code === 0) {
+						ctx.ui.notify("✓ Configuration verified.", "info");
+					} else {
+						const tail = (r.stderr || r.stdout).split("\n").slice(-4).join("\n");
+						const hint = settings.embedding?.provider && settings.embedding?.model
+							? ""
+							: "No embedding provider configured — run /ch-setup (wizard) or /ch-setup --provider <p> --model <m> first.\n";
+						ctx.ui.notify(`${hint}Configuration check failed:\n${tail}`, "error");
+					}
+				} finally {
+					fs.rmSync(tmp.dir, { recursive: true, force: true });
 				}
 			}
 		},

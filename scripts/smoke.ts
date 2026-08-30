@@ -74,7 +74,8 @@ async function main(): Promise<void> {
 		const { adopted, warnings } = adoptConfigFile(cfgPath, tmp);
 		check("embedding folded", adopted.embedding?.provider === "voyageai" && adopted.embedding?.model === "voyage-3.5");
 		check("rerank_model mapped", adopted.embedding?.rerankModel === "rerank-2.5");
-		check("api_key warning", warnings.some((w) => w.includes("api_key")), warnings.join("; "));
+		check("api_key adopted into settings", adopted.embedding?.apiKey === "sk-SECRET");
+		check("api_key adoption noted", warnings.some((w) => w.includes("api_key")), warnings.join("; "));
 		check("database warning", warnings.some((w) => w.includes("database")));
 	}
 
@@ -87,9 +88,16 @@ async function main(): Promise<void> {
 		const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
 		const db = cfg.database as Record<string, unknown>;
 		check("duckdb pinned", db.provider === "duckdb" && db.path === dbDir);
-		check("no api_key anywhere", JSON.stringify(cfg).includes("api_key") === false);
+		check("no api_key without key in settings", JSON.stringify(cfg).includes("api_key") === false);
 		const excludes = (cfg.indexing as Record<string, unknown>).exclude as string[];
 		check("chhound exclusion guaranteed", excludes.includes("**/.chhound/**"));
+
+		// With a key in settings, the materialized config carries it (v1) — 0600.
+		const dir2 = path.join(tmp, "cfg-keyed");
+		const p2 = materializeConfig(dir2, { settings: { ...settings, embedding: { apiKey: "sk-KEY" } }, dbDir: path.join(dir2, ".chhound.db") });
+		const cfg2 = JSON.parse(fs.readFileSync(p2, "utf8")) as Record<string, unknown>;
+		check("api_key materialized when set", (cfg2.embedding as Record<string, unknown>).api_key === "sk-KEY");
+		check("config file 0600", (fs.statSync(p2).mode & 0o777) === 0o600, `mode=${(fs.statSync(p2).mode & 0o777).toString(8)}`);
 	}
 
 	// ── 4. scratch git repo + baseline prime ─────────────────────────
@@ -187,9 +195,15 @@ async function main(): Promise<void> {
 	section("settings round-trip");
 	const proj = path.join(tmp, "proj");
 	fs.mkdirSync(path.join(proj, ".pi", "pi-chhound"), { recursive: true });
-	const saved = saveSettings({ ...settings, embedding: { provider: "voyageai", model: "voyage-3.5" } }, "project", proj);
+	const saved = saveSettings(
+		{ ...settings, embedding: { provider: "voyageai", model: "voyage-3.5", apiKey: "sk-ROUNDTRIP" } },
+		"project",
+		proj,
+	);
 	const loaded = loadSettings(proj);
 	check("project settings round-trip", loaded.settings.embedding?.model === "voyage-3.5", saved);
+	check("api key round-trips through settings", loaded.settings.embedding?.apiKey === "sk-ROUNDTRIP");
+	check("settings file 0600", (fs.statSync(saved).mode & 0o777) === 0o600, `mode=${(fs.statSync(saved).mode & 0o777).toString(8)}`);
 	check("project path used", loaded.projectPath === saved);
 
 	// ── 8. extension loads ────────────────────────────────────────────

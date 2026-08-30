@@ -31,12 +31,13 @@ mechanics the CURe engine uses for PR sandboxes.
 
 ## Security
 
-- Slash-command args never reach the LLM (command dispatch happens before any message
-  is built; nothing is written to session files).
-- API keys are kept **in memory only** (module state) and passed to chunkhound via the
-  `CHHOUND_EMBEDDING__API_KEY` env var. Never stored in settings, configs, or entries.
-- Preferred: export `CHHOUND_EMBEDDING__API_KEY` yourself; `/ch-setup` falls back to
-  `--api-key` or an interactive prompt (unmasked — TUI only).
+- **v1 stores the embedding API key** in `settings.json` and in every materialized
+  `chhound.json` (sandbox + baseline) — files are chmod 0600. Treat them as secrets;
+  the sandbox/baseline dirs are not part of any git repo.
+- Prefer env-only if you want the key off disk: export `CHHOUND_EMBEDDING__API_KEY`
+  and skip the key in `/ch-setup` — materialized configs then carry no key.
+- Slash-command args never reach the LLM (command dispatch happens before any
+  message is built; nothing is written to session files).
 
 ## Settings
 

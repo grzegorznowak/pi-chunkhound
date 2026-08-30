@@ -43,7 +43,7 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 				`embedding: ${settings.embedding?.provider && settings.embedding?.model
 					? `${settings.embedding.provider}/${settings.embedding.model}`
 					: "not configured — run /ch-setup"}`,
-				`api key: ${state.apiKey ? "in memory ✓" : process.env.CHHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
+				`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
 				"",
 				`sandboxes (${sandboxes.length}):`,
 			];
