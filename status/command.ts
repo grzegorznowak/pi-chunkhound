@@ -37,9 +37,12 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			const baselines = listBaselines(settings);
 
 			const lines: string[] = [
-				`chunkhound: ${version} (${chhoundBinary()})`,
+				`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
 				`sandbox root: ${sandboxRoot(settings)}`,
 				`baseline root: ${baseRoot(settings)}`,
+				`embedding: ${settings.embedding?.provider && settings.embedding?.model
+					? `${settings.embedding.provider}/${settings.embedding.model}`
+					: "not configured — run /ch-setup"}`,
 				`api key: ${state.apiKey ? "in memory ✓" : process.env.CHHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
 				"",
 				`sandboxes (${sandboxes.length}):`,

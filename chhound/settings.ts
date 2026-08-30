@@ -32,6 +32,10 @@ function readSettingsFile(p: string): { settings: ChhoundSettings; issue?: strin
 		}
 		return { settings: raw as ChhoundSettings };
 	} catch (err) {
+		// First run: no file yet is the normal state, not an issue.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+			return { settings: DEFAULT_SETTINGS };
+		}
 		try {
 			fs.copyFileSync(p, `${p}.bak`);
 		} catch {

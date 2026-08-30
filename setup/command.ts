@@ -89,9 +89,12 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 
 			// Mode C: interactive wizard (TUI only)
 			if (!flags["config"] && updates.length === 0 && !flags["api-key"] && ctx.mode === "tui" && ctx.hasUI) {
-				const ask = async (title: string, placeholder?: string): Promise<string | undefined> => {
-					const v = await ctx.ui.input(title, placeholder);
-					return v && v.trim() ? v.trim() : undefined;
+				// Esc cancels; Enter with no typing accepts the current/default value.
+				const ask = async (title: string, current: string): Promise<string | undefined> => {
+					const v = await ctx.ui.input(title, current);
+					if (v === undefined) return undefined;
+					const t = v.trim();
+					return t.length > 0 ? t : current;
 				};
 				const provider = await ask("Embedding provider", settings.embedding?.provider ?? "voyageai");
 				if (provider === undefined) {
@@ -108,10 +111,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
-				const key = await ask(
-					"API key (kept in memory only — or set CHHOUND_EMBEDDING__API_KEY)",
-					state.apiKey ?? "",
-				);
+				const key = await ask("API key (kept in memory only — or set CHHOUND_EMBEDDING__API_KEY)", state.apiKey ?? "");
 				if (key === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
@@ -121,7 +121,12 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
-				settings.embedding = { provider, model, ...(rerank ? { rerankModel: rerank } : {}) };
+				settings.embedding = {
+					...(settings.embedding ?? {}),
+					provider,
+					model,
+					...(rerank ? { rerankModel: rerank } : {}),
+				};
 				if (key) state.apiKey = key;
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
 				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""}`, key ? "api key captured in memory (not stored)" : "api key: use CHHOUND_EMBEDDING__API_KEY env");
@@ -159,7 +164,10 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("✓ Configuration verified.", "info");
 				} else {
 					const tail = (r.stderr || r.stdout).split("\n").slice(-4).join("\n");
-					ctx.ui.notify(`Configuration check failed:\n${tail}`, "error");
+					const hint = settings.embedding?.provider && settings.embedding?.model
+						? ""
+						: "No embedding provider configured — run /ch-setup (wizard) or /ch-setup --provider <p> --model <m> first.\n";
+					ctx.ui.notify(`${hint}Configuration check failed:\n${tail}`, "error");
 				}
 			}
 		},
