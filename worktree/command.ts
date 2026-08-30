@@ -8,7 +8,7 @@ import { worktreeArgumentCompletions } from "../chhound/completions.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
-import { createProgressUI } from "../chhound/progress.js";
+import { createProgressUI, formatElapsed } from "../chhound/progress.js";
 import { sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { PluginState } from "../chhound/types.js";
@@ -122,7 +122,12 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				}
 
 				// 1) Baseline (primed/refreshed from origin/<ref> when stale)
-				notify("Ensuring baseline index…", "info");
+				progress.setPhase("baseline index");
+				notify(
+					"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
+						"Progress updates in the footer. Tip: /chworktree --no-index creates the worktree without indexing.",
+					"warning",
+				);
 				const baseline = await ensureBaseline({
 					repoRoot,
 					settings,
@@ -163,6 +168,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				}
 
 				// 4) Sync index: baseline db copy + top-up at the worktree's branch point
+				progress.setPhase("worktree index (top-up)");
 				notify(
 					`Indexing ${wtPath} (top-up from baseline ${baseline.ref} @ ${baseline.meta.baseCommit.slice(0, 12)})…`,
 					"info",
@@ -178,7 +184,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				});
 				if (result.code !== 0) {
 					const tail = result.stderrTail.split("\n").slice(-4).join("\n");
-					notify(`Index failed (code ${result.code}):\n${tail}`, "error");
+					notify(`Index failed after ${formatElapsed(progress.elapsed())} (code ${result.code}):\n${tail}`, "error");
 					return;
 				}
 
@@ -196,7 +202,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				});
 				notify(
 					[
-						`✓ ${wtPath} @ ${branchNow} indexed (${result.copied ? "baseline copy + top-up" : "full index"}).`,
+						`✓ ${wtPath} @ ${branchNow} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
 						`db: ${dbDir}`,
 						`config: ${sandboxConfigPath(sandboxDir)}`,
 						`Next: cd ${wtPath} && chunkhound mcp --config ${sandboxConfigPath(sandboxDir)}`,
