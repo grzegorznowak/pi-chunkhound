@@ -105,27 +105,39 @@ export const WORKTREE_FLAGS = [
 ] as const;
 
 /**
- * /chworktree argument completions (natural typing; TAB stays with pi's own
- * fd-based file picker, which is what makes the folder picker feel native).
+ * /chworktree argument completions (natural typing; TAB-after-space stays with
+ * pi's built-in readdir-based file picker, TAB-without-space is command-name
+ * completion — both pi-tui behaviors we can't intercept).
+ *
+ * pi's applyCompletion for command args REPLACES the whole argument string
+ * with item.value, so every value carries the typed base (e.g. "wt fix-topic").
  */
 export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: string): Promise<CompletionItem[]> {
-	const tokens = argumentPrefix.split(/\s+/).filter(Boolean);
-	if (tokens.length === 0) {
-		// Fresh "/chworktree " — offer the cwd's directories.
-		return dirCompletions("", cwd);
+	const raw = argumentPrefix;
+	const tokens = raw.split(/[ \t]+/);
+	const nonEmpty = tokens.filter((t) => t.length > 0);
+	const current = tokens.length > 0 ? tokens[tokens.length - 1]! : "";
+	const hasTrailingSpace = current === "";
+	const prev = nonEmpty.length >= 2 ? nonEmpty[nonEmpty.length - 2] : undefined;
+	// Everything up to and including the space before the token being completed.
+	const base = raw.slice(0, raw.length - current.length);
+	const withBase = (items: CompletionItem[]): CompletionItem[] => items.map((i) => ({ ...i, value: base + i.value }));
+
+	// Flag value positions: "--config <file>", "-b <branch>", "--from <commit-ish>"
+	if (prev === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true }));
+	if (prev === "-b") return withBase(await branchCompletions(cwd));
+	if (prev === "--from") return withBase(await branchCompletions(cwd, true));
+
+	// Flag name position ("wt --f" → "wt --force-reindex")
+	if (!hasTrailingSpace && current.startsWith("-")) {
+		return withBase(WORKTREE_FLAGS.filter((f) => f.startsWith(current)).map((f) => ({ value: f, label: f })));
 	}
-	const current = tokens[tokens.length - 1]!;
-	const prev = tokens.length >= 2 ? tokens[tokens.length - 2] : undefined;
 
-	if (prev === "--config") return dirCompletions(current, cwd, { includeFiles: true });
-	if (prev === "-b") return branchCompletions(cwd, false);
-	if (prev === "--from") return branchCompletions(cwd, true);
-
-	if (current.startsWith("-") && !prev) {
-		return WORKTREE_FLAGS.filter((f) => f.startsWith(current)).map((f) => ({ value: f, label: f }));
+	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
+	if (position <= 0) return withBase(dirCompletions(current, cwd));
+	if (position === 1) {
+		const branches = (await branchCompletions(cwd)).filter((b) => !current || b.value.startsWith(current));
+		return withBase(branches);
 	}
-
-	if (tokens.length === 1) return dirCompletions(current, cwd);
-	if (tokens.length === 2) return branchCompletions(cwd);
-	return [];
+	return withBase(WORKTREE_FLAGS.map((f) => ({ value: f, label: f })));
 }

@@ -79,6 +79,17 @@ async function main(): Promise<void> {
 		check("dir picker: absolute prefix", abs.length === 1 && abs[0]!.value === proj + "/src/", JSON.stringify(abs));
 		const tilde = dirCompletions("~/", proj);
 		check("dir picker: ~ expansion", tilde.length > 0 && tilde.every((d) => d.value.startsWith("~/")));
+		// Full-argument replacement contract (applyCompletion replaces the whole arg string).
+		const arg0 = await worktreeArgumentCompletions("", proj);
+		check("arg completions: empty → cwd dirs", arg0.some((c) => c.value === "src/"), JSON.stringify(arg0));
+		const argBranch = await worktreeArgumentCompletions("wt ", proj);
+		check("arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
+		const argFlag = await worktreeArgumentCompletions("wt --f", proj);
+		check("arg completions: flag names keep base", argFlag.some((c) => c.value === "wt --force-reindex") && argFlag.some((c) => c.value === "wt --from"), JSON.stringify(argFlag));
+		const argFrom = await worktreeArgumentCompletions("wt --from ", proj);
+		check("arg completions: --from value position", argFrom.every((c) => c.value.startsWith("wt --from ")));
+		const argConfig = await worktreeArgumentCompletions("wt --config a", proj);
+		check("arg completions: --config value position keeps base", argConfig.some((c) => c.value === "wt --config a.txt" && c.label === "a.txt"), JSON.stringify(argConfig));
 	}
 
 	// ── 3. adoptConfigFile strips secrets ─────────────────────────────
@@ -168,7 +179,7 @@ async function main(): Promise<void> {
 	const branches = await branchCompletions(repo);
 	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));
 	const argComp = await worktreeArgumentCompletions("wt fix", repo);
-	check("arg completions: branch position", argComp.some((b) => b.value === "fix/smoke"), JSON.stringify(argComp));
+	check("arg completions: branch position", argComp.some((b) => b.value === "wt fix/smoke"), JSON.stringify(argComp));
 
 	const sandboxDir = sandboxDirFor(repo, wt, settings);
 	const dbDir = sandboxDbDir(sandboxDir);
