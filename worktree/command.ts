@@ -19,14 +19,17 @@ const HELP = [
 	"required:",
 	"  <path>             directory for the new worktree (folder picker: TAB)",
 	"optional:",
-	"  [branch]           existing branch to check out",
-	"  -b <name>          create a new branch",
+	"  [branch]           existing branch to check out (picker leads with 'new branch')",
+	"  -b <name>          create a new branch with an explicit name",
 	"  --from <ref>       base commit/branch/tag for the worktree",
 	"  --config <file>    adopt an existing chunkhound.json for this worktree",
 	"  --no-index         skip indexing (worktree only)",
 	"  --force-reindex    full re-index instead of baseline top-up",
 	"  --refresh-baseline force baseline re-prime",
 	"",
+	"New worktree first: /chworktree <path> alone creates a NEW branch named",
+	"after the path (like git worktree add); the branch picker leads with a",
+	"'new branch' item — existing branches are secondary.",
 	"Each worktree gets its own chunkhound index: baseline copy + top-up at the",
 	"branch point. Indexes live in the sandbox library, not in the worktree.",
 ].join("\n");
@@ -112,6 +115,16 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 					return;
 				}
 				const branchNow = await currentBranch(wtPath);
+				// Describe what the branch position did: new branch (explicit -b, typed
+				// new name via the picker, or git's path-derived default) vs existing
+				// branch vs detached checkout.
+				const branchNote = createBranch
+					? `new branch ${createBranch}`
+					: branch
+						? `branch ${branch}`
+						: commitIsh
+							? `detached @ ${commitIsh}`
+							: `new branch ${branchNow}`;
 
 				if (flags["no-index"]) {
 					notify(
@@ -208,7 +221,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				});
 				notify(
 					[
-						`✓ ${wtPath} @ ${branchNow} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
+						`✓ ${branchNote} @ ${wtPath} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
 						`db: ${dbDir}`,
 						`config: ${sandboxConfigPath(sandboxDir)}`,
 						`Next: cd ${wtPath} && chunkhound mcp --config ${sandboxConfigPath(sandboxDir)}`,

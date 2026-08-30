@@ -115,6 +115,11 @@ async function main(): Promise<void> {
 		check("arg completions name the parameter", arg0.length > 0 && arg0[0]!.description === "worktree path (required)", JSON.stringify(arg0[0]));
 		const argBranch = await worktreeArgumentCompletions("wt ", proj);
 		check("arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
+		check("branch position leads with new-branch item", argBranch[0]!.value === "wt -b " && argBranch[0]!.label === "new branch (-b)", JSON.stringify(argBranch[0]));
+		const argBDash = await worktreeArgumentCompletions("wt -b ", proj);
+		check("-b value position → no existing-branch suggestions", argBDash.length === 0, JSON.stringify(argBDash));
+		const argConfigTrailing = await worktreeArgumentCompletions("wt --config ", proj);
+		check("--config trailing space → config files", argConfigTrailing.some((c) => c.value === "wt --config a.txt" && c.label === "a.txt"), JSON.stringify(argConfigTrailing));
 		const argFlag = await worktreeArgumentCompletions("wt --f", proj);
 		check("arg completions: flag names keep base", argFlag.some((c) => c.value === "wt --force-reindex") && argFlag.some((c) => c.value === "wt --from"), JSON.stringify(argFlag));
 		const argFrom = await worktreeArgumentCompletions("wt --from ", proj);
@@ -211,6 +216,16 @@ async function main(): Promise<void> {
 	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));
 	const argComp = await worktreeArgumentCompletions("wt fix", repo);
 	check("arg completions: branch position", argComp.some((b) => b.value === "wt fix/smoke"), JSON.stringify(argComp));
+
+	// NEW-BRANCH-FIRST: with a real repo, the branch picker leads with creation.
+	const argBranchRepo = await worktreeArgumentCompletions("wt ", repo);
+	check("branch picker: new-branch item first, existing after", argBranchRepo[0]!.value === "wt -b " && argBranchRepo.some((c) => c.value === "wt main"), JSON.stringify(argBranchRepo.map((c) => c.value)));
+	const argExistingName = await worktreeArgumentCompletions("wt main", repo);
+	check("existing branch name → no create item", !argExistingName.some((c) => c.value.startsWith("wt -b")), JSON.stringify(argExistingName));
+	const argNewName = await worktreeArgumentCompletions("wt brandnew", repo);
+	check("typed new name → create-branch item", argNewName.some((c) => c.value === "wt -b brandnew" && c.label === "create branch: brandnew"), JSON.stringify(argNewName));
+	const argNewNamePartial = await worktreeArgumentCompletions("wt fix", repo);
+	check("typed prefix of existing branch → create item still first", argNewNamePartial[0]!.value === "wt -b fix", JSON.stringify(argNewNamePartial[0]));
 
 	// Repo resolution from a non-repo cwd (the workspace-root scenario).
 	const resolved = await findRepoRoot(path.join(repo, "sub", "deep"));

@@ -143,21 +143,36 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	const withBase = (items: CompletionItem[]): CompletionItem[] => items.map((i) => ({ ...i, value: base + i.value }));
 	const repo = await resolveRepoForCompletions(cwd, nonEmpty);
 
-	// Flag value positions: "--config <file>", "-b <branch>", "--from <commit-ish>"
-	if (prev === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true, paramLabel: "config file (optional)" }));
-	if (prev === "-b") return withBase(await branchCompletions(repo));
-	if (prev === "--from") return withBase(await branchCompletions(repo, true));
+	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
+
+	// Flag value positions — the flag may be the LAST token (trailing space:
+	// "/chworktree wt -b ") or second-to-last ("/chworktree wt -b name").
+	const valueFlag = hasTrailingSpace ? nonEmpty[nonEmpty.length - 1] : prev;
+	if (valueFlag === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true, paramLabel: "config file (optional)" }));
+	// -b takes a NEW branch name — free typing, no existing-branch suggestions
+	// (git refuses -b with a name that already exists).
+	if (valueFlag === "-b") return [];
+	if (valueFlag === "--from") return withBase(await branchCompletions(repo, true));
 
 	// Flag name position ("wt --f" → "wt --force-reindex")
 	if (!hasTrailingSpace && current.startsWith("-")) {
 		return withBase(WORKTREE_FLAGS.filter((f) => f.startsWith(current)).map((f) => ({ value: f, label: f })));
 	}
 
-	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
 	if (position <= 0) return withBase(dirCompletions(current, cwd, { paramLabel: "worktree path (required)" }));
 	if (position === 1) {
+		// NEW-BRANCH-FIRST: creating a new worktree is the primary intent — lead
+		// with a create-new-branch item; existing branches are secondary.
 		const branches = (await branchCompletions(repo)).filter((b) => !current || b.value.startsWith(current));
-		return withBase(branches);
+		const existing = new Set(branches.map((b) => b.value));
+		const items: CompletionItem[] = [];
+		if (current === "") {
+			items.push({ value: "-b ", label: "new branch (-b)", description: "create a NEW branch — TAB, then type its name" });
+		} else if (!existing.has(current)) {
+			items.push({ value: `-b ${current}`, label: `create branch: ${current}`, description: "this branch doesn't exist yet — git creates it" });
+		}
+		for (const b of branches) items.push({ ...b, description: `existing ${b.description} branch — check out` });
+		return withBase(items);
 	}
 	return withBase(WORKTREE_FLAGS.map((f) => ({ value: f, label: f })));
 }

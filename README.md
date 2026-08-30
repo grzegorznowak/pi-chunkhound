@@ -62,8 +62,14 @@ and run `/reload` in pi. Typecheck requires the matching `@earendil-works/pi-cod
 All completion UX is plugin-side and works on a **pristine pi install** — nothing
 under the global pi installation is ever modified:
 
+- **New worktree first**: `/chworktree <path>` alone creates a NEW branch named
+  after the path (like `git worktree add`). After the path + space, the picker
+  leads with a **new-branch item** — TAB on it, then type the branch name.
+  Typing a name that doesn't exist as a branch offers `create branch: <name>`
+  right at the top; existing branches are listed below it (secondary).
 - Natural typing after `/chworktree ` shows the directory picker (dirs only,
-  trailing `/`), then branches, flags, `--config` files, `--from`/`-b` refs.
+  trailing `/`), then the branch picker, flags, `--config` files,
+  `--from`/`-b` refs. `-b`'s value position suggests nothing (free name typing).
 - `TAB` accepts a completion; a `TAB` in `/chworktree`'s argument position
   shows the plugin's own picker again (a plugin-owned provider wrapper routes
   TAB there — pi's built-in file picker never appears inside `/chworktree`
