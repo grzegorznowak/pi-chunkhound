@@ -64,6 +64,10 @@ completion feels native:
    (`/chworktree` + TAB + TAB → directory tree), instead of showing nothing.
 2. Commands without argument completions fall through to the file picker on
    natural typing (typing a space after `/read` shows files).
+3. Accepting a directory item auto-drills to its contents; Enter only submits
+   for command-name completions (never for paths).
+4. The picker shows a keys hint when open in command context:
+   `↑/↓ move · TAB accept · Esc close`.
 
 Apply (re-run after every pi update):
 

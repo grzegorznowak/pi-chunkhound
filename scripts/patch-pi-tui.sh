@@ -127,4 +127,48 @@ open(path, "w", encoding="utf-8").write(src)
 print(f"editor.js: patched ({path})")
 PY
 
+python3 - "$EDITOR" <<'PY'
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+marker = "// pi-chhound patch: keys hint under the picker when in a slash-command context."
+if marker in src:
+    print(f"editor.js: keys hint already patched ({path})")
+    sys.exit(0)
+
+old = """        // Add autocomplete list if active
+        if (this.autocompleteState && this.autocompleteList) {
+            const autocompleteResult = this.autocompleteList.render(contentWidth);
+            for (const line of autocompleteResult) {
+                const lineWidth = visibleWidth(line);
+                const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
+                result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+            }
+        }
+        return result;"""
+new = """        // Add autocomplete list if active
+        if (this.autocompleteState && this.autocompleteList) {
+            const autocompleteResult = this.autocompleteList.render(contentWidth);
+            for (const line of autocompleteResult) {
+                const lineWidth = visibleWidth(line);
+                const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
+                result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+            }
+            // pi-chhound patch: keys hint under the picker when in a slash-command context.
+            const hintLineBefore = (this.state.lines[this.state.cursorLine] ?? "").slice(0, this.state.cursorCol);
+            if (hintLineBefore.trimStart().startsWith("/")) {
+                const hint = this.borderColor("\u2191/\u2193 move \u00b7 TAB accept \u00b7 Esc close");
+                const hintPadding = " ".repeat(Math.max(0, contentWidth - visibleWidth(hint)));
+                result.push(`${leftPadding}${hint}${hintPadding}${rightPadding}`);
+            }
+        }
+        return result;"""
+if old not in src:
+    print(f"editor.js: render block not found — pi-tui version may have changed ({path})", file=sys.stderr)
+    sys.exit(1)
+open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+print(f"editor.js: keys hint patched ({path})")
+PY
+
 echo "OK — restart pi for the changes to take effect."
