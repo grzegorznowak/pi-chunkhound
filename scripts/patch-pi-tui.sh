@@ -57,17 +57,36 @@ import sys
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
 
-V2_TAB = """                    this.cancelAutocomplete();
+V4_TAB = """                    this.cancelAutocomplete();
                     // pi-chhound patch: after accepting a command-name completion
                     // ("\u2026/cmd " with trailing space) or a directory item (\u2026/),
-                    // immediately show the next level of completions.
+                    // immediately show the next level of completions. Command-name
+                    // accepts only re-trigger when the command has argument
+                    // completions (otherwise arg-less commands like /reload would
+                    // open the file picker on every accept).
                     const appliedText = this.state.lines[this.state.cursorLine] ?? "";
                     const appliedBeforeCursor = appliedText.slice(0, this.state.cursorCol);
-                    if (/^\/\\S+ $/.test(appliedBeforeCursor) || appliedBeforeCursor.endsWith("/")) {
+                    const isCommandNameAccept = /^\/\\S+ $/.test(appliedBeforeCursor);
+                    const hasArgCompletions = (() => {
+                        if (!isCommandNameAccept) return false;
+                        const name = appliedBeforeCursor.slice(1, -1);
+                        const cmds = this.autocompleteProvider?.commands;
+                        if (!Array.isArray(cmds)) return false;
+                        return cmds.some((c) => {
+                            const n = "name" in c ? c.name : c.value;
+                            return n === name && !!c.getArgumentCompletions;
+                        });
+                    })();
+                    if (appliedBeforeCursor.endsWith("/") || (isCommandNameAccept && hasArgCompletions)) {
                         this.tryTriggerAutocomplete(true);
                     }
                     if (this.onChange)
                         this.onChange(this.getText());"""
+V4_MARKER = "accepts only re-trigger when the command has argument"
+if V4_MARKER in src:
+    print(f"editor.js: already patched ({path})")
+    sys.exit(0)
+
 V2_ENTER = """                    const appliedText = this.state.lines[this.state.cursorLine] ?? "";
                     const appliedBeforeCursor = appliedText.slice(0, this.state.cursorCol);
                     if (/^\/\\S+ $/.test(appliedBeforeCursor)) {
@@ -87,11 +106,6 @@ V2_ENTER = """                    const appliedText = this.state.lines[this.stat
                             this.onChange(this.getText());
                         return;
                     }"""
-V2_MARKER = "// pi-chhound patch: after accepting a command-name completion"
-if V2_MARKER in src:
-    print(f"editor.js: already patched ({path})")
-    sys.exit(0)
-
 P_TAB = """                    this.cancelAutocomplete();
                     if (this.onChange)
                         this.onChange(this.getText());"""
@@ -115,11 +129,24 @@ V1_TAB = """                    this.cancelAutocomplete();
                     }
                     if (this.onChange)
                         this.onChange(this.getText());"""
+V2_TAB = """                    this.cancelAutocomplete();
+                    // pi-chhound patch: after accepting a command-name completion
+                    // ("\u2026/cmd " with trailing space) or a directory item (\u2026/),
+                    // immediately show the next level of completions.
+                    const appliedText = this.state.lines[this.state.cursorLine] ?? "";
+                    const appliedBeforeCursor = appliedText.slice(0, this.state.cursorCol);
+                    if (/^\/\\S+ $/.test(appliedBeforeCursor) || appliedBeforeCursor.endsWith("/")) {
+                        this.tryTriggerAutocomplete(true);
+                    }
+                    if (this.onChange)
+                        this.onChange(this.getText());"""
 
-if V1_TAB in src and P_ENTER in src:
-    src = src.replace(V1_TAB, V2_TAB).replace(P_ENTER, V2_ENTER)
+if V2_TAB in src and "// pi-chhound patch: only command-name completions fall" in src:
+    src = src.replace(V2_TAB, V4_TAB)
+elif V1_TAB in src and P_ENTER in src:
+    src = src.replace(V1_TAB, V4_TAB).replace(P_ENTER, V2_ENTER)
 elif P_TAB in src and P_ENTER in src:
-    src = src.replace(P_TAB, V2_TAB).replace(P_ENTER, V2_ENTER)
+    src = src.replace(P_TAB, V4_TAB).replace(P_ENTER, V2_ENTER)
 else:
     print(f"editor.js: expected snippets not found — pi-tui version may have changed ({path})", file=sys.stderr)
     sys.exit(1)
