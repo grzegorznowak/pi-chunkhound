@@ -123,9 +123,10 @@ async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise
 }
 
 /**
- * /chworktree argument completions (natural typing; TAB-after-space stays with
- * pi's built-in readdir-based file picker, TAB-without-space is command-name
- * completion — both pi-tui behaviors we can't intercept).
+ * /chworktree argument completions (natural typing AND TAB — the plugin's
+ * ChhoundArgumentProvider wrapper routes every request in this command's
+ * argument position here, so pristine pi's file picker never shows there;
+ * TAB-without-space stays command-name completion — a pi-tui behavior).
  *
  * pi's applyCompletion for command args REPLACES the whole argument string
  * with item.value, so every value carries the typed base (e.g. "wt fix-topic").

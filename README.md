@@ -64,9 +64,11 @@ under the global pi installation is ever modified:
 
 - Natural typing after `/chworktree ` shows the directory picker (dirs only,
   trailing `/`), then branches, flags, `--config` files, `--from`/`-b` refs.
-- `TAB` accepts a completion (pi's built-in behavior — a `TAB` after the command
-  name re-triggers the argument picker; commands without argument completions
-  accept cleanly and submit on `Enter`).
-- After a space, pi's built-in file picker is available (e.g. `/chworktree /abs`).
+- `TAB` accepts a completion; a `TAB` in `/chworktree`'s argument position
+  shows the plugin's own picker again (a plugin-owned provider wrapper routes
+  TAB there — pi's built-in file picker never appears inside `/chworktree`
+  arguments). Accepting a directory and `TAB`-ing again drills into it.
+- `TAB` after the command name (no space) completes the command itself, like
+  any pi command; commands without argument completions accept cleanly.
 - `Enter` on a `/`-prefixed completion may submit the prompt (pi behavior) —
   use `TAB` to accept a completion instead.

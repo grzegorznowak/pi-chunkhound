@@ -1,5 +1,7 @@
 /** Verify pi-chhound's completion behavior against pristine pi-tui's public
- *  autocomplete provider API (CombinedAutocompleteProvider). No pi patches
+ *  autocomplete provider API (CombinedAutocompleteProvider) — including the
+ *  ChhoundArgumentProvider wrapper that routes TAB (force) requests in
+ *  /chworktree's argument position to the plugin's own picker. No pi patches
  *  involved: the plugin must work on an untouched pi install. */
 import * as fs from "node:fs";
 import os from "node:os";
@@ -7,6 +9,7 @@ import path from "node:path";
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { runGit } from "../chhound/git.ts";
 import { worktreeArgumentCompletions } from "../chhound/completions.ts";
+import { ChhoundArgumentProvider } from "../chhound/provider-wrap.ts";
 
 let checks = 0, failures = 0;
 const check = (name: string, cond: boolean, detail = "") => {
@@ -73,6 +76,43 @@ check("E: dir accept → '/chworktree src/'", lineAfterDir === "/chworktree src/
 // provider must already offer the nested contents there.
 const e2 = await s("/chworktree src/", false);
 check("E: next level shows nested contents", !!e2 && e2.items.some((i: any) => i.value === "src/nested/" && i.label === "nested/"), JSON.stringify(e2?.items?.map((i: any) => i.label)));
+
+// ── Wrapper (ChhoundArgumentProvider): TAB (force) in /chworktree's argument
+// position must show the plugin's picker, not pi's built-in file picker ──
+// The wrapper resolves through process.cwd(), so point it at the fixture.
+process.chdir(cwd);
+const wrapped = new ChhoundArgumentProvider(provider);
+const w = async (line: string, force: boolean) => {
+	const lines = [line];
+	return wrapped.getSuggestions(lines, 0, line.length, { signal: new AbortController().signal, force });
+};
+
+// F: TAB after command-name accept (force) → OUR dir picker (was file picker)
+const f = await w("/chworktree ", true);
+check("F: TAB (force) shows dir picker", !!f && f.items.some((i: any) => i.value === "src/" && i.label === "src/") && !f.items.some((i: any) => i.value === "a.txt"), JSON.stringify(f?.items?.map((i: any) => i.label)));
+
+// G: TAB drill-down (force) after dir accept → next level, still ours
+const g = await w("/chworktree src/", true);
+check("G: TAB (force) drills into dir", !!g && g.items.some((i: any) => i.value === "src/nested/" && i.label === "nested/"), JSON.stringify(g?.items?.map((i: any) => i.label)));
+
+// H: natural typing still works through the wrapper
+const h = await w("/chworktree ", false);
+check("H: natural typing via wrapper shows dir picker", !!h && h.items.some((i: any) => i.value === "src/"), JSON.stringify(h?.items?.map((i: any) => i.label)));
+
+// I: outside our command's argument position, TAB (force) delegates to the
+// wrapped provider (pi's file picker — empty prefix lists cwd incl. files)
+const i = await w("", true);
+check("I: non-command TAB delegates to file picker", !!i && i.items.some((it: any) => it.value === "a.txt"), JSON.stringify(i?.items?.map((it: any) => it.value).slice(0, 6)));
+
+// J: applyCompletion through the wrapper still replaces the whole argument
+const j = await w("/chworktree ", true);
+const jItem = j!.items.find((it: any) => it.value === "src/");
+const jApplied = wrapped.applyCompletion(["/chworktree "], 0, "/chworktree ".length, jItem!, j!.prefix);
+check("J: wrapper applyCompletion → '/chworktree src/'", jApplied.lines[0]!.slice(0, jApplied.cursorCol) === "/chworktree src/", JSON.stringify(jApplied.lines[0]));
+
+// K: TAB on the command name itself (no space) still delegates → command item
+const k = await w("/chworktree", false);
+check("K: TAB on command name delegates to command completion", !!k && k.items.some((it: any) => it.value === "chworktree"), JSON.stringify(k?.items?.map((it: any) => it.value)));
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });
