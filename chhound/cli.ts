@@ -23,7 +23,7 @@ export function chhoundBinary(): string {
 
 /** Env injection for the embedding key — held in memory only, never on disk. */
 export function chhoundApiKeyEnv(apiKey?: string): Record<string, string> | undefined {
-	return apiKey ? { CHHOUND_EMBEDDING__API_KEY: apiKey } : undefined;
+	return apiKey ? { CHUNKHOUND_EMBEDDING__API_KEY: apiKey } : undefined;
 }
 
 function appendCapped(buf: string, text: string, cap: number): string {

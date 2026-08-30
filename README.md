@@ -34,7 +34,7 @@ mechanics the CURe engine uses for PR sandboxes.
 - **v1 stores the embedding API key** in `settings.json` and in every materialized
   `chhound.json` (sandbox + baseline) — files are chmod 0600. Treat them as secrets;
   the sandbox/baseline dirs are not part of any git repo.
-- Prefer env-only if you want the key off disk: export `CHHOUND_EMBEDDING__API_KEY`
+- Prefer env-only if you want the key off disk: export `CHUNKHOUND_EMBEDDING__API_KEY`
   and skip the key in `/ch-setup` — materialized configs then carry no key.
 - Slash-command args never reach the LLM (command dispatch happens before any
   message is built; nothing is written to session files).
@@ -72,3 +72,15 @@ under the global pi installation is ever modified:
   any pi command; commands without argument completions accept cleanly.
 - `Enter` on a `/`-prefixed completion may submit the prompt (pi behavior) —
   use `TAB` to accept a completion instead.
+
+### Live index progress
+
+Long index runs stream progress to the footer (1s heartbeat):
+
+- `embedding · batch 3/12 (300 chunks) · db 5.8 MB +3.1 MB · 2:05` — real
+  per-batch progress from `chunkhound index --verbose` stderr lines, plus the
+  duckdb file (+ `.wal`) byte size sampled every second.
+- Batches that have *completed* take precedence (`embedding · 7/12`), so the
+  counter never looks stuck while the embedding API is the bottleneck.
+- The last few surfaced output lines also show above the editor; loguru DEBUG
+  noise is filtered out.

@@ -39,6 +39,11 @@ export function baselineDirFor(repoRoot: string, ref: string, settings: ChhoundS
 	return path.join(baseRoot(settings), repoSlug, slugify(ref));
 }
 
+/** Duckdb dir of a baseline — matches what ensureBaseline computes internally. */
+export function baselineDbDirFor(repoRoot: string, ref: string, settings: ChhoundSettings): string {
+	return path.join(baselineDirFor(repoRoot, ref, settings), "db", ".chhound.db");
+}
+
 function baselineMetaPath(dir: string): string {
 	return path.join(dir, "meta.json");
 }
@@ -133,7 +138,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 	const ref = opts.settings.baseline?.ref || (await defaultRemoteBranch(opts.repoRoot)) || "main";
 	const version = await chhoundVersion();
 	const dir = baselineDirFor(opts.repoRoot, ref, opts.settings);
-	const dbDir = path.join(dir, "db", ".chhound.db");
+	const dbDir = baselineDbDirFor(opts.repoRoot, ref, opts.settings);
 	fs.mkdirSync(dir, { recursive: true });
 
 	// Best-effort fetch: network may be down — fall back to existing baseline.

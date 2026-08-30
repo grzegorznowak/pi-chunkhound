@@ -15,6 +15,8 @@ export interface HotStartOptions {
 	env?: Record<string, string | undefined>;
 	onLine?: (line: string) => void;
 	signal?: AbortSignal;
+	/** Pass --verbose to chunkhound so it emits "Processing batch X/N" stderr lines (default true). */
+	verbose?: boolean;
 	/** Extra chunkhound index args (e.g. --no-embeddings in smoke tests). */
 	extraArgs?: string[];
 }
@@ -58,6 +60,9 @@ export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResu
 
 	const args = ["index", opts.indexDir, "--config", opts.configPath];
 	if (opts.forceReindex) args.push("--force-reindex");
+	// --verbose makes chunkhound emit "Processing batch X/N" progress lines on
+	// stderr (the only real per-batch signal during embedding generation).
+	if (opts.verbose !== false) args.push("--verbose");
 	if (opts.extraArgs) args.push(...opts.extraArgs);
 	const r = await runChhound(args, {
 		cwd: opts.cwd ?? opts.indexDir,

@@ -2,11 +2,11 @@ import * as fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
-import { ensureBaseline } from "../chhound/baseline.js";
+import { baselineDbDirFor, ensureBaseline } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { worktreeArgumentCompletions } from "../chhound/completions.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath } from "../chhound/git.js";
+import { currentBranch, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { createProgressUI, formatElapsed } from "../chhound/progress.js";
 import { sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
@@ -123,6 +123,11 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 				// 1) Baseline (primed/refreshed from origin/<ref> when stale)
 				progress.setPhase("baseline index");
+				// Watch the baseline db dir so the footer shows live growth (and
+				// embedding batch progress) during the prime — resolved the same
+				// way ensureBaseline computes it internally.
+				const baselineRef = settings.baseline?.ref || (await defaultRemoteBranch(repoRoot)) || "main";
+				progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 				notify(
 					"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
 						"Progress updates in the footer. Tip: /chworktree --no-index creates the worktree without indexing.",
@@ -169,6 +174,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 				// 4) Sync index: baseline db copy + top-up at the worktree's branch point
 				progress.setPhase("worktree index (top-up)");
+				progress.setWatchDir(dbDir);
 				notify(
 					`Indexing ${wtPath} (top-up from baseline ${baseline.ref} @ ${baseline.meta.baseCommit.slice(0, 12)})…`,
 					"info",

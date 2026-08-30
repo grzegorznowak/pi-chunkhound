@@ -26,6 +26,8 @@ import {
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
+import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
+import type { ProgressState } from "../chhound/progress.js";
 import { deriveWorktreePath } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
@@ -59,6 +61,33 @@ async function main(): Promise<void> {
 		check("--from value", p.flags["from"] === "abc123");
 		check("--no-index boolean", p.flags["no-index"] === true);
 		check("quoted --config", p.flags["config"] === "my cfg.json");
+	}
+
+	// ── 1b. progress extraction (parseChhoundLine / surfaceChhoundLine / buildStatusText) ──
+	section("progress extraction");
+	{
+		const b1 = parseChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Processing batch 2/3 with 300 chunks");
+		check("batch line parsed (loguru prefix)", b1?.batchCurrent === 2 && b1?.batchTotal === 3 && b1?.batchChunks === 300, JSON.stringify(b1));
+		const b2 = parseChhoundLine("Processing batch 1/12 with 24 chunks");
+		check("batch line parsed (bare)", b2?.batchCurrent === 1 && b2?.batchTotal === 12, JSON.stringify(b2));
+		const b2b = parseChhoundLine("2026-08-30 13:31:08 | DEBUG    | chunkhound.services.embedding_service:process_batch:564 - Batch 2 completed: 300 embeddings stored");
+		check("batch-done line parsed", b2b?.batchDone === 2, JSON.stringify(b2b));
+		const b3 = parseChhoundLine("Initial stats: 64 files, 624 chunks, 0 embeddings");
+		check("non-batch line → null", b3 === null, JSON.stringify(b3));
+
+		check("loguru debug noise dropped", surfaceChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Preparing data") === null);
+		const surf = surfaceChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Processing batch 2/3 with 300 chunks");
+		check("batch line surfaced", surf === "Processing batch 2/3 with 300 chunks", JSON.stringify(surf));
+		check("stdout line passes through", surfaceChhoundLine("Processing Complete") === "Processing Complete");
+		const warn = surfaceChhoundLine("2026-08-30 13:31:02 | WARNING  | chunkhound.services.embedding_service:process_batch:516 - Embedding generation failed");
+		check("warning surfaced with level", warn === "WARNING: Embedding generation failed", JSON.stringify(warn));
+
+		const st = (state: Partial<ProgressState>) => buildStatusText({ phase: "worktree index (top-up)", lastLine: "", elapsedMs: 125_000, ...state });
+		check("status: batch progress", st({ batchCurrent: 3, batchTotal: 12, batchChunks: 300 }) === "embedding · batch 3/12 (300 chunks) · 2:05", st({ batchCurrent: 3, batchTotal: 12, batchChunks: 300 }));
+		check("status: completed batches win", st({ batchCurrent: 7, batchTotal: 7, batchDone: 5 }) === "embedding · 5/7 · 2:05", st({ batchCurrent: 7, batchTotal: 7, batchDone: 5 }));
+		check("status: db growth", st({ dbBytes: 5_300_000, dbStartBytes: 2_000_000 }) === "worktree index (top-up) · db 5.1 MB +3.1 MB · 2:05", st({ dbBytes: 5_300_000, dbStartBytes: 2_000_000 }));
+		check("status: fallback phase+elapsed", st({}) === "worktree index (top-up) · 2:05", st({}));
+		check("formatBytes", formatBytes(1024 * 1024 * 5.3) === "5.3 MB", formatBytes(1024 * 1024 * 5.3));
 	}
 
 	// ── 2. completions ─────────────────────────────────────────────────
