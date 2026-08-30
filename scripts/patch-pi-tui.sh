@@ -56,28 +56,74 @@ import sys
 
 path = sys.argv[1]
 src = open(path, encoding="utf-8").read()
-marker = "// pi-chhound patch: after accepting a command-name completion"
-if marker in src:
-    print(f"editor.js: already patched ({path})")
-    sys.exit(0)
 
-old = """                    this.cancelAutocomplete();
-                    if (this.onChange)
-                        this.onChange(this.getText());"""
-new = """                    this.cancelAutocomplete();
+V2_TAB = """                    this.cancelAutocomplete();
                     // pi-chhound patch: after accepting a command-name completion
-                    // ("…/cmd " with trailing space), immediately show argument
-                    // completions (e.g. the directory picker) instead of nothing.
+                    // ("\u2026/cmd " with trailing space) or a directory item (\u2026/),
+                    // immediately show the next level of completions.
                     const appliedText = this.state.lines[this.state.cursorLine] ?? "";
-                    if (/^\\/\\S+ $/.test(appliedText.slice(0, this.state.cursorCol))) {
+                    const appliedBeforeCursor = appliedText.slice(0, this.state.cursorCol);
+                    if (/^\/\\S+ $/.test(appliedBeforeCursor) || appliedBeforeCursor.endsWith("/")) {
                         this.tryTriggerAutocomplete(true);
                     }
                     if (this.onChange)
                         this.onChange(this.getText());"""
-if old not in src:
-    print(f"editor.js: expected snippet not found — pi-tui version may have changed ({path})", file=sys.stderr)
+V2_ENTER = """                    const appliedText = this.state.lines[this.state.cursorLine] ?? "";
+                    const appliedBeforeCursor = appliedText.slice(0, this.state.cursorCol);
+                    if (/^\/\\S+ $/.test(appliedBeforeCursor)) {
+                        // pi-chhound patch: only command-name completions fall
+                        // through to submit; path completions (incl. absolute)
+                        // must not submit the prompt.
+                        this.cancelAutocomplete();
+                        // Fall through to submit
+                    }
+                    else {
+                        this.cancelAutocomplete();
+                        // pi-chhound patch: directory accept \u2192 show next level immediately.
+                        if (appliedBeforeCursor.endsWith("/")) {
+                            this.tryTriggerAutocomplete(true);
+                        }
+                        if (this.onChange)
+                            this.onChange(this.getText());
+                        return;
+                    }"""
+V2_MARKER = "// pi-chhound patch: after accepting a command-name completion"
+if V2_MARKER in src:
+    print(f"editor.js: already patched ({path})")
+    sys.exit(0)
+
+P_TAB = """                    this.cancelAutocomplete();
+                    if (this.onChange)
+                        this.onChange(this.getText());"""
+P_ENTER = """                    if (this.autocompletePrefix.startsWith("/")) {
+                        this.cancelAutocomplete();
+                        // Fall through to submit
+                    }
+                    else {
+                        this.cancelAutocomplete();
+                        if (this.onChange)
+                            this.onChange(this.getText());
+                        return;
+                    }"""
+V1_TAB = """                    this.cancelAutocomplete();
+                    // pi-chhound patch: after accepting a command-name completion
+                    // ("\u2026/cmd " with trailing space), immediately show argument
+                    // completions (e.g. the directory picker) instead of nothing.
+                    const appliedText = this.state.lines[this.state.cursorLine] ?? "";
+                    if (/^\/\\S+ $/.test(appliedText.slice(0, this.state.cursorCol))) {
+                        this.tryTriggerAutocomplete(true);
+                    }
+                    if (this.onChange)
+                        this.onChange(this.getText());"""
+
+if V1_TAB in src and P_ENTER in src:
+    src = src.replace(V1_TAB, V2_TAB).replace(P_ENTER, V2_ENTER)
+elif P_TAB in src and P_ENTER in src:
+    src = src.replace(P_TAB, V2_TAB).replace(P_ENTER, V2_ENTER)
+else:
+    print(f"editor.js: expected snippets not found — pi-tui version may have changed ({path})", file=sys.stderr)
     sys.exit(1)
-open(path, "w", encoding="utf-8").write(src.replace(old, new, 1))
+open(path, "w", encoding="utf-8").write(src)
 print(f"editor.js: patched ({path})")
 PY
 

@@ -55,3 +55,20 @@ npm run smoke        # end-to-end mechanics test (real chunkhound CLI, --no-embe
 
 Dev install: symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`)
 and run `/reload` in pi. Typecheck requires the matching `@earendil-works/pi-coding-agent` types.
+
+### pi-tui patch (recommended)
+
+Two surgical patches to the running pi install's pi-tui so command-argument
+completion feels native:
+1. TAB-accepting a command name immediately opens the argument picker
+   (`/chworktree` + TAB + TAB → directory tree), instead of showing nothing.
+2. Commands without argument completions fall through to the file picker on
+   natural typing (typing a space after `/read` shows files).
+
+Apply (re-run after every pi update):
+
+```
+bash scripts/patch-pi-tui.sh
+```
+
+Then **restart pi** — the TUI is loaded at startup, `/reload` is not enough.
