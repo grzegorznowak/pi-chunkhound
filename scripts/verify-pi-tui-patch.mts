@@ -57,9 +57,9 @@ check("A: accept → '/chworktree '", lineAfterAccept === "/chworktree ", JSON.s
 const b = await s("/chworktree ", false);
 check("B: re-trigger shows dir picker", !!b && b.items.some((i: any) => i.value === "src/" && i.label === "src/"), JSON.stringify(b));
 
-// C: command WITHOUT arg completions now falls through to file completion
+// C: command WITHOUT arg completions returns null (no file picker after accept)
 const c = await s("/read ", false);
-check("C: fall-through file completion for /read", !!c && c.items.some((i: any) => i.label === "README.md"), JSON.stringify(c?.items?.map((i: any) => i.label)));
+check("C: arg-less commands return null (no file picker)", c === null, JSON.stringify(c));
 
 // D: branch position keeps working with full values
 const d = await s("/chworktree wt main", false);
@@ -74,6 +74,12 @@ check("E: dir accept → '/chworktree src/'", lineAfterDir === "/chworktree src/
 // The patched editor would re-trigger here (line ends with "/"); provider must show the next level.
 const e2 = await s("/chworktree src/", false);
 check("E: next level shows nested contents", !!e2 && e2.items.some((i: any) => i.value === "src/nested/" && i.label === "nested/"), JSON.stringify(e2?.items?.map((i: any) => i.label)));
+
+// F: v5 — after a command-name accept, re-trigger returns OUR items for
+// commands with completions (B) and null for arg-less commands (C); the
+// editor no longer inspects the provider's commands array (it may be wrapped).
+const appliedName = applied.lines[0]!.slice(0, applied.cursorCol);
+check("F: command-name accept leaves '/chworktree '", appliedName === "/chworktree ", JSON.stringify(appliedName));
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

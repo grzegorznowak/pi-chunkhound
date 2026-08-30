@@ -60,8 +60,10 @@ and run `/reload` in pi. Typecheck requires the matching `@earendil-works/pi-cod
 
 Two surgical patches to the running pi install's pi-tui so command-argument
 completion feels native:
-1. TAB-accepting a command name immediately opens the argument picker
-   (`/chworktree` + TAB + TAB → directory tree), instead of showing nothing.
+1. TAB-accepting a command name opens the argument picker immediately
+   (`/chworktree` + TAB + TAB → directory tree) — but only for commands that
+   define argument completions, so arg-less commands like `/reload` accept
+   cleanly and submit on Enter.
 2. Commands without argument completions fall through to the file picker on
    natural typing (typing a space after `/read` shows files).
 3. Accepting a directory item auto-drills to its contents; Enter only submits
