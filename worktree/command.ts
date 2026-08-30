@@ -6,7 +6,7 @@ import { ensureBaseline } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { worktreeArgumentCompletions } from "../chhound/completions.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, gitWorktreeAdd, repoExcludePath, requireGitRoot } from "../chhound/git.js";
+import { currentBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { createProgressUI } from "../chhound/progress.js";
 import { sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
@@ -33,23 +33,36 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				return;
 			}
 
-			let repoRoot: string;
-			try {
-				repoRoot = await requireGitRoot(ctx.cwd);
-			} catch (err) {
-				notify(err instanceof Error ? err.message : String(err), "error");
-				return;
-			}
+			const requestedPath = path.resolve(ctx.cwd, wtArg);
 
-			const wtPath = path.resolve(ctx.cwd, wtArg);
-			if (wtPath === repoRoot) {
-				notify("Worktree path must differ from the main repo root.", "error");
+			let repoRoot = await gitRootOrNull(ctx.cwd);
+			if (!repoRoot) {
+				const probe = fs.existsSync(requestedPath) ? requestedPath : path.dirname(requestedPath);
+				repoRoot = await findRepoRoot(probe);
+			}
+			if (!repoRoot) {
+				notify(
+					`No git repo found: ${ctx.cwd} is not inside one and ${requestedPath} does not resolve to one. ` +
+						`Run /chworktree from inside a repo, or pick a path inside/next to one.`,
+					"error",
+				);
 				return;
 			}
-			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
-				notify(`Refusing: ${wtPath} exists and is not empty.`, "error");
+			repoRoot = path.resolve(repoRoot);
+
+			// Picking the source repo itself (e.g. `chunkhound/` in the folder picker)
+			// means "worktree of this repo" — derive a sibling path instead.
+			let target = requestedPath;
+			if (target === repoRoot) {
+				target = deriveWorktreePath(repoRoot);
+				notify(`${wtArg} is the source repo itself — creating the worktree at ${target} instead.`, "info");
+			}
+			if (fs.existsSync(target) && fs.readdirSync(target).length > 0) {
+				notify(`Refusing: ${target} exists and is not empty.`, "error");
 				return;
 			}
+			// From here on, `wtPath` is the worktree location.
+			const wtPath = target;
 
 			// Branch semantics mirror `git worktree add`:
 			//   /chworktree <path> [<existing-branch>]
@@ -182,4 +195,13 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			}
 		},
 	});
+}
+
+/** Sibling worktree location for a repo root: `<repo>-wt`, `<repo>-wt-2`, … */
+export function deriveWorktreePath(repoRoot: string): string {
+	const parent = path.dirname(repoRoot);
+	const base = path.basename(repoRoot);
+	let candidate = path.join(parent, `${base}-wt`);
+	for (let i = 2; fs.existsSync(candidate); i++) candidate = path.join(parent, `${base}-wt-${i}`);
+	return candidate;
 }

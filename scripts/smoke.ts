@@ -14,7 +14,7 @@ import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
-import { currentBranch, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
+import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
 	dirSize,
@@ -26,6 +26,7 @@ import {
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
+import { deriveWorktreePath } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -180,6 +181,15 @@ async function main(): Promise<void> {
 	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));
 	const argComp = await worktreeArgumentCompletions("wt fix", repo);
 	check("arg completions: branch position", argComp.some((b) => b.value === "wt fix/smoke"), JSON.stringify(argComp));
+
+	// Repo resolution from a non-repo cwd (the workspace-root scenario).
+	const resolved = await findRepoRoot(path.join(repo, "sub", "deep"));
+	check("findRepoRoot walks up from nested dir", resolved === repo, `${resolved} vs ${repo}`);
+	const none = await findRepoRoot(path.join(tmp, "not-a-repo"));
+	check("findRepoRoot undefined outside repos", none === undefined, `${none}`);
+	check("deriveWorktreePath sibling", deriveWorktreePath(repo) === path.join(tmp, "repo-wt"), deriveWorktreePath(repo));
+	const argComp2 = await worktreeArgumentCompletions("repo fix", tmp);
+	check("arg completions resolve repo from path (cwd not a repo)", argComp2.some((b) => b.value === "repo fix/smoke"), JSON.stringify(argComp2));
 
 	const sandboxDir = sandboxDirFor(repo, wt, settings);
 	const dbDir = sandboxDbDir(sandboxDir);

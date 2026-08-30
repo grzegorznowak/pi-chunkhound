@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runGit } from "./git.js";
+import { findRepoRoot, gitRootOrNull, runGit } from "./git.js";
 
 /** Structural match for pi-tui's AutocompleteItem (avoids a pi-tui type import). */
 export interface CompletionItem {
@@ -105,6 +105,23 @@ export const WORKTREE_FLAGS = [
 ] as const;
 
 /**
+ * Repo to complete branches from: the cwd's repo, or — when cwd is not inside
+ * one — the nearest repo ancestor of the first positional (path) argument.
+ */
+async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise<string> {
+	const fromCwd = await gitRootOrNull(cwd);
+	if (fromCwd) return fromCwd;
+	const first = tokens.find((t) => t && !t.startsWith("-"));
+	if (first) {
+		const p = path.resolve(cwd, first);
+		const probe = fs.existsSync(p) ? p : path.dirname(p);
+		const found = await findRepoRoot(probe);
+		if (found) return found;
+	}
+	return cwd; // no repo — branchCompletions will return []
+}
+
+/**
  * /chworktree argument completions (natural typing; TAB-after-space stays with
  * pi's built-in readdir-based file picker, TAB-without-space is command-name
  * completion — both pi-tui behaviors we can't intercept).
@@ -122,11 +139,12 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	// Everything up to and including the space before the token being completed.
 	const base = raw.slice(0, raw.length - current.length);
 	const withBase = (items: CompletionItem[]): CompletionItem[] => items.map((i) => ({ ...i, value: base + i.value }));
+	const repo = await resolveRepoForCompletions(cwd, nonEmpty);
 
 	// Flag value positions: "--config <file>", "-b <branch>", "--from <commit-ish>"
 	if (prev === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true }));
-	if (prev === "-b") return withBase(await branchCompletions(cwd));
-	if (prev === "--from") return withBase(await branchCompletions(cwd, true));
+	if (prev === "-b") return withBase(await branchCompletions(repo));
+	if (prev === "--from") return withBase(await branchCompletions(repo, true));
 
 	// Flag name position ("wt --f" → "wt --force-reindex")
 	if (!hasTrailingSpace && current.startsWith("-")) {
@@ -136,7 +154,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
 	if (position <= 0) return withBase(dirCompletions(current, cwd));
 	if (position === 1) {
-		const branches = (await branchCompletions(cwd)).filter((b) => !current || b.value.startsWith(current));
+		const branches = (await branchCompletions(repo)).filter((b) => !current || b.value.startsWith(current));
 		return withBase(branches);
 	}
 	return withBase(WORKTREE_FLAGS.map((f) => ({ value: f, label: f })));

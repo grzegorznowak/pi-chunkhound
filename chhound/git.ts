@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 export interface GitResult {
 	code: number;
@@ -34,6 +35,18 @@ export async function gitRootOrNull(cwd: string): Promise<string | undefined> {
 		return await requireGitRoot(cwd);
 	} catch {
 		return undefined;
+	}
+}
+
+/** Walk up from `from` to the nearest git repo root (or undefined). */
+export async function findRepoRoot(from: string): Promise<string | undefined> {
+	let dir = path.resolve(from);
+	for (;;) {
+		const r = await runGit(["rev-parse", "--show-toplevel"], { cwd: dir });
+		if (r.code === 0) return r.stdout;
+		const parent = path.dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
 	}
 }
 
