@@ -9,6 +9,7 @@ import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
+import { promptPath, type PathPromptUI } from "../chhound/path-input.js";
 import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -34,8 +35,10 @@ const HELP = [
 	"Two ways to invoke:",
 	"  wizard:  /chworktree [repo] with no other arguments — asks for the branch name",
 	"           and the destination folder interactively (with no argument at all it",
-	"           also lets you pick the repo). The destination must not already be part",
-	"           of another chunkhound index — such locations are blocked.",
+	"           also lets you pick the repo). Path prompts support TAB completion",
+	"           (dirs only, drill-down; TAB accepts, Enter confirms, Esc cancels).",
+	"           The destination must not already be part of another chunkhound",
+	"           index — such locations are blocked.",
 	"  one-go:  /chworktree [repo] -b <branch> --dest <dir> [options] — everything on",
 	"           one line, non-interactive (agents). Without --dest the first argument",
 	"           is the worktree location itself, as before.",
@@ -360,6 +363,7 @@ type WizardUI = ProgressUICtx["ui"] & {
 	notify(msg: string, type: "info" | "warning" | "error"): void;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
 	select(title: string, options: string[]): Promise<string | undefined>;
+	custom?: PathPromptUI["custom"];
 };
 
 async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, state: PluginState, positional?: string): Promise<void> {
@@ -405,8 +409,14 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 
 	// 3) Destination — parent folder; final dir = dest/<repo>-wt (-2 on
 	//    collision). Locations already part of another chunkhound index block.
+	//    Prefilled with the default; TAB completes like the command-line picker.
 	const defaultDest = path.dirname(repoRoot);
-	let destRaw = await ctx.ui.input(`Destination folder (parent of the worktree, Enter = ${defaultDest}):`, defaultDest);
+	let destRaw = await promptPath(ctx.ui, {
+		title: `Destination folder (parent of the worktree, default: ${defaultDest}):`,
+		cwd: ctx.cwd,
+		startValue: defaultDest,
+		paramLabel: "destination folder",
+	});
 	if (destRaw === undefined) {
 		notify("Cancelled.", "info");
 		return;
@@ -416,7 +426,12 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 	let conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
 		notify(`Blocked: ${wtPath} is already part of the chunkhound index for ${conflict}. Choose another destination.`, "error");
-		destRaw = await ctx.ui.input(`Destination folder (parent of the worktree, Enter = ${defaultDest}):`, defaultDest);
+		destRaw = await promptPath(ctx.ui, {
+			title: `Destination folder (parent of the worktree, default: ${defaultDest}):`,
+			cwd: ctx.cwd,
+			startValue: defaultDest,
+			paramLabel: "destination folder",
+		});
 		if (destRaw === undefined) {
 			notify("Cancelled.", "info");
 			return;
@@ -467,7 +482,7 @@ async function pickRepoInteractive(ctx: { cwd: string; hasUI: boolean; ui: Wizar
 	if (choice !== OTHER_REPO && candidates.has(choice)) return candidates.get(choice)!;
 
 	for (let attempt = 0; attempt < 3; attempt++) {
-		const raw = await ctx.ui.input("Repo path (a git repository):", "");
+		const raw = await promptPath(ctx.ui, { title: "Repo path (a git repository) — TAB completes:", cwd: ctx.cwd, paramLabel: "repo directory" });
 		if (raw === undefined) {
 			notify("Cancelled.", "info");
 			return undefined;

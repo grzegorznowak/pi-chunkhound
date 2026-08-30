@@ -34,9 +34,11 @@ mechanics the CURe engine uses for PR sandboxes.
 - **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
   name (Enter = new branch `<repo>-wt`) and the destination folder (Enter = repo
   sibling). With no argument at all it also lets you pick the repo (current repo,
-  repos from the baseline/sandbox library, or a typed path). The destination is
-  blocked when the resulting location is already part of another chunkhound
-  index.
+  repos from the baseline/sandbox library, or a typed path). Path prompts
+  support TAB completion — the same dir picker as the command line (dirs only,
+  trailing `/`, `~` expansion, drill-down): TAB accepts the first item, Enter
+  confirms, Esc cancels. The destination is blocked when the resulting location
+  is already part of another chunkhound index.
 - **One-go (agents)** — everything on one line, fully non-interactive:
   `/chworktree [repo] -b <branch> --dest <dir>`. With `--dest`, the worktree dir
   is `dest/<repo>-wt` (`-wt-2` on collision) and the first argument only

@@ -27,6 +27,8 @@ import {
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
 import { deriveWorktreePath, isWizardInvocation, resolveWorktreeLocation } from "../worktree/command.js";
@@ -174,6 +176,43 @@ async function main(): Promise<void> {
 		check("conflict: inside indexed worktree", findConflictingIndexed(path.join(tmp, "idx-a", "sub"), idx) === path.join(tmp, "idx-a"));
 		check("conflict: contains indexed worktree", findConflictingIndexed(tmp, idx) === path.join(tmp, "idx-a"));
 		check("no conflict", findConflictingIndexed(path.join(tmp, "other"), idx) === undefined);
+	}
+
+	// ── 2c. path input component: TAB completion in dialogs ──────────
+	section("path input component");
+	{
+		const pathProj = path.join(tmp, "path-proj");
+		fs.mkdirSync(path.join(pathProj, "src", "nested"), { recursive: true });
+		fs.mkdirSync(path.join(pathProj, "docs"), { recursive: true });
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
+		let result: string | undefined = "unset";
+		const comp = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
+			result = v;
+		});
+		comp.handleInput("s");
+		comp.handleInput("r");
+		check("typed prefix narrows completions", comp.currentCompletions().length === 1 && comp.currentCompletions()[0]!.value === "src/", JSON.stringify(comp.currentCompletions()));
+		comp.handleInput("\t");
+		check("TAB accepts first completion (whole-value replace)", comp.getValue() === "src/", comp.getValue());
+		check("drill-down continues after TAB", comp.currentCompletions().some((c) => c.value === "src/nested/"), JSON.stringify(comp.currentCompletions()));
+		comp.handleInput("\n");
+		check("Enter submits value", result === "src/", String(result));
+		const comp2 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
+			result = v;
+		});
+		comp2.handleInput("\x1b");
+		check("Esc cancels", result === undefined, String(result));
+		const comp3 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj, startValue: pathProj + "/src/" }, (v) => {
+			result = v;
+		});
+		check("prefilled value lists its subdirs", comp3.currentCompletions().some((c) => c.value === pathProj + "/src/nested/"), JSON.stringify(comp3.currentCompletions()));
+		const comp4 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
+			result = v;
+		});
+		comp4.handleInput("~");
+		comp4.handleInput("/");
+		check("~ expansion in dialog completions", comp4.currentCompletions().length > 0 && comp4.currentCompletions().every((c) => c.value.startsWith("~/")));
 	}
 
 	// ── 3. adoptConfigFile strips secrets ─────────────────────────────
