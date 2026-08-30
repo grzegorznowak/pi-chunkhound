@@ -1,0 +1,183 @@
+import * as fs from "node:fs";
+import path from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parseArgs } from "../chhound/args.js";
+import { ensureBaseline } from "../chhound/baseline.js";
+import { chhoundApiKeyEnv } from "../chhound/cli.js";
+import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
+import { currentBranch, gitWorktreeAdd, repoExcludePath, requireGitRoot } from "../chhound/git.js";
+import { hotStartIndex } from "../chhound/hotstart.js";
+import { createProgressUI } from "../chhound/progress.js";
+import { sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
+import { loadSettings } from "../chhound/settings.js";
+import type { PluginState } from "../chhound/types.js";
+
+const USAGE =
+	"/chworktree <path> [branch] [-b <new-branch>] [--from <commit-ish>] " +
+	"[--no-index] [--config <chunkhound.json>] [--force-reindex] [--refresh-baseline]";
+
+export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): void {
+	pi.registerCommand("chworktree", {
+		description:
+			"Create a git worktree with its own chunkhound index: baseline copy + top-up at the branch point. " +
+			"Indexes live in the pi-chhound sandbox library, not in the worktree.",
+		handler: async (args, ctx) => {
+			const { positionals, flags } = parseArgs(args);
+			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+
+			const wtArg = positionals[0];
+			if (!wtArg) {
+				notify(USAGE, "error");
+				return;
+			}
+
+			let repoRoot: string;
+			try {
+				repoRoot = await requireGitRoot(ctx.cwd);
+			} catch (err) {
+				notify(err instanceof Error ? err.message : String(err), "error");
+				return;
+			}
+
+			const wtPath = path.resolve(ctx.cwd, wtArg);
+			if (wtPath === repoRoot) {
+				notify("Worktree path must differ from the main repo root.", "error");
+				return;
+			}
+			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
+				notify(`Refusing: ${wtPath} exists and is not empty.`, "error");
+				return;
+			}
+
+			// Branch semantics mirror `git worktree add`:
+			//   /chworktree <path> [<existing-branch>]
+			//   /chworktree <path> -b <new-branch> [--from <commit-ish>]
+			let createBranch: string | undefined;
+			let branch: string | undefined;
+			let commitIsh: string | undefined;
+			if (flags["b"] === true && positionals[1]) {
+				createBranch = positionals[1];
+			} else if (typeof flags["b"] === "string") {
+				createBranch = flags["b"];
+			} else if (positionals[1]) {
+				branch = positionals[1];
+			}
+			if (flags["b"] === true && !positionals[1]) {
+				notify("-b requires a branch name: /chworktree <path> -b <new-branch>", "error");
+				return;
+			}
+			if (typeof flags["from"] === "string") commitIsh = flags["from"];
+
+			const loaded = loadSettings(repoRoot);
+			if (loaded.issue) notify(loaded.issue, "warning");
+			const settings = loaded.settings;
+
+			const progress = createProgressUI(ctx);
+			try {
+				notify(`Creating worktree ${wtPath}…`, "info");
+				try {
+					await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
+				} catch (err) {
+					notify(err instanceof Error ? err.message : String(err), "error");
+					return;
+				}
+				const branchNow = await currentBranch(wtPath);
+
+				if (flags["no-index"]) {
+					notify(
+						`Worktree created (no index): ${wtPath} @ ${branchNow}\nRun /chworktree ${wtArg} --force-reindex later to index it.`,
+						"info",
+					);
+					return;
+				}
+
+				// 1) Baseline (primed/refreshed from origin/<ref> when stale)
+				notify("Ensuring baseline index…", "info");
+				const baseline = await ensureBaseline({
+					repoRoot,
+					settings,
+					onLine: progress.setLine,
+					force: flags["refresh-baseline"] === true,
+					apiKey: state.apiKey,
+				});
+
+				// 2) Sandbox: config (no secrets, pinned duckdb) + db copy target
+				const sandboxDir = sandboxDirFor(repoRoot, wtPath, settings);
+				const dbDir = sandboxDbDir(sandboxDir);
+				let adopted;
+				if (typeof flags["config"] === "string") {
+					try {
+						adopted = adoptConfigFile(flags["config"], ctx.cwd).adopted;
+					} catch (err) {
+						notify(err instanceof Error ? err.message : String(err), "error");
+						return;
+					}
+				}
+				const configPath = materializeConfig(sandboxDir, { settings, dbDir, adopted });
+
+				// 3) Keep the worktree clean: git-exclude .chhound artifacts (repo-wide
+				//    info/exclude — the only one git reads for linked worktrees)
+				const excludePath = await repoExcludePath(wtPath);
+				if (excludePath) {
+					const extra = [".chhound/", ".chhound.json"].filter((p) => {
+						try {
+							return !fs.readFileSync(excludePath, "utf8").split("\n").includes(p.trim());
+						} catch {
+							return true;
+						}
+					});
+					if (extra.length > 0) {
+						fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+						fs.appendFileSync(excludePath, "\n# pi-chhound\n" + extra.join("\n") + "\n");
+					}
+				}
+
+				// 4) Sync index: baseline db copy + top-up at the worktree's branch point
+				notify(
+					`Indexing ${wtPath} (top-up from baseline ${baseline.ref} @ ${baseline.meta.baseCommit.slice(0, 12)})…`,
+					"info",
+				);
+				const result = await hotStartIndex({
+					sourceDbDir: baseline.dbDir,
+					targetDbDir: dbDir,
+					indexDir: wtPath,
+					configPath,
+					forceReindex: flags["force-reindex"] === true,
+					env: chhoundApiKeyEnv(state.apiKey),
+					onLine: progress.setLine,
+				});
+				if (result.code !== 0) {
+					const tail = result.stderrTail.split("\n").slice(-4).join("\n");
+					notify(`Index failed (code ${result.code}):\n${tail}`, "error");
+					return;
+				}
+
+				// 5) Meta + summary
+				writeSandboxMeta(sandboxDir, {
+					version: 1,
+					worktree: wtPath,
+					branch: branchNow,
+					baseRef: baseline.ref,
+					baseCommit: baseline.meta.baseCommit,
+					chhoundVersion: baseline.meta.chhoundVersion,
+					createdAt: new Date().toISOString(),
+					copiedFrom: baseline.dbDir,
+					dbPath: dbDir,
+				});
+				notify(
+					[
+						`✓ ${wtPath} @ ${branchNow} indexed (${result.copied ? "baseline copy + top-up" : "full index"}).`,
+						`db: ${dbDir}`,
+						`config: ${sandboxConfigPath(sandboxDir)}`,
+						`Next: cd ${wtPath} && chunkhound mcp --config ${sandboxConfigPath(sandboxDir)}`,
+					].join("\n"),
+					"info",
+				);
+			} catch (err) {
+				notify(`/chworktree failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			} finally {
+				progress.done();
+			}
+		},
+	});
+}
