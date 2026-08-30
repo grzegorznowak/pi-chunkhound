@@ -33,8 +33,18 @@ export interface HotStartResult {
  * copy everything incl. .wal), then `chhound index` as an incremental top-up.
  * No source → plain (or forced) full index.
  */
+/**
+ * ChunkHound claims a duckdb dir for an indexed root via a sibling sidecar
+ * (`<db>.root.json`). Our dbs are copied/moved between roots by design, so we
+ * always clear the stale claim before indexing — chunkhound re-claims fresh.
+ */
+export function indexedRootSidecarPath(dbDir: string): string {
+	return `${dbDir}.root.json`;
+}
+
 export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResult> {
 	let copied = false;
+	fs.rmSync(indexedRootSidecarPath(opts.targetDbDir), { force: true });
 	if (opts.forceReindex) {
 		// Explicit full rebuild: drop the target and index with --force-reindex.
 		if (fs.existsSync(opts.targetDbDir)) fs.rmSync(opts.targetDbDir, { recursive: true, force: true });
