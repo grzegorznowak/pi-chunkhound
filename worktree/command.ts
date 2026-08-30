@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { ensureBaseline } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
+import { worktreeArgumentCompletions } from "../chhound/completions.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, gitWorktreeAdd, repoExcludePath, requireGitRoot } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
@@ -21,6 +22,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 		description:
 			"Create a git worktree with its own chunkhound index: baseline copy + top-up at the branch point. " +
 			"Indexes live in the pi-chhound sandbox library, not in the worktree.",
+		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args);
 			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);

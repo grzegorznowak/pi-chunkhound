@@ -13,6 +13,7 @@ import { parseArgs } from "../chhound/args.js";
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { chhoundVersion } from "../chhound/cli.js";
+import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
@@ -59,7 +60,28 @@ async function main(): Promise<void> {
 		check("quoted --config", p.flags["config"] === "my cfg.json");
 	}
 
-	// ── 2. adoptConfigFile strips secrets ─────────────────────────────
+	// ── 2. completions ─────────────────────────────────────────────────
+	section("completions");
+	{
+		const proj = path.join(tmp, "comp-proj");
+		fs.mkdirSync(path.join(proj, "src", "nested"), { recursive: true });
+		fs.mkdirSync(path.join(proj, "docs"), { recursive: true });
+		fs.writeFileSync(path.join(proj, "a.txt"), "x");
+		const dirs0 = dirCompletions("", proj);
+		check("dir picker: dirs only, trailing /", dirs0.map((d) => d.label).join(",") === "docs/,src/", JSON.stringify(dirs0));
+		const dirs1 = dirCompletions("sr", proj);
+		check("dir picker: prefix filter + full value", dirs1.length === 1 && dirs1[0]!.value === "src/" && dirs1[0]!.label === "src/");
+		const dirs2 = dirCompletions("src/", proj);
+		check("dir picker: subdir navigation", dirs2.length === 1 && dirs2[0]!.value === "src/nested/", JSON.stringify(dirs2));
+		const files = dirCompletions("a", proj, { includeFiles: true });
+		check("file picker (--config): files included", files.some((f) => f.label === "a.txt" && f.description === "file"));
+		const abs = dirCompletions(proj + "/s", proj);
+		check("dir picker: absolute prefix", abs.length === 1 && abs[0]!.value === proj + "/src/", JSON.stringify(abs));
+		const tilde = dirCompletions("~/", proj);
+		check("dir picker: ~ expansion", tilde.length > 0 && tilde.every((d) => d.value.startsWith("~/")));
+	}
+
+	// ── 3. adoptConfigFile strips secrets ─────────────────────────────
 	section("adoptConfigFile");
 	{
 		const cfgPath = path.join(tmp, "existing-chhound.json");
@@ -142,6 +164,11 @@ async function main(): Promise<void> {
 	fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
 	const branch = await currentBranch(wt);
 	check("worktree branch", branch === "fix/smoke", branch);
+
+	const branches = await branchCompletions(repo);
+	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));
+	const argComp = await worktreeArgumentCompletions("wt fix", repo);
+	check("arg completions: branch position", argComp.some((b) => b.value === "fix/smoke"), JSON.stringify(argComp));
 
 	const sandboxDir = sandboxDirFor(repo, wt, settings);
 	const dbDir = sandboxDbDir(sandboxDir);
