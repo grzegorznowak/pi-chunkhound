@@ -45,6 +45,8 @@ export interface SandboxMeta {
 	version: 1;
 	/** Absolute worktree path. */
 	worktree: string;
+	/** Absolute repo root (recorded since v0.5 — absent in older metas). */
+	repoRoot?: string;
 	branch: string;
 	baseRef: string;
 	/** Commit the baseline was primed at. */
@@ -59,6 +61,8 @@ export interface SandboxMeta {
 
 export interface BaselineMeta {
 	version: 1;
+	/** Absolute repo root (recorded since v0.5 — absent in older metas). */
+	repoRoot?: string;
 	baseRef: string;
 	baseCommit: string;
 	chhoundVersion: string;

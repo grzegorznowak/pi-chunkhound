@@ -201,6 +201,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 		}
 		writeBaselineMeta(dir, {
 			version: 1,
+			repoRoot: path.resolve(opts.repoRoot),
 			baseRef: ref,
 			baseCommit: baseCommit ?? "unknown",
 			chhoundVersion: version,

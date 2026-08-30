@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 export interface ProgressUI {
 	setLine(line: string): void;
@@ -147,7 +146,16 @@ function watchBytes(p: string): number {
  * - `setPhase` labels the current phase (baseline prime vs worktree top-up).
  * Guarded by ctx.hasUI; RPC-safe (status/widget are fire-and-forget messages).
  */
-export function createProgressUI(ctx: ExtensionCommandContext, opts: { watchPath?: string } = {}): ProgressUI {
+/** Minimal structural ctx createProgressUI needs (real command ctx satisfies it). */
+export interface ProgressUICtx {
+	hasUI: boolean;
+	ui: {
+		setStatus(key: string, text: string | undefined): void;
+		setWidget(key: string, content: string[] | undefined, options?: { placement: "aboveEditor" | "belowEditor" }): void;
+	};
+}
+
+export function createProgressUI(ctx: ProgressUICtx, opts: { watchPath?: string } = {}): ProgressUI {
 	const hasUI = ctx.hasUI;
 	const lines: string[] = [];
 	const startedAt = Date.now();

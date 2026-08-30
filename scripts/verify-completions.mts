@@ -114,6 +114,15 @@ check("J: wrapper applyCompletion → '/chworktree src/'", jApplied.lines[0]!.sl
 const k = await w("/chworktree", false);
 check("K: TAB on command name delegates to command completion", !!k && k.items.some((it: any) => it.value === "chworktree"), JSON.stringify(k?.items?.map((it: any) => it.value)));
 
+// L: --dest value position → destination dir picker (dirs only, optional label)
+const l = await s("/chworktree wt --dest ", false);
+check("L: --dest value → destination dir picker", !!l && l.items.every((i: any) => i.value.startsWith("wt --dest ")) && l.items.some((i: any) => i.value === "wt --dest src/" && i.label === "src/" && i.description === "worktree destination folder (optional)"), JSON.stringify(l?.items?.map((i: any) => i.label)));
+check("L: --dest picker dirs only", !!l && !l.items.some((i: any) => i.value.endsWith("a.txt")), JSON.stringify(l?.items?.map((i: any) => i.value)));
+
+// M: --dest value through the wrapper (TAB force)
+const m = await w("/chworktree wt --dest ", true);
+check("M: TAB (force) in --dest value → destination picker", !!m && m.items.some((i: any) => i.value === "wt --dest src/" && i.label === "src/"), JSON.stringify(m?.items?.map((i: any) => i.label)));
+
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(failures ? 1 : 0);

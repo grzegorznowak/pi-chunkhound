@@ -11,7 +11,7 @@ mechanics the CURe engine uses for PR sandboxes.
 
 | Command | Purpose |
 |---|---|
-| `/chworktree <path> [branch] [-b <new-branch>] [--from <commit-ish>] [--no-index] [--config <file>] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index (baseline copy + top-up), streamed live to the session. |
+| `/chworktree [repo] [branch] [-b <new-branch>] [--dest <dir>] [--from <commit-ish>] [--no-index] [--config <file>] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index (baseline copy + top-up), streamed live to the session. |
 | `/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--baseline-ref <ref>] [--baseline-max-age <days>] [--api-key <key>] [--verify] [--project] [--reset]` | Configure pi-chhound. Interactive wizard in the TUI; flag-driven headlessly. |
 | `/ch-status [--prune]` | List the sandbox library and baselines; prune sandboxes whose worktree is gone. |
 
@@ -28,6 +28,20 @@ mechanics the CURe engine uses for PR sandboxes.
 - Indexes live **outside** the worktree; the repo only ever sees `.chhound/daemon.log`
   (git-excluded repo-wide via `info/exclude`).
 - Configs never contain secrets; the duckdb path is pinned absolute per sandbox.
+
+## /chworktree: two ways to invoke
+
+- **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
+  name (Enter = new branch `<repo>-wt`) and the destination folder (Enter = repo
+  sibling). With no argument at all it also lets you pick the repo (current repo,
+  repos from the baseline/sandbox library, or a typed path). The destination is
+  blocked when the resulting location is already part of another chunkhound
+  index.
+- **One-go (agents)** — everything on one line, fully non-interactive:
+  `/chworktree [repo] -b <branch> --dest <dir>`. With `--dest`, the worktree dir
+  is `dest/<repo>-wt` (`-wt-2` on collision) and the first argument only
+  resolves the repo (optional when the cwd is inside one). Without `--dest`,
+  the first argument is the worktree location itself, as before.
 
 ## Security
 

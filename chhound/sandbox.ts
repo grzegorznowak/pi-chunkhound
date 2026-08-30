@@ -73,6 +73,24 @@ export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
 }
 
 /** Remove sandboxes whose worktree no longer exists. Returns removed dirs. */
+/** Absolute worktree paths of every sandbox in the library (deduped). */
+export function indexedWorktreePaths(settings: ChhoundSettings): string[] {
+	return [...new Set(listSandboxes(settings).map((e) => e.meta.worktree).filter((w) => w && w.length > 0))];
+}
+
+/**
+ * True when `location` would overlap an already-indexed worktree: same dir,
+ * inside one, or containing one. Returns the conflicting worktree path.
+ */
+export function findConflictingIndexed(location: string, indexedWorktrees: string[]): string | undefined {
+	const loc = path.resolve(location);
+	for (const w of indexedWorktrees) {
+		const wt = path.resolve(w);
+		if (wt === loc || loc.startsWith(wt + path.sep) || wt.startsWith(loc + path.sep)) return wt;
+	}
+	return undefined;
+}
+
 export function pruneSandboxes(settings: ChhoundSettings): string[] {
 	const removed: string[] = [];
 	for (const entry of listSandboxes(settings)) {

@@ -17,6 +17,7 @@ import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "
 import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
+	findConflictingIndexed,
 	dirSize,
 	listSandboxes,
 	pruneSandboxes,
@@ -28,7 +29,7 @@ import {
 import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
-import { deriveWorktreePath } from "../worktree/command.js";
+import { deriveWorktreePath, isWizardInvocation, resolveWorktreeLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -61,6 +62,12 @@ async function main(): Promise<void> {
 		check("--from value", p.flags["from"] === "abc123");
 		check("--no-index boolean", p.flags["no-index"] === true);
 		check("quoted --config", p.flags["config"] === "my cfg.json");
+		const p2 = parseArgs(`--dest ~/wt -b x`);
+		check("--dest space value", p2.flags["dest"] === "~/wt" && p2.positionals.length === 0, JSON.stringify(p2));
+		const p3 = parseArgs(`--dest=/tmp/x`);
+		check("--dest = form", p3.flags["dest"] === "/tmp/x", JSON.stringify(p3));
+		const p4 = parseArgs(`--dest`);
+		check("--dest bare → true", p4.flags["dest"] === true, JSON.stringify(p4));
 	}
 
 	// ── 1b. progress extraction (parseChhoundLine / surfaceChhoundLine / buildStatusText) ──
@@ -129,6 +136,44 @@ async function main(): Promise<void> {
 		check("arg completions: --from value position", argFrom.every((c) => c.value.startsWith("wt --from ")));
 		const argConfig = await worktreeArgumentCompletions("wt --config a", proj);
 		check("arg completions: --config value position keeps base", argConfig.some((c) => c.value === "wt --config a.txt" && c.label === "a.txt"), JSON.stringify(argConfig));
+		const argDestFlag = await worktreeArgumentCompletions("wt --d", proj);
+		check("arg completions: --dest flag name", argDestFlag.some((c) => c.value === "wt --dest"), JSON.stringify(argDestFlag));
+		const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
+		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree destination folder (optional)"), JSON.stringify(argDest));
+		check("--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
+	}
+
+	// ── 2b. --dest location, wizard trigger, conflict block ──────────
+	section("dest: location + wizard + conflict");
+	{
+		const repo2 = path.join(tmp, "dest-repo");
+		fs.mkdirSync(repo2);
+		const dest = path.join(tmp, "dest-parent");
+		check("wizard: bare /chworktree", isWizardInvocation([], {}), JSON.stringify(isWizardInvocation([], {})));
+		check("wizard: repo only", isWizardInvocation(["repo"], {}));
+		check("one-go: branch given", isWizardInvocation(["repo", "main"], {}) === false);
+		check("one-go: --dest given", isWizardInvocation(["repo"], { dest: "~/wt" }) === false);
+		check("one-go: -b given", isWizardInvocation([], { b: "x" }) === false);
+		check("wizard: --help is not wizard", isWizardInvocation(["repo"], { help: true }) === false);
+		check("wizard: -h is not wizard", isWizardInvocation(["repo"], { h: true }) === false);
+
+		const loc = resolveWorktreeLocation({ repoRoot: repo2, dest });
+		check("--dest → dest/<repo>-wt", loc.wtPath === path.join(dest, "dest-repo-wt"), loc.wtPath);
+		const loc3 = resolveWorktreeLocation({ repoRoot: repo2, positional: repo2 });
+		check("repo itself → sibling <repo>-wt", loc3.wtPath === path.join(tmp, "dest-repo-wt"), `${loc3.wtPath} (note: ${loc3.note})`);
+		const loc4 = resolveWorktreeLocation({ repoRoot: repo2, positional: path.join(tmp, "custom") });
+		check("plain path → itself (no dest)", loc4.wtPath === path.join(tmp, "custom"));
+		fs.mkdirSync(path.join(dest, "dest-repo-wt"), { recursive: true });
+		const loc2 = resolveWorktreeLocation({ repoRoot: repo2, dest });
+		check("--dest collision → -wt-2", loc2.wtPath === path.join(dest, "dest-repo-wt-2"), loc2.wtPath);
+		check("deriveWorktreePath(parent)", deriveWorktreePath(repo2, dest) === path.join(dest, "dest-repo-wt-2"));
+		check("deriveWorktreePath default sibling", deriveWorktreePath(repo2) === path.join(tmp, "dest-repo-wt"));
+
+		const idx = [path.join(tmp, "idx-a")];
+		check("conflict: exact match", findConflictingIndexed(path.join(tmp, "idx-a"), idx) === path.join(tmp, "idx-a"));
+		check("conflict: inside indexed worktree", findConflictingIndexed(path.join(tmp, "idx-a", "sub"), idx) === path.join(tmp, "idx-a"));
+		check("conflict: contains indexed worktree", findConflictingIndexed(tmp, idx) === path.join(tmp, "idx-a"));
+		check("no conflict", findConflictingIndexed(path.join(tmp, "other"), idx) === undefined);
 	}
 
 	// ── 3. adoptConfigFile strips secrets ─────────────────────────────
@@ -265,6 +310,7 @@ async function main(): Promise<void> {
 	writeSandboxMeta(sandboxDir, {
 		version: 1,
 		worktree: wt,
+		repoRoot: repo,
 		branch,
 		baseRef: "main",
 		baseCommit,
