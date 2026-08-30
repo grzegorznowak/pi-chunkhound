@@ -186,10 +186,15 @@ async function main(): Promise<void> {
 		fs.mkdirSync(path.join(pathProj, "docs"), { recursive: true });
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 		const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
-		let result: string | undefined = "unset";
-		const comp = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
-			result = v;
-		});
+		const themeStub = { fg: (_c: string, t: string) => t };
+		const makeComp = (startValue?: string) => {
+			let out: string | undefined = "unset";
+			const c = new PathInputComponent(tuiStub, themeStub, getKeybindings(), { title: "p", cwd: pathProj, ...(startValue ? { startValue } : {}) }, (v) => {
+				out = v;
+			});
+			return { c, out: () => out };
+		};
+		const { c: comp, out: compOut } = makeComp();
 		comp.handleInput("s");
 		comp.handleInput("r");
 		check("typed prefix narrows completions", comp.currentCompletions().length === 1 && comp.currentCompletions()[0]!.value === "src/", JSON.stringify(comp.currentCompletions()));
@@ -197,19 +202,14 @@ async function main(): Promise<void> {
 		check("TAB accepts first completion (whole-value replace)", comp.getValue() === "src/", comp.getValue());
 		check("drill-down continues after TAB", comp.currentCompletions().some((c) => c.value === "src/nested/"), JSON.stringify(comp.currentCompletions()));
 		comp.handleInput("\n");
-		check("Enter submits value", result === "src/", String(result));
-		const comp2 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
-			result = v;
-		});
+		check("Enter submits value", compOut() === "src/", String(compOut()));
+		check("children: 6 fixed + completions + bottom border", comp.children.length === 8, `children=${comp.children.length}`);
+		const { c: comp2, out: comp2Out } = makeComp();
 		comp2.handleInput("\x1b");
-		check("Esc cancels", result === undefined, String(result));
-		const comp3 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj, startValue: pathProj + "/src/" }, (v) => {
-			result = v;
-		});
+		check("Esc cancels", comp2Out() === undefined, String(comp2Out()));
+		const { c: comp3 } = makeComp(pathProj + "/src/");
 		check("prefilled value lists its subdirs", comp3.currentCompletions().some((c) => c.value === pathProj + "/src/nested/"), JSON.stringify(comp3.currentCompletions()));
-		const comp4 = new PathInputComponent(tuiStub, getKeybindings(), { title: "p", cwd: pathProj }, (v) => {
-			result = v;
-		});
+		const { c: comp4 } = makeComp();
 		comp4.handleInput("~");
 		comp4.handleInput("/");
 		check("~ expansion in dialog completions", comp4.currentCompletions().length > 0 && comp4.currentCompletions().every((c) => c.value.startsWith("~/")));
