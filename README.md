@@ -49,32 +49,24 @@ Versioned JSON, project shadows global:
 
 ```
 npm install
-npm run typecheck    # tsc --noEmit
-npm run smoke        # end-to-end mechanics test (real chunkhound CLI, --no-embeddings)
+npm run typecheck          # tsc --noEmit
+npm run smoke              # end-to-end mechanics test (real chunkhound CLI, --no-embeddings)
+npm run verify:completions # completion behavior against pristine pi-tui's public provider API
 ```
 
 Dev install: symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`)
 and run `/reload` in pi. Typecheck requires the matching `@earendil-works/pi-coding-agent` types.
 
-### pi-tui patch (recommended)
+### Completion UX (no pi patches)
 
-Two surgical patches to the running pi install's pi-tui so command-argument
-completion feels native:
-1. TAB-accepting a command name opens the argument picker immediately
-   (`/chworktree` + TAB + TAB → directory tree) — but only for commands that
-   define argument completions, so arg-less commands like `/reload` accept
-   cleanly and submit on Enter.
-2. Commands without argument completions fall through to the file picker on
-   natural typing (typing a space after `/read` shows files).
-3. Accepting a directory item auto-drills to its contents; Enter only submits
-   for command-name completions (never for paths).
-4. The picker shows a keys hint when open in command context:
-   `↑/↓ move · TAB accept · Esc close`.
+All completion UX is plugin-side and works on a **pristine pi install** — nothing
+under the global pi installation is ever modified:
 
-Apply (re-run after every pi update):
-
-```
-bash scripts/patch-pi-tui.sh
-```
-
-Then **restart pi** — the TUI is loaded at startup, `/reload` is not enough.
+- Natural typing after `/chworktree ` shows the directory picker (dirs only,
+  trailing `/`), then branches, flags, `--config` files, `--from`/`-b` refs.
+- `TAB` accepts a completion (pi's built-in behavior — a `TAB` after the command
+  name re-triggers the argument picker; commands without argument completions
+  accept cleanly and submit on `Enter`).
+- After a space, pi's built-in file picker is available (e.g. `/chworktree /abs`).
+- `Enter` on a `/`-prefixed completion may submit the prompt (pi behavior) —
+  use `TAB` to accept a completion instead.

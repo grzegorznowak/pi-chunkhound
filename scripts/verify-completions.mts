@@ -1,14 +1,12 @@
-/** Verify the pi-tui patches: command-name accept → argument completion re-trigger,
- *  and fall-through to file completion for commands without arg completions. */
+/** Verify pi-chhound's completion behavior against pristine pi-tui's public
+ *  autocomplete provider API (CombinedAutocompleteProvider). No pi patches
+ *  involved: the plugin must work on an untouched pi install. */
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { runGit } from "../chhound/git.ts";
 import { worktreeArgumentCompletions } from "../chhound/completions.ts";
-
-const PI_TUI = "/usr/local/share/nvm/versions/node/v24.14.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.js";
-const { CombinedAutocompleteProvider } = await import(pathToFileURL(PI_TUI).href);
 
 let checks = 0, failures = 0;
 const check = (name: string, cond: boolean, detail = "") => {
@@ -53,7 +51,7 @@ const applied = provider.applyCompletion(["/chworktree"], 0, "/chworktree".lengt
 const lineAfterAccept = applied.lines[0]!.slice(0, applied.cursorCol);
 check("A: accept → '/chworktree '", lineAfterAccept === "/chworktree ", JSON.stringify(lineAfterAccept));
 
-// B: re-trigger (what the patched editor does after accept) → OUR dir picker
+// B: next TAB (what pi shows after the accept) → OUR dir picker
 const b = await s("/chworktree ", false);
 check("B: re-trigger shows dir picker", !!b && b.items.some((i: any) => i.value === "src/" && i.label === "src/"), JSON.stringify(b));
 
@@ -71,15 +69,10 @@ const srcItem = e!.items.find((i: any) => i.value === "src/");
 const appliedDir = provider.applyCompletion(["/chworktree src"], 0, "/chworktree src".length, srcItem!, e!.prefix);
 const lineAfterDir = appliedDir.lines[0]!.slice(0, appliedDir.cursorCol);
 check("E: dir accept → '/chworktree src/'", lineAfterDir === "/chworktree src/", JSON.stringify(lineAfterDir));
-// The patched editor would re-trigger here (line ends with "/"); provider must show the next level.
+// After the dir accept the line ends with "/": pi shows the next level — the
+// provider must already offer the nested contents there.
 const e2 = await s("/chworktree src/", false);
 check("E: next level shows nested contents", !!e2 && e2.items.some((i: any) => i.value === "src/nested/" && i.label === "nested/"), JSON.stringify(e2?.items?.map((i: any) => i.label)));
-
-// F: v5 — after a command-name accept, re-trigger returns OUR items for
-// commands with completions (B) and null for arg-less commands (C); the
-// editor no longer inspects the provider's commands array (it may be wrapped).
-const appliedName = applied.lines[0]!.slice(0, applied.cursorCol);
-check("F: command-name accept leaves '/chworktree '", appliedName === "/chworktree ", JSON.stringify(appliedName));
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });
