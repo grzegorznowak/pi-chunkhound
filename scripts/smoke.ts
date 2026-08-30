@@ -83,6 +83,7 @@ async function main(): Promise<void> {
 		// Full-argument replacement contract (applyCompletion replaces the whole arg string).
 		const arg0 = await worktreeArgumentCompletions("", proj);
 		check("arg completions: empty → cwd dirs", arg0.some((c) => c.value === "src/"), JSON.stringify(arg0));
+		check("arg completions name the parameter", arg0.length > 0 && arg0[0]!.description === "worktree path (required)", JSON.stringify(arg0[0]));
 		const argBranch = await worktreeArgumentCompletions("wt ", proj);
 		check("arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
 		const argFlag = await worktreeArgumentCompletions("wt --f", proj);

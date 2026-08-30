@@ -13,25 +13,40 @@ import { sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from
 import { loadSettings } from "../chhound/settings.js";
 import type { PluginState } from "../chhound/types.js";
 
-const USAGE =
-	"/chworktree <path> [branch] [-b <new-branch>] [--from <commit-ish>] " +
-	"[--no-index] [--config <chunkhound.json>] [--force-reindex] [--refresh-baseline]";
+const HELP = [
+	"/chworktree <path> [branch] [options]",
+	"",
+	"required:",
+	"  <path>             directory for the new worktree (folder picker: TAB)",
+	"optional:",
+	"  [branch]           existing branch to check out",
+	"  -b <name>          create a new branch",
+	"  --from <ref>       base commit/branch/tag for the worktree",
+	"  --config <file>    adopt an existing chunkhound.json for this worktree",
+	"  --no-index         skip indexing (worktree only)",
+	"  --force-reindex    full re-index instead of baseline top-up",
+	"  --refresh-baseline force baseline re-prime",
+	"",
+	"Each worktree gets its own chunkhound index: baseline copy + top-up at the",
+	"branch point. Indexes live in the sandbox library, not in the worktree.",
+].join("\n");
 
 export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("chworktree", {
 		description:
-			"Create a git worktree with its own chunkhound index: baseline copy + top-up at the branch point. " +
-			"Indexes live in the pi-chhound sandbox library, not in the worktree.",
+			"Create a git worktree with its own chunkhound index. " +
+			"Usage: /chworktree <path> [branch] [-b <name>] [--from <ref>] [--config <file>] " +
+			"[--no-index] [--force-reindex] [--refresh-baseline] — /chworktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args);
 			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 
-			const wtArg = positionals[0];
-			if (!wtArg) {
-				notify(USAGE, "error");
+			if (flags["help"] || flags["h"] || !positionals[0]) {
+				notify(HELP, "info");
 				return;
 			}
+			const wtArg = positionals[0]!;
 
 			const requestedPath = path.resolve(ctx.cwd, wtArg);
 

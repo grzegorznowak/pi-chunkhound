@@ -25,7 +25,7 @@ function expandHome(p: string): string {
 export function dirCompletions(
 	rawPrefix: string,
 	cwd: string,
-	opts: { includeFiles?: boolean; limit?: number } = {},
+	opts: { includeFiles?: boolean; limit?: number; paramLabel?: string } = {},
 ): CompletionItem[] {
 	const { includeFiles = false, limit = 50 } = opts;
 	const trimmed = rawPrefix.trim();
@@ -70,10 +70,11 @@ export function dirCompletions(
 			continue;
 		}
 		if (!isDir && !includeFiles) continue;
+		const desc = isDir ? opts.paramLabel : "file";
 		out.push({
 			value: baseDisplay + name + (isDir ? "/" : ""),
 			label: name + (isDir ? "/" : ""),
-			...(isDir ? {} : { description: "file" }),
+			...(desc ? { description: desc } : {}),
 		});
 	}
 	return out;
@@ -142,7 +143,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	const repo = await resolveRepoForCompletions(cwd, nonEmpty);
 
 	// Flag value positions: "--config <file>", "-b <branch>", "--from <commit-ish>"
-	if (prev === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true }));
+	if (prev === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true, paramLabel: "config file (optional)" }));
 	if (prev === "-b") return withBase(await branchCompletions(repo));
 	if (prev === "--from") return withBase(await branchCompletions(repo, true));
 
@@ -152,7 +153,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	}
 
 	const position = nonEmpty.length - (hasTrailingSpace ? 0 : 1);
-	if (position <= 0) return withBase(dirCompletions(current, cwd));
+	if (position <= 0) return withBase(dirCompletions(current, cwd, { paramLabel: "worktree path (required)" }));
 	if (position === 1) {
 		const branches = (await branchCompletions(repo)).filter((b) => !current || b.value.startsWith(current));
 		return withBase(branches);
