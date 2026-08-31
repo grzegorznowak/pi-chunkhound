@@ -9,10 +9,11 @@
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { parseArgs } from "../chhound/args.js";
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { chhoundVersion } from "../chhound/cli.js";
+import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
@@ -29,6 +30,7 @@ import {
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
+import { mcpToolPrefix } from "../mcp/manager.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
@@ -361,6 +363,78 @@ async function main(): Promise<void> {
 		copiedFrom: b2.dbDir,
 		dbPath: dbDir,
 	});
+
+	// ── 5b. MCP bridge: real chunkhound mcp over stdio (SDK client) ────
+	section("mcp bridge integration");
+	{
+		const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+		const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+		const daemonRuntime = path.join(tmp, "daemon-runtime");
+		fs.mkdirSync(daemonRuntime, { recursive: true });
+		const mcpEnv = { ...process.env, CHUNKHOUND_DAEMON_RUNTIME_DIR: daemonRuntime } as Record<string, string>;
+		const isAlive = (pid: number) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const waitFor = async (fn: () => boolean, ms: number) => {
+			const deadline = Date.now() + ms;
+			while (Date.now() < deadline) {
+				if (fn()) return true;
+				await new Promise((r) => setTimeout(r, 200));
+			}
+			return fn();
+		};
+
+		check("mcp: tool prefix derivation", mcpToolPrefix("/home/u/wt-fix") === "chh_wt-fix", mcpToolPrefix("/home/u/wt-fix"));
+		check("mcp: tool prefix override", mcpToolPrefix("/home/u/wt-fix", "mine") === "mine");
+
+		// --no-daemon: single-process server; must exit when stdin closes.
+		const t1 = new StdioClientTransport({
+			command: chhoundBinary(),
+			args: ["mcp", wt, "--config", configPath, "--no-daemon", "--no-embeddings"],
+			cwd: wt,
+			env: mcpEnv,
+			stderr: "pipe",
+		});
+		const c1 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
+		await c1.connect(t1, { timeout: 30_000 });
+		const listed = await c1.listTools();
+		check(
+			"mcp: tools listed (no-daemon)",
+			listed.tools.some((t) => t.name === "daemon_status") && listed.tools.some((t) => t.name === "search"),
+			listed.tools.map((t) => t.name).join(","),
+		);
+		const st1 = await c1.callTool({ name: "daemon_status", arguments: {} });
+		check("mcp: daemon_status callable", JSON.stringify(st1).includes("query_ready"), JSON.stringify(st1).slice(0, 160));
+		const pid1 = t1.pid;
+		await c1.close();
+		check("mcp: child exits on close (no-daemon)", await waitFor(() => pid1 !== null && !isAlive(pid1), 10_000), `pid=${pid1}`);
+
+		// Default daemonized mode: stdio proxy + background daemon. The daemon
+		// must shut itself down (delay 0) once the client disconnects.
+		const projectHash = createHash("sha256").update(path.resolve(wt)).digest("hex").slice(0, 16);
+		const lockFile = path.join(daemonRuntime, "daemon-locks", `${projectHash}.json`);
+		const t2 = new StdioClientTransport({
+			command: chhoundBinary(),
+			args: ["mcp", wt, "--config", configPath, "--no-embeddings"],
+			cwd: wt,
+			env: mcpEnv,
+			stderr: "pipe",
+		});
+		const c2 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
+		await c2.connect(t2, { timeout: 30_000 });
+		const st2 = await c2.callTool({ name: "daemon_status", arguments: {} });
+		check("mcp: daemonized mode callable", JSON.stringify(st2).includes("query_ready"));
+		check("mcp: daemon lock registered", await waitFor(() => fs.existsSync(lockFile), 10_000), lockFile);
+		const pid2 = t2.pid;
+		await c2.close();
+		check("mcp: proxy exits on close (daemonized)", await waitFor(() => pid2 !== null && !isAlive(pid2), 10_000), `pid=${pid2}`);
+		check("mcp: daemon self-shutdown removes lock", await waitFor(() => !fs.existsSync(lockFile), 15_000), lockFile);
+	}
 
 	// ── 6. listing + prune ────────────────────────────────────────────
 	section("status: list + prune");

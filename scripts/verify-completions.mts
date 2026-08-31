@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { runGit } from "../chhound/git.ts";
-import { worktreeArgumentCompletions } from "../chhound/completions.ts";
+import { mcpArgumentCompletions, worktreeArgumentCompletions } from "../chhound/completions.ts";
 import { ChhoundArgumentProvider } from "../chhound/provider-wrap.ts";
 
 let checks = 0, failures = 0;
@@ -33,11 +33,43 @@ fs.writeFileSync(path.join(repo, "a.txt"), "a");
 await runGit(["add", "-A"], { cwd: repo });
 await runGit(["commit", "-qm", "init"], { cwd: repo });
 
+// Fixture sandbox library for /ch-mcp completions: project settings point
+// sandboxRoot at a temp dir (project shadows global), meta.json names a wt.
+const sandboxRoot = path.join(tmp, "sandboxes");
+fs.mkdirSync(path.join(cwd, ".pi", "pi-chhound"), { recursive: true });
+fs.writeFileSync(
+	path.join(cwd, ".pi", "pi-chhound", "settings.json"),
+	JSON.stringify({ version: 1, sandboxRoot }) + "\n",
+);
+const fakeWt = path.join(tmp, "wt-fix");
+const sandboxDir = path.join(sandboxRoot, "repo-wt-fix-abcdef01");
+fs.mkdirSync(sandboxDir, { recursive: true });
+fs.writeFileSync(
+	path.join(sandboxDir, "meta.json"),
+	JSON.stringify({
+		version: 1,
+		worktree: fakeWt,
+		repoRoot: cwd,
+		branch: "fix/smoke",
+		baseRef: "main",
+		baseCommit: "abc",
+		chhoundVersion: "test",
+		createdAt: new Date().toISOString(),
+		copiedFrom: "",
+		dbPath: "",
+	}) + "\n",
+);
+
 const commands = [
 	{
 		name: "chworktree",
 		description: "x",
 		getArgumentCompletions: (prefix: string) => worktreeArgumentCompletions(prefix, cwd),
+	},
+	{
+		name: "ch-mcp",
+		description: "x",
+		getArgumentCompletions: (prefix: string) => mcpArgumentCompletions(prefix, cwd),
 	},
 	{ name: "read", description: "no arg completions" },
 ];
@@ -122,6 +154,18 @@ check("L: --dest picker dirs only", !!l && !l.items.some((i: any) => i.value.end
 // M: --dest value through the wrapper (TAB force)
 const m = await w("/chworktree wt --dest ", true);
 check("M: TAB (force) in --dest value → destination picker", !!m && m.items.some((i: any) => i.value === "wt --dest src/" && i.label === "src/"), JSON.stringify(m?.items?.map((i: any) => i.label)));
+
+// N: /ch-mcp argument completions — sandbox worktrees from the fixture library
+const n = await s("/ch-mcp ", false);
+check("N: /ch-mcp lists sandbox worktrees", !!n && n.items.some((i: any) => i.value === fakeWt && i.label === "wt-fix"), JSON.stringify(n?.items?.map((i: any) => i.value)));
+const n2 = await s("/ch-mcp wt-f", false);
+check("N: /ch-mcp prefix filter", !!n2 && n2.items.some((i: any) => i.value === fakeWt), JSON.stringify(n2?.items?.map((i: any) => i.value)));
+const n3 = await s("/ch-mcp --", false);
+check("N: /ch-mcp flags offered", !!n3 && n3.items.some((i: any) => i.value === "--disconnect"), JSON.stringify(n3?.items?.map((i: any) => i.value)));
+
+// O: /ch-mcp TAB (force) through the wrapper → our picker, not pi's
+const o = await w("/ch-mcp ", true);
+check("O: TAB (force) on /ch-mcp shows sandbox", !!o && o.items.some((i: any) => i.value === fakeWt), JSON.stringify(o?.items?.map((i: any) => i.value)));
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

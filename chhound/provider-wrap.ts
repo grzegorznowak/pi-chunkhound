@@ -1,11 +1,11 @@
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
-import { worktreeArgumentCompletions } from "./completions.js";
+import { mcpArgumentCompletions, worktreeArgumentCompletions } from "./completions.js";
 
 /**
  * Commands whose argument position is owned by the plugin's completions.
- * (Only /chworktree registers argument completions today.)
+ * (/chworktree and /ch-mcp register argument completions today.)
  */
-const COMMAND_RE = /^\/chworktree /u;
+const COMMAND_RE = /^\/(chworktree|ch-mcp) /u;
 
 /**
  * Wraps pi's built-in autocomplete provider so that requests in the argument
@@ -30,8 +30,12 @@ export class ChhoundArgumentProvider implements AutocompleteProvider {
 		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
 		const match = COMMAND_RE.exec(textBeforeCursor);
 		if (match) {
+			const command = match[1]!;
 			const argumentText = textBeforeCursor.slice(match[0].length);
-			const items = await worktreeArgumentCompletions(argumentText, process.cwd());
+			const items =
+				command === "ch-mcp"
+					? await mcpArgumentCompletions(argumentText, process.cwd())
+					: await worktreeArgumentCompletions(argumentText, process.cwd());
 			if (items.length === 0) return null;
 			return { items, prefix: argumentText };
 		}

@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { closeAllMcp } from "./mcp/manager.js";
+import { registerMcpCommand } from "./mcp/command.js";
 import type { PluginState } from "./chhound/types.js";
 import { ChhoundArgumentProvider } from "./chhound/provider-wrap.js";
 import { registerSetupCommand } from "./setup/command.js";
@@ -10,6 +12,13 @@ export default function (pi: ExtensionAPI): void {
 	registerSetupCommand(pi, state);
 	registerWorktreeCommand(pi, state);
 	registerStatusCommand(pi, state);
+	registerMcpCommand(pi, state);
+
+	// Tear down any live chunkhound MCP connections on session end / /reload
+	// (chunkhound daemons shut themselves down when their client disconnects).
+	pi.on("session_shutdown", () => {
+		void closeAllMcp();
+	});
 
 	// TAB in /chworktree's argument position must show the plugin's dir picker
 	// (pristine pi's TAB opens its own file picker there). pi resets all

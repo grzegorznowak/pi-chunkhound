@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { findRepoRoot, gitRootOrNull, runGit } from "./git.js";
+import { listSandboxes } from "./sandbox.js";
+import { loadSettings } from "./settings.js";
 
 /** Structural match for pi-tui's AutocompleteItem (avoids a pi-tui type import). */
 export interface CompletionItem {
@@ -121,6 +123,52 @@ async function resolveRepoForCompletions(cwd: string, tokens: string[]): Promise
 		if (found) return found;
 	}
 	return null; // no repo anywhere — the command cannot run; show no branch items
+}
+
+/** Known /ch-mcp flags for flag-position completion. */
+export const MCP_FLAGS = ["--disconnect", "--no-daemon", "--read-only", "--prefix"] as const;
+
+/**
+ * /ch-mcp argument completions: sandbox worktrees + sandbox dir names
+ * (and the flag set when the current token starts with "-").
+ */
+export async function mcpArgumentCompletions(argumentPrefix: string, cwd: string): Promise<CompletionItem[]> {
+	const raw = argumentPrefix;
+	const tokens = raw.split(/[ \t]+/);
+	const current = tokens.length > 0 ? tokens[tokens.length - 1]! : "";
+	const base = raw.slice(0, raw.length - current.length);
+	const withBase = (items: CompletionItem[]): CompletionItem[] => items.map((i) => ({ ...i, value: base + i.value }));
+
+	if (current.startsWith("-")) {
+		return withBase(
+			MCP_FLAGS.filter((f) => f.startsWith(current)).map((f) => ({ value: f, label: f, description: "" })),
+		);
+	}
+
+	// Item values REPLACE the whole argument text (pi-tui applyCompletion), so
+	// they are full paths; typed fragments match against the last path segment
+	// (no slash typed) or the path itself (slash typed).
+	const matchesPath = (v: string): boolean =>
+		current === "" || v.startsWith(current) || (!current.includes("/") && path.basename(v).startsWith(current));
+
+	const repoRoot = await gitRootOrNull(cwd);
+	const settings = loadSettings(repoRoot ?? cwd).settings;
+	const items: CompletionItem[] = [];
+	for (const e of listSandboxes(settings)) {
+		const wt = e.meta.worktree;
+		if (matchesPath(wt)) {
+			items.push({
+				value: wt,
+				label: path.basename(wt),
+				description: `sandbox ${path.basename(e.dir)} · ${e.meta.branch}`,
+			});
+		}
+		const name = path.basename(e.dir);
+		if (name !== path.basename(wt) && name.startsWith(current)) {
+			items.push({ value: name, label: name, description: wt });
+		}
+	}
+	return items.slice(0, 50);
 }
 
 /**
