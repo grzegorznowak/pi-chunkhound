@@ -19,9 +19,9 @@ mechanics the CURe engine uses for PR sandboxes.
 
 ```
 ~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/     # baselines (per repo + base ref)
-    chhound.json  db/.chhound.db/  meta.json
+    .chunkhound.json  db/.chhound.db/  meta.json
 ~/.local/state/pi-chhound/sandboxes/<repo>-<wt>-<hash>/   # one dir per worktree index
-    chhound.json  .chhound.db/  meta.json
+    .chunkhound.json  .chhound.db/  meta.json
 ```
 
 - Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` env or settings.
@@ -48,7 +48,7 @@ mechanics the CURe engine uses for PR sandboxes.
 ## Security
 
 - **v1 stores the embedding API key** in `settings.json` and in every materialized
-  `chhound.json` (sandbox + baseline) — files are chmod 0600. Treat them as secrets;
+  `.chunkhound.json` (sandbox + baseline) — files are chmod 0600. Treat them as secrets;
   the sandbox/baseline dirs are not part of any git repo.
 - Prefer env-only if you want the key off disk: export `CHUNKHOUND_EMBEDDING__API_KEY`
   and skip the key in `/ch-setup` — materialized configs then carry no key.

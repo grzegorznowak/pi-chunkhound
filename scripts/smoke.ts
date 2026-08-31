@@ -241,6 +241,7 @@ async function main(): Promise<void> {
 		const dir = path.join(tmp, "cfg-out");
 		const dbDir = path.join(dir, ".chhound.db");
 		const p = materializeConfig(dir, { settings, dbDir });
+		check("config materialized with canonical name", path.basename(p) === ".chunkhound.json", path.basename(p));
 		const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
 		const db = cfg.database as Record<string, unknown>;
 		check("duckdb pinned", db.provider === "duckdb" && db.path === dbDir);
@@ -334,7 +335,7 @@ async function main(): Promise<void> {
 	const excludePath = await repoExcludePath(wt);
 	if (excludePath) {
 		fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-		fs.appendFileSync(excludePath, "\n.chhound/\n.chhound.json\n");
+		fs.appendFileSync(excludePath, "\n.chhound/\n.chunkhound.json\n");
 	}
 	const excl = excludePath ? fs.readFileSync(excludePath, "utf8") : "";
 	check("repo git exclude", !!excludePath && excl.includes(".chhound/"), excludePath ?? "no exclude path");
@@ -370,7 +371,7 @@ async function main(): Promise<void> {
 	await runGit(["branch", "-D", "fix/smoke"], { cwd: repo });
 	const removed = pruneSandboxes(settings);
 	check("prune removed orphan sandbox", removed.length === 1 && listSandboxes(settings).length === 0);
-	check("config path helper", sandboxConfigPath(sandboxDir).endsWith(path.join(sandboxDir, "chhound.json")));
+	check("config path helper", sandboxConfigPath(sandboxDir).endsWith(path.join(sandboxDir, ".chunkhound.json")));
 
 	// ── 7. settings round-trip (project scope, in scratch) ────────────
 	section("settings round-trip");

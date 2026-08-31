@@ -4,6 +4,13 @@ import path from "node:path";
 import { parseArgs } from "./args.js";
 import type { ChhoundSettings, EmbeddingSettings, IndexingSettings } from "./types.js";
 
+/**
+ * Canonical chunkhound config filename (chunkhound config.py discovery: CLI
+ * args > --config > local .chunkhound.json in the target dir > globals > env).
+ * The old non-dotfile name was not auto-discoverable by the chunkhound CLI.
+ */
+export const CONFIG_FILE_NAME = ".chunkhound.json";
+
 /** Sensible baseline exclusions (from chunkhound's own config, trimmed). */
 export const DEFAULT_EXCLUDES = [
 	"**/.git/**",
@@ -78,7 +85,7 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 		if (typeof emb.rerank_model === "string") e.rerankModel = emb.rerank_model;
 		if (typeof emb.api_key === "string" && emb.api_key) {
 			e.apiKey = emb.api_key;
-			warnings.push("embedding.api_key adopted — stored in settings.json and materialized chhound.json (0600).");
+			warnings.push("embedding.api_key adopted — stored in settings.json and materialized .chunkhound.json (0600).");
 		}
 		if (Object.keys(e).length > 0) adopted.embedding = e;
 	}
@@ -152,11 +159,13 @@ export function materializeConfig(dir: string, opts: MaterializeOptions): string
 	const adoptedResearch = opts.adopted?.research ?? settings.research;
 	if (adoptedResearch && Object.keys(adoptedResearch).length > 0) config.research = adoptedResearch;
 
-	const p = path.join(dir, "chhound.json");
+	const p = path.join(dir, CONFIG_FILE_NAME);
 	fs.mkdirSync(dir, { recursive: true });
 	fs.writeFileSync(p, JSON.stringify(config, null, 2) + "\n", "utf8");
 	// May contain the api key (v1) — restrict access.
 	fs.chmodSync(p, 0o600);
+	// Self-heal: remove the legacy non-dotfile name if a previous run wrote it.
+	fs.rmSync(path.join(dir, "chhound.json"), { force: true });
 	return p;
 }
 

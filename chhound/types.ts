@@ -9,7 +9,7 @@ export interface EmbeddingSettings {
 	rerankModel?: string;
 	/**
 	 * v1 decision (user): API key IS persisted — in settings.json and
-	 * materialized into chhound.json (files chmod 0600). Optional: keep it in
+	 * materialized into .chunkhound.json (files chmod 0600). Optional: keep it in
 	 * the shell env instead and leave this unset.
 	 */
 	apiKey?: string;

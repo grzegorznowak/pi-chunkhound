@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import path from "node:path";
 import { sandboxRoot, shortHash, slugify } from "./paths.js";
+import { CONFIG_FILE_NAME } from "./config.js";
 import type { ChhoundSettings, SandboxMeta } from "./types.js";
 
 /** One managed dir per worktree: config + duckdb + meta. */
@@ -11,7 +12,7 @@ export function sandboxDirFor(repoRoot: string, worktree: string, settings: Chho
 }
 
 export function sandboxConfigPath(sandboxDir: string): string {
-	return path.join(sandboxDir, "chhound.json");
+	return path.join(sandboxDir, CONFIG_FILE_NAME);
 }
 
 export function sandboxDbDir(sandboxDir: string): string {

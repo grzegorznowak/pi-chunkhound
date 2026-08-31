@@ -293,7 +293,7 @@ async function createIndexedWorktree(
 		//    info/exclude — the only one git reads for linked worktrees)
 		const excludePath = await repoExcludePath(wtPath);
 		if (excludePath) {
-			const extra = [".chhound/", ".chhound.json"].filter((p) => {
+			const extra = [".chhound/", ".chunkhound.json"].filter((p) => {
 				try {
 					return !fs.readFileSync(excludePath, "utf8").split("\n").includes(p.trim());
 				} catch {
@@ -347,6 +347,8 @@ async function createIndexedWorktree(
 				`db: ${dbDir}`,
 				`config: ${sandboxConfigPath(sandboxDir)}`,
 				`Next: cd ${wtPath} && chunkhound mcp --config ${sandboxConfigPath(sandboxDir)}`,
+				`Tip: chunkhound auto-discovers .chunkhound.json in the project dir — copy the sandbox config`,
+				`     into the worktree (it's git-excluded) and the daemon runs without --config.`,
 			].join("\n"),
 			"info",
 		);

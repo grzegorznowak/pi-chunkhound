@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chhoundApiKeyEnv, chhoundVersion } from "./cli.js";
-import { materializeConfig } from "./config.js";
+import { CONFIG_FILE_NAME, materializeConfig } from "./config.js";
 import { defaultRemoteBranch, fetchRef, gitWorktreeAdd, gitWorktreeRemove, remoteOrigin, revParse } from "./git.js";
 import { hotStartIndex } from "./hotstart.js";
 import { baseRoot, shortHash, slugify } from "./paths.js";
@@ -159,7 +159,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 	let reason = staleReason(meta, { version, baseCommit, force: opts.force, settings: opts.settings });
 	if (meta && !reason) {
 		opts.onLine?.(`baseline fresh: ${ref} @ ${meta.baseCommit.slice(0, 12)} (${version})`);
-		return { dir, dbDir, configPath: path.join(dir, "chhound.json"), meta, ref, fresh: false, reason: "fresh" };
+		return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: false, reason: "fresh" };
 	}
 
 	await withPrimeLock(dir, async () => {
@@ -196,7 +196,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 			if (!indexed) {
 				// Ensure a failed prime never leaves a half-written db behind.
 				fs.rmSync(dbDir, { recursive: true, force: true });
-				fs.rmSync(path.join(dir, "chhound.json"), { force: true });
+				fs.rmSync(path.join(dir, CONFIG_FILE_NAME), { force: true });
 			}
 		}
 		writeBaselineMeta(dir, {
@@ -211,7 +211,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 
 	meta = readBaselineMeta(dir);
 	if (!meta) throw new Error(`baseline priming failed for ${ref} (no meta written)`);
-	return { dir, dbDir, configPath: path.join(dir, "chhound.json"), meta, ref, fresh: true, reason: reason ?? "primed" };
+	return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: true, reason: reason ?? "primed" };
 }
 
 /** List baseline dirs (for /ch-status). One level deep: <root>/<repo>/<ref>. */
