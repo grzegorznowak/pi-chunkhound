@@ -220,6 +220,36 @@ async function main(): Promise<void> {
 		comp4.handleInput("~");
 		comp4.handleInput("/");
 		check("~ expansion in dialog completions", comp4.currentCompletions().length > 0 && comp4.currentCompletions().every((c) => c.value.startsWith("~/")));
+
+		// Generic prefilled text prompt (wizard defaults): prefill, confirm, cancel.
+		const { TextPromptComponent } = await import("../chhound/path-input.js");
+		let tpOut: string | undefined = "unset";
+		const tp = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, (v) => {
+			tpOut = v;
+		});
+		check("text prompt prefills default", tp.getValue() === "voyageai", tp.getValue());
+		tp.handleInput("x");
+		check("first printable replaces prefill", tp.getValue() === "x", tp.getValue());
+		tp.handleInput("\n");
+		check("text prompt Enter confirms edited value", tpOut === "x", String(tpOut));
+		let tpOut3: string | undefined = "unset";
+		const tp3 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, (v) => {
+			tpOut3 = v;
+		});
+		tp3.handleInput("a");
+		tp3.handleInput("n");
+		check("typing replaces prefill via buffer", tp3.getValue() === "an", tp3.getValue());
+		tp3.handleInput("\n");
+		check("buffer value confirms", tpOut3 === "an", String(tpOut3));
+		const tp4 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
+		tp4.handleInput("\b");
+		check("backspace on pristine clears field", tp4.getValue() === "", tp4.getValue());
+		let tpOut2: string | undefined = "unset";
+		const tp2 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "" }, (v) => {
+			tpOut2 = v;
+		});
+		tp2.handleInput("\x1b");
+		check("text prompt Esc cancels", tpOut2 === undefined, String(tpOut2));
 	}
 
 	// ── 3. adoptConfigFile strips secrets ─────────────────────────────

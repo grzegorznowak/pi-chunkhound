@@ -7,6 +7,7 @@ import { adoptConfigFile, CONFIG_FILE_NAME, foldAdoptedInto, materializeConfig, 
 import { listBaselines } from "../chhound/baseline.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { listSandboxes, sandboxConfigPath } from "../chhound/sandbox.js";
+import { promptText } from "../chhound/path-input.js";
 import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "../chhound/settings.js";
 import { globalSettingsPath, projectSettingsPath } from "../chhound/paths.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -154,8 +155,14 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 			// Mode C: interactive wizard (TUI only)
 			if (!flags["config"] && updates.length === 0 && !flags["api-key"] && ctx.mode === "tui" && ctx.hasUI) {
 				// Esc cancels; Enter with no typing accepts the current/default value.
-				const ask = async (title: string, current: string): Promise<string | undefined> => {
-					const v = await ctx.ui.input(title, current);
+				// Defaults are PREFILLED in the field (promptText); secret prompts
+				// start empty with a keep-hint instead of echoing the stored key.
+				const ask = async (title: string, current: string, opts?: { secret?: boolean }): Promise<string | undefined> => {
+					const v = await promptText(ctx.ui, {
+						title,
+						startValue: opts?.secret ? "" : current,
+						hint: opts?.secret && current ? "leave empty to keep the stored key" : undefined,
+					});
 					if (v === undefined) return undefined;
 					const t = v.trim();
 					return t.length > 0 ? t : current;
@@ -196,7 +203,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("Invalid output dims — cancelling.", "error");
 					return;
 				}
-				const key = await ask("API key (saved to settings — or leave empty and use CHUNKHOUND_EMBEDDING__API_KEY)", settings.embedding?.apiKey ?? "");
+				const key = await ask("API key (saved to settings — or leave empty and use CHUNKHOUND_EMBEDDING__API_KEY)", settings.embedding?.apiKey ?? "", { secret: true });
 				if (key === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
@@ -216,7 +223,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 						ctx.ui.notify("/ch-setup cancelled.", "info");
 						return;
 					}
-					llmKey = await ask("LLM API key (saved to settings — or leave empty and use env)", settings.llm?.apiKey ?? "");
+					llmKey = await ask("LLM API key (saved to settings — or leave empty and use env)", settings.llm?.apiKey ?? "", { secret: true });
 					if (llmKey === undefined) {
 						ctx.ui.notify("/ch-setup cancelled.", "info");
 						return;

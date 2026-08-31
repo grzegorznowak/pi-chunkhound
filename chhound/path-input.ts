@@ -66,6 +66,108 @@ export async function promptPath(ui: PathPromptUI, opts: PathInputOptions): Prom
 	return ui.input?.(opts.title, opts.startValue);
 }
 
+export interface TextPromptOptions {
+	title: string;
+	/** Prefill — shown IN the field (pi's ui.input second arg is only a dimmed placeholder). */
+	startValue?: string;
+	/** Optional dim hint line (e.g. 'leave empty to keep the stored key'). */
+	hint?: string;
+}
+
+/**
+ * Generic prefilled text prompt (TUI). Same chrome as promptPath but no dir
+ * completions — TAB is a plain character. Enter confirms, Esc cancels.
+ * Falls back to ctx.ui.input (placeholder) where custom is unavailable.
+ */
+export async function promptText(ui: PathPromptUI, opts: TextPromptOptions): Promise<string | undefined> {
+	if (typeof ui.custom === "function") {
+		try {
+			return await ui.custom<string | undefined>(
+				(_tui, theme, keybindings, done) => new TextPromptComponent(theme, keybindings, opts, done),
+			);
+		} catch {
+			// custom failed (non-TUI) — fall through to plain input
+		}
+	}
+	return ui.input?.(opts.title, opts.startValue);
+}
+
+export class TextPromptComponent extends Container {
+	private readonly input = new Input();
+	private readonly theme: ThemeLike;
+	private readonly kb: KeybindingsManager;
+	private readonly done: (value: string | undefined) => void;
+	private readonly startValue: string;
+	private _focused = false;
+	/** While the prefill is untouched, printable keys build this replacement buffer. */
+	private typed = "";
+	private pristine = true;
+
+	constructor(
+		theme: ThemeLike,
+		keybindings: KeybindingsManager,
+		opts: TextPromptOptions,
+		done: (value: string | undefined) => void,
+	) {
+		super();
+		this.theme = theme;
+		this.kb = keybindings;
+		this.done = done;
+		this.startValue = opts.startValue ?? "";
+		this.addChild(new BorderLine(theme));
+		this.addChild(new Text(theme.fg("accent", opts.title), 1, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(this.input);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", opts.hint ?? "Enter confirms · Esc cancels"), 1, 0));
+		this.input.setValue(this.startValue);
+	}
+
+	/** Focusable — propagate to the inner Input (IME cursor). */
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		this._focused = value;
+		this.input.focused = value;
+	}
+
+	/** Current input value (exposed for tests). */
+	getValue(): string {
+		return this.input.getValue();
+	}
+
+	handleInput(keyData: string): void {
+		if (this.kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
+			this.done(this.input.getValue());
+			return;
+		}
+		if (this.kb.matches(keyData, "tui.select.cancel")) {
+			this.done(undefined);
+			return;
+		}
+		// Prefill ergonomics (pi-tui Input has no select-all/cursor-end API and
+		// setValue leaves the cursor at 0): while the default is untouched, the
+		// first printable chars REPLACE it (type-to-replace); backspace clears.
+		if (this.pristine && this.startValue) {
+			const code = keyData.length === 1 ? keyData.charCodeAt(0) : 0;
+			if (code >= 32 && code !== 127) {
+				this.typed += keyData;
+				this.input.setValue(this.typed);
+				return;
+			}
+			if (code === 8 || code === 127) {
+				this.typed = "";
+				this.input.setValue("");
+				this.pristine = false;
+				return;
+			}
+			this.pristine = false;
+		}
+		this.input.handleInput(keyData);
+	}
+}
+
 /** Full-width border line (dialog chrome, like the built-in input dialog). */
 class BorderLine implements Component {
 	constructor(private readonly theme: ThemeLike) {}
