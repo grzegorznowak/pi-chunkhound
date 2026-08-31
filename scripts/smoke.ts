@@ -32,6 +32,7 @@ import {
 import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { mcpToolPrefix } from "../mcp/manager.js";
 import { mcpTargetLines } from "../mcp/command.js";
+import { mcpStatusLines } from "../status/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
@@ -451,6 +452,18 @@ async function main(): Promise<void> {
 			connectedText,
 		);
 		check("mcp: disconnect hint when connected", connectedLines.some((l) => l.startsWith("disconnect:")));
+
+		// /ch-status mcp connections section (pure helper).
+		const idleStatus = mcpStatusLines([]).join("\n");
+		check("status: mcp section idle", idleStatus.includes("mcp connections (0)") && idleStatus.includes("run /ch-mcp to connect"), idleStatus);
+		const liveStatus = mcpStatusLines([
+			{ worktree: wt, prefix: "chh_wt-fix", toolNames: ["chh_wt-fix_search", "chh_wt-fix_fetchurl"] },
+		]).join("\n");
+		check(
+			"status: mcp section live",
+			liveStatus.includes("mcp connections (1)") && liveStatus.includes("●") && liveStatus.includes("2 tools"),
+			liveStatus,
+		);
 	}
 
 	// ── 6. listing + prune ────────────────────────────────────────────

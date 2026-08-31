@@ -7,8 +7,22 @@ import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { baseRoot, sandboxRoot } from "../chhound/paths.js";
 import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches } from "../chhound/sandbox.js";
+import { listMcpConnections } from "../mcp/manager.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { PluginState } from "../chhound/types.js";
+
+/** MCP connection section for /ch-status (pure — smoke-tested headless). */
+export function mcpStatusLines(conns: readonly { worktree: string; prefix: string; toolNames: string[] }[]): string[] {
+	const lines = ["", `mcp connections (${conns.length}):`];
+	if (conns.length === 0) {
+		lines.push("  (none — run /ch-mcp to connect)");
+	} else {
+		for (const c of conns) {
+			lines.push(`  ● ${c.worktree} · prefix ${c.prefix} · ${c.toolNames.length} tools`);
+		}
+	}
+	return lines;
+}
 
 export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-status", {
@@ -79,6 +93,7 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 					);
 				}
 			}
+			lines.push(...mcpStatusLines(listMcpConnections()));
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
