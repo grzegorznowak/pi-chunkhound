@@ -31,6 +31,7 @@ import {
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { mcpToolPrefix } from "../mcp/manager.js";
+import { mcpTargetLines } from "../mcp/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
@@ -434,6 +435,22 @@ async function main(): Promise<void> {
 		await c2.close();
 		check("mcp: proxy exits on close (daemonized)", await waitFor(() => pid2 !== null && !isAlive(pid2), 10_000), `pid=${pid2}`);
 		check("mcp: daemon self-shutdown removes lock", await waitFor(() => !fs.existsSync(lockFile), 15_000), lockFile);
+
+		// No-argument target list (pure helper — same view the command shows).
+		const targetLines = mcpTargetLines(settings, []);
+		check("mcp: no-arg lists sandbox targets", targetLines.some((l) => l.includes(wt)), targetLines.join("\n"));
+		check("mcp: no-arg connect hint", targetLines.some((l) => l.startsWith("connect:")));
+		check("mcp: disconnect hint hidden when idle", !targetLines.some((l) => l.startsWith("disconnect:")));
+		const connectedLines = mcpTargetLines(settings, [
+			{ id: path.basename(sandboxDir), prefix: "chh_wt-fix", toolNames: ["chh_wt-fix_search"] },
+		]);
+		const connectedText = connectedLines.join("\n");
+		check(
+			"mcp: connected target marked",
+			connectedText.includes("●") && connectedText.includes("(connected)") && connectedText.includes("· 1 tools"),
+			connectedText,
+		);
+		check("mcp: disconnect hint when connected", connectedLines.some((l) => l.startsWith("disconnect:")));
 	}
 
 	// ── 6. listing + prune ────────────────────────────────────────────

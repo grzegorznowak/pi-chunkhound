@@ -3,11 +3,39 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { expandHome } from "../chhound/completions.js";
-import { listSandboxes } from "../chhound/sandbox.js";
+import { listSandboxes, fmtSize } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 import { connectMcp, disconnectMcp, listMcpConnections } from "./manager.js";
+import type { McpConnection } from "./manager.js";
+
+/**
+ * No-argument view: every sandbox is a connectable target, marked when a
+ * connection is already live. Pure — smoke-tested headless.
+ */
+export function mcpTargetLines(
+	settings: ChhoundSettings,
+	conns: readonly { id: string; prefix: string; toolNames: string[] }[],
+): string[] {
+	const sandboxes = listSandboxes(settings);
+	const lines = ["chhound MCP — available targets:"];
+	if (sandboxes.length === 0) {
+		lines.push("  (no sandboxes — run /chworktree <path> first)");
+	} else {
+		for (const s of sandboxes) {
+			const id = path.basename(s.dir);
+			const conn = conns.find((c) => c.id === id);
+			lines.push(
+				`  ${conn ? "●" : "·"} ${s.meta.worktree}${conn ? "  (connected)" : ""}`,
+				`      ${id} · ${s.meta.branch} @ ${s.meta.baseCommit.slice(0, 8)} · db ${fmtSize(s.dbSizeBytes)}${conn ? ` · prefix ${conn.prefix} · ${conn.toolNames.length} tools` : ""}`,
+			);
+		}
+	}
+	lines.push("connect: /ch-mcp <worktree or sandbox name>");
+	if (conns.length > 0) lines.push("disconnect: /ch-mcp <sandbox name> --disconnect");
+	return lines;
+}
 
 /**
  * Resolve a /ch-mcp argument to the sandboxes it names:
@@ -37,21 +65,9 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			if (loaded.issue) ctx.ui.notify(loaded.issue, "warning");
 			const settings = loaded.settings;
 
-			// No argument → status.
+			// No argument → every sandbox as a selectable target.
 			if (positionals.length === 0) {
-				const conns = listMcpConnections();
-				const lines = ["chhound MCP connections:"];
-				if (conns.length === 0) {
-					lines.push("  (none — run /ch-mcp <worktree> to connect)");
-				} else {
-					for (const c of conns) {
-						lines.push(
-							`  ✓ ${c.id} → ${c.worktree}`,
-							`      prefix ${c.prefix} · ${c.toolNames.length} tools · since ${c.connectedAt.slice(0, 19).replace("T", " ")} · pid ${c.transport.pid ?? "?"}`,
-						);
-					}
-				}
-				ctx.ui.notify(lines.join("\n"), "info");
+				ctx.ui.notify(mcpTargetLines(settings, listMcpConnections()).join("\n"), "info");
 				return;
 			}
 
