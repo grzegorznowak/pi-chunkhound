@@ -193,6 +193,16 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 					return;
 				}
 			}
+			// No branch given: git derives one from the worktree path's basename
+			// ("<path>/pi-agenticoding-wt" → branch pi-agenticoding-wt). Run that
+			// through the same in-use resolution so a second worktree on the
+			// path-derived branch can't collide (the reported failure mode).
+			if (!branch && !createBranch && !commitIsh) {
+				const derived = path.basename(wtPath);
+				const choice = await resolveBranchChoice(repoRoot, derived, notify);
+				branch = choice.branch;
+				createBranch = choice.createBranch;
+			}
 
 			await createIndexedWorktree(ctx, state, {
 				repoRoot,
