@@ -6,7 +6,7 @@ import { baselineDbDirFor, ensureBaseline, listBaselines } from "../chhound/base
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
+import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, type PathPromptUI } from "../chhound/path-input.js";
@@ -46,6 +46,38 @@ const HELP = [
 	"Each worktree gets its own chunkhound index: baseline copy + top-up at the",
 	"branch point. Indexes live in the sandbox library, not in the worktree.",
 ].join("\n");
+
+/**
+ * Decide what `git worktree add` should do with the chosen branch name:
+ * - existing branch NOT checked out anywhere → check it out ({branch})
+ * - existing branch in use by another worktree → derive a fresh name
+ *   ({createBranch}, base-2, base-3, …) and warn — git won't check it out twice
+ * - unknown name → create it ({createBranch})
+ */
+export async function resolveBranchChoice(
+	repoRoot: string,
+	branchName: string,
+	notify: (msg: string, type: "info" | "warning" | "error") => void,
+): Promise<{ branch?: string; createBranch?: string }> {
+	const exists = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd: repoRoot });
+	if (exists.code !== 0) return { createBranch: branchName };
+	const inUseAt = (await checkedOutBranches(repoRoot)).get(branchName);
+	if (!inUseAt) return { branch: branchName };
+	const fresh = await freeBranchName(repoRoot, branchName);
+	notify(`Branch '${branchName}' is already checked out at ${inUseAt} — creating '${fresh}' instead.`, "warning");
+	return { createBranch: fresh };
+}
+
+/** First free name base-2, base-3, … (no ref and not checked out anywhere). */
+async function freeBranchName(repoRoot: string, base: string): Promise<string> {
+	const checkedOut = await checkedOutBranches(repoRoot);
+	for (let i = 2; i < 1000; i++) {
+		const candidate = `${base}-${i}`;
+		const r = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${candidate}`], { cwd: repoRoot });
+		if (r.code !== 0 && !checkedOut.has(candidate)) return candidate;
+	}
+	throw new Error(`could not derive a free branch name from '${base}'`);
+}
 
 export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("chworktree", {
@@ -137,6 +169,30 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				return;
 			}
 			if (typeof flags["from"] === "string") commitIsh = flags["from"];
+
+			// Explicit one-go choices get hard guards (no silent renaming): a
+			// branch already checked out somewhere can't be checked out again,
+			// and -b requires a name that doesn't exist as a ref yet.
+			if (branch) {
+				const inUseAt = (await checkedOutBranches(repoRoot)).get(branch);
+				if (inUseAt) {
+					notify(
+						`Branch '${branch}' is already checked out at ${inUseAt} — pick another branch or create a new one with -b.`,
+						"error",
+					);
+					return;
+				}
+			}
+			if (createBranch) {
+				const r = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${createBranch}`], { cwd: repoRoot });
+				if (r.code === 0) {
+					notify(
+						`Branch '${createBranch}' already exists — pass it as the branch argument to check it out, or use a new name with -b.`,
+						"error",
+					);
+					return;
+				}
+			}
 
 			await createIndexedWorktree(ctx, state, {
 				repoRoot,
@@ -404,9 +460,9 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 	let createBranch: string | undefined;
 	let branch: string | undefined;
 	if (branchName) {
-		const exists = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd: repoRoot });
-		if (exists.code === 0) branch = branchName;
-		else createBranch = branchName;
+		const choice = await resolveBranchChoice(repoRoot, branchName, notify);
+		branch = choice.branch;
+		createBranch = choice.createBranch;
 	}
 
 	// 3) Destination — parent folder; final dir = dest/<repo>-wt (-2 on

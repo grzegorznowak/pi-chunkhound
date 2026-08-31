@@ -16,6 +16,7 @@ import { adoptConfigFile, foldAdoptedInto, materializeConfig } from "../chhound/
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
+import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
 	findConflictingIndexed,
@@ -373,6 +374,24 @@ async function main(): Promise<void> {
 	fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
 	const branch = await currentBranch(wt);
 	check("worktree branch", branch === "fix/smoke", branch);
+
+	// Branch-in-use handling: fix/smoke is checked out at wt — the wizard must
+	// derive a fresh name instead of trying to check it out again.
+	const branchWarnings: string[] = [];
+	const inUseChoice = await resolveBranchChoice(repo, "fix/smoke", (m, t) => branchWarnings.push(`${t}: ${m}`));
+	check("in-use branch → fresh create name", inUseChoice.createBranch === "fix/smoke-2" && inUseChoice.branch === undefined, JSON.stringify(inUseChoice));
+	check("in-use branch warns", branchWarnings.some((w) => w.includes("fix/smoke-2")), branchWarnings.join("\n"));
+	const mainChoice = await resolveBranchChoice(repo, "main", () => {});
+	check("main-tree branch also in-use → fresh name", mainChoice.createBranch === "main-2", JSON.stringify(mainChoice));
+	await runGit(["branch", "free/smoke", "main"], { cwd: repo });
+	const freeChoice = await resolveBranchChoice(repo, "free/smoke", () => {});
+	check("existing unattached branch → checkout", freeChoice.branch === "free/smoke" && freeChoice.createBranch === undefined, JSON.stringify(freeChoice));
+	const freshChoice = await resolveBranchChoice(repo, "brand-new", () => {});
+	check("unknown name → create", freshChoice.createBranch === "brand-new", JSON.stringify(freshChoice));
+	// Occupy fix/smoke-2 as an unattached ref → the in-use fix/smoke must skip to -3.
+	await runGit(["branch", "fix/smoke-2", "main"], { cwd: repo });
+	const suffixed = await resolveBranchChoice(repo, "fix/smoke", () => {});
+	check("occupied suffix skips to next free", suffixed.createBranch === "fix/smoke-3", JSON.stringify(suffixed));
 
 	const branches = await branchCompletions(repo);
 	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));

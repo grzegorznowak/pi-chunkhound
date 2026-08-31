@@ -76,6 +76,23 @@ export async function gitWorktreeRemove(wtPath: string): Promise<void> {
 	if (r.code !== 0) throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
 }
 
+/**
+ * Branches checked out in ANY worktree (incl. the main tree) → worktree path.
+ * git refuses to check such a branch out into another worktree, so these are
+ * not valid "existing branch to check out" choices.
+ */
+export async function checkedOutBranches(cwd: string): Promise<Map<string, string>> {
+	const r = await runGit(["worktree", "list", "--porcelain"], { cwd });
+	const out = new Map<string, string>();
+	if (r.code !== 0) return out;
+	let wtPath = "";
+	for (const line of r.stdout.split("\n")) {
+		if (line.startsWith("worktree ")) wtPath = line.slice("worktree ".length);
+		else if (line.startsWith("branch refs/heads/")) out.set(line.slice("branch refs/heads/".length), wtPath);
+	}
+	return out;
+}
+
 /** Resolve the repo's default remote branch (e.g. "main") or undefined. */
 export async function defaultRemoteBranch(cwd: string): Promise<string | undefined> {
 	const r = await runGit(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd });
