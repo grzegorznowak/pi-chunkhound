@@ -21,6 +21,8 @@ import {
 	dirSize,
 	listSandboxes,
 	pruneSandboxes,
+	claimedRootMatches,
+	readClaimedRoot,
 	sandboxConfigPath,
 	sandboxDbDir,
 	sandboxDirFor,
@@ -365,6 +367,17 @@ async function main(): Promise<void> {
 	const sandboxes = listSandboxes(settings);
 	check("sandbox listed", sandboxes.length === 1 && sandboxes[0]!.meta.worktree === wt);
 	check("db size reported", sandboxes[0]!.dbSizeBytes > 0);
+	// chunkhound's root-claim sidecar (written at index time) — read + match helpers.
+	const claimPath = `${dbDir}.root.json`;
+	fs.writeFileSync(claimPath, JSON.stringify({ version: 1, indexed_root_path: wt }) + "\n", "utf8");
+	check("claimed root read from sidecar", readClaimedRoot(dbDir) === wt);
+	const claimed = listSandboxes(settings);
+	check("sandbox entry carries claimed root", claimed[0]!.claimedRoot === wt);
+	check("claimed root matches worktree", claimedRootMatches(claimed[0]!.claimedRoot!, wt));
+	check("mismatch detected", !claimedRootMatches(claimed[0]!.claimedRoot!, "/somewhere/else"));
+	check("trailing-slash mismatch tolerated", claimedRootMatches(`${wt}/`, wt));
+	fs.rmSync(claimPath, { force: true });
+	check("missing sidecar → unclaimed", listSandboxes(settings)[0]!.claimedRoot === undefined);
 	const baselines = listBaselines(settings);
 	check("baseline listed", baselines.length === 1 && !!baselines[0]!.meta);
 	await runGit(["worktree", "remove", "--force", wt], { cwd: repo });

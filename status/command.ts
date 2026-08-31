@@ -6,7 +6,7 @@ import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { baseRoot, sandboxRoot } from "../chhound/paths.js";
-import { fmtSize, listSandboxes, pruneSandboxes } from "../chhound/sandbox.js";
+import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { PluginState } from "../chhound/types.js";
 
@@ -52,9 +52,17 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			} else {
 				for (const s of sandboxes) {
 					const alive = fs.existsSync(s.meta.worktree) ? "✓" : "✗ gone";
+					let rootTxt: string;
+					if (!s.claimedRoot) {
+						rootTxt = "root unclaimed — run chunkhound index from the worktree";
+					} else if (claimedRootMatches(s.claimedRoot, s.meta.worktree)) {
+						rootTxt = `root ${s.claimedRoot}`;
+					} else {
+						rootTxt = `⚠ root ${s.claimedRoot} ≠ worktree — run chunkhound index/mcp from ${s.claimedRoot}`;
+					}
 					lines.push(
 						`  ${alive} ${path.basename(s.dir)} → ${s.meta.worktree}`,
-						`      ${s.meta.branch} @ base ${s.meta.baseCommit.slice(0, 8)} · db ${fmtSize(s.dbSizeBytes)} · ${s.meta.createdAt.slice(0, 10)}`,
+						`      ${s.meta.branch} @ base ${s.meta.baseCommit.slice(0, 8)} · db ${fmtSize(s.dbSizeBytes)} · ${s.meta.createdAt.slice(0, 10)} · ${rootTxt}`,
 					);
 				}
 			}

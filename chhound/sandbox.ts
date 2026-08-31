@@ -46,6 +46,30 @@ export interface SandboxEntry {
 	dir: string;
 	meta: SandboxMeta;
 	dbSizeBytes: number;
+	/** chunkhound's claimed indexed root from the `<db>.root.json` sidecar (absent = not yet claimed). */
+	claimedRoot?: string;
+}
+
+/**
+ * chunkhound claims a duckdb dir for an indexed root via a sibling sidecar
+ * (`<dbfile>.root.json`, written at index time). Returns the claimed root or
+ * undefined when the db was never indexed (or the sidecar is unreadable).
+ */
+export function readClaimedRoot(dbPath: string): string | undefined {
+	try {
+		const raw: unknown = JSON.parse(fs.readFileSync(`${dbPath}.root.json`, "utf8"));
+		if (typeof raw !== "object" || raw === null) return undefined;
+		const root = (raw as { indexed_root_path?: unknown }).indexed_root_path;
+		return typeof root === "string" && root.length > 0 ? root : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Sidecar roots are as_posix'd and normalized; worktree paths may differ in separators/trailing slash. */
+export function claimedRootMatches(claimedRoot: string, worktree: string): boolean {
+	const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+	return norm(claimedRoot) === norm(worktree);
 }
 
 export function dirSize(p: string): number {
@@ -68,7 +92,9 @@ export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
 		const dir = path.join(root, name);
 		if (!fs.statSync(dir).isDirectory()) continue;
 		const meta = readSandboxMeta(dir);
-		if (meta) out.push({ dir, meta, dbSizeBytes: dirSize(meta.dbPath) });
+		if (meta) {
+			out.push({ dir, meta, dbSizeBytes: dirSize(meta.dbPath), claimedRoot: readClaimedRoot(meta.dbPath) });
+		}
 	}
 	return out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt));
 }
