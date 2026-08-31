@@ -165,7 +165,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
-				const model = await ask("Embedding model", settings.embedding?.model ?? "voyage-3.5");
+				const model = await ask("Embedding model", settings.embedding?.model ?? "voyage-4-lite");
 				if (model === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
