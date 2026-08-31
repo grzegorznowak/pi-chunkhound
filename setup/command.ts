@@ -1,16 +1,54 @@
 import * as fs from "node:fs";
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { runChhound } from "../chhound/cli.js";
-import { adoptConfigFile, foldAdoptedInto, materializeTempConfig } from "../chhound/config.js";
+import { adoptConfigFile, CONFIG_FILE_NAME, foldAdoptedInto, materializeConfig, materializeTempConfig } from "../chhound/config.js";
+import { listBaselines } from "../chhound/baseline.js";
 import { gitRootOrNull } from "../chhound/git.js";
+import { listSandboxes, sandboxConfigPath } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "../chhound/settings.js";
 import { globalSettingsPath, projectSettingsPath } from "../chhound/paths.js";
-import type { PluginState } from "../chhound/types.js";
+import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 
 const USAGE =
 	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] " +
+	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
 	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--api-key <key>] [--verify] [--project] [--reset]";
+
+/**
+ * Re-materialize every sandbox + baseline config from current settings,
+ * preserving sections the plugin does not own (research, custom keys).
+ * Called by /ch-setup after saving — existing indexes pick up e.g. an llm
+ * section without a recreate.
+ */
+export function refreshMaterializedConfigs(settings: ChhoundSettings): string[] {
+	const updated: string[] = [];
+	for (const s of listSandboxes(settings)) {
+		const p = sandboxConfigPath(s.dir);
+		materializeConfig(s.dir, { settings, dbDir: s.meta.dbPath, preserve: preservedSections(p) });
+		updated.push(p);
+	}
+	for (const b of listBaselines(settings)) {
+		const p = path.join(b.dir, CONFIG_FILE_NAME);
+		materializeConfig(b.dir, { settings, dbDir: path.join(b.dir, "db", ".chhound.db"), preserve: preservedSections(p) });
+		updated.push(p);
+	}
+	return updated;
+}
+
+function preservedSections(p: string): Record<string, unknown> {
+	try {
+		const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+		const owned = new Set(["embedding", "llm", "indexing", "database"]);
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(raw)) if (!owned.has(k)) out[k] = v;
+		return out;
+	} catch {
+		return {};
+	}
+}
 
 export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-setup", {
@@ -67,6 +105,19 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				settings.embedding = { ...(settings.embedding ?? {}), rerankModel: flags["rerank-model"] };
 				updates.push(`rerank_model=${flags["rerank-model"]}`);
 			}
+			if (typeof flags["llm-provider"] === "string") {
+				settings.llm = { ...(settings.llm ?? {}), provider: flags["llm-provider"] };
+				updates.push(`llm.provider=${flags["llm-provider"]}`);
+			}
+			if (typeof flags["llm-model"] === "string") {
+				settings.llm = { ...(settings.llm ?? {}), model: flags["llm-model"] };
+				updates.push(`llm.model=${flags["llm-model"]}`);
+			}
+			if (typeof flags["llm-api-key"] === "string") {
+				settings.llm = { ...(settings.llm ?? {}), apiKey: flags["llm-api-key"] };
+				summary.push("llm api key saved to settings (0600)");
+				updates.push("llm-api-key");
+			}
 			if (typeof flags["baseline-ref"] === "string") {
 				settings.baseline = { ...(settings.baseline ?? {}), ref: flags["baseline-ref"] };
 				updates.push(`baseline.ref=${flags["baseline-ref"]}`);
@@ -119,6 +170,27 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
+				// LLM section (optional) — research tools (code_research/websearch/
+				// fetchurl) only appear when an llm provider is configured.
+				const llmProvider = await ask("LLM provider for research tools (Enter to skip)", settings.llm?.provider ?? "");
+				if (llmProvider === undefined) {
+					ctx.ui.notify("/ch-setup cancelled.", "info");
+					return;
+				}
+				let llmModel: string | undefined;
+				let llmKey: string | undefined;
+				if (llmProvider) {
+					llmModel = await ask("LLM model (Enter for default — used for utility + synthesis)", settings.llm?.model ?? "");
+					if (llmModel === undefined) {
+						ctx.ui.notify("/ch-setup cancelled.", "info");
+						return;
+					}
+					llmKey = await ask("LLM API key (saved to settings — or leave empty and use env)", settings.llm?.apiKey ?? "");
+					if (llmKey === undefined) {
+						ctx.ui.notify("/ch-setup cancelled.", "info");
+						return;
+					}
+				}
 				const baseRef = await ask("Baseline ref (Enter for repo default)", settings.baseline?.ref ?? "");
 				if (baseRef === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
@@ -134,6 +206,15 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					state.apiKey = key;
 					settings.embedding = { ...(settings.embedding ?? {}), apiKey: key };
 				}
+				if (llmProvider) {
+					settings.llm = {
+						...(settings.llm ?? {}),
+						provider: llmProvider,
+						...(llmModel ? { model: llmModel } : {}),
+						...(llmKey ? { apiKey: llmKey } : {}),
+					};
+					summary.push(`llm: ${llmProvider}/${llmModel || "default"}${llmKey ? " + key saved to settings (0600)" : " (key via env)"}`);
+				}
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
 				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""}`, key ? "api key saved to settings (0600)" : "api key: use CHUNKHOUND_EMBEDDING__API_KEY env");
 				updates.push("interactive");
@@ -143,6 +224,8 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 			if (changed) {
 				const p = saveSettings(settings, scope, projectRoot);
 				summary.unshift(`saved settings → ${p}`);
+				const refreshed = refreshMaterializedConfigs(settings);
+				if (refreshed.length > 0) summary.push(`refreshed ${refreshed.length} sandbox/baseline config(s)`);
 			} else if (!flags["verify"]) {
 				// Nothing to do: report current state + usage.
 				const lines = [
@@ -150,6 +233,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					"",
 					`settings: ${globalSettingsPath()}${loaded.projectPath ? ` + ${loaded.projectPath}` : ""}`,
 					`embedding: ${settings.embedding?.provider ?? "—"}/${settings.embedding?.model ?? "—"}`,
+					`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "— (research tools disabled)"}`,
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
 					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
 				];

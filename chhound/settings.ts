@@ -18,6 +18,7 @@ export function mergeSettings(base: ChhoundSettings, overlay: Partial<ChhoundSet
 		...overlay,
 		version: SETTINGS_VERSION,
 		embedding: { ...(base.embedding ?? {}), ...(overlay.embedding ?? {}) },
+		llm: { ...(base.llm ?? {}), ...(overlay.llm ?? {}) },
 		indexing: { ...(base.indexing ?? {}), ...(overlay.indexing ?? {}) },
 		research: { ...(base.research ?? {}), ...(overlay.research ?? {}) },
 		baseline: { ...(base.baseline ?? {}), ...(overlay.baseline ?? {}) },

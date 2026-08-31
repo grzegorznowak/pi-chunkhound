@@ -15,6 +15,14 @@ export interface EmbeddingSettings {
 	apiKey?: string;
 }
 
+/** chunkhound `llm` section — enables the research tools (code_research/websearch/fetchurl). */
+export interface LlmSettings {
+	provider?: string;
+	/** Defaults both utility + synthesis models in chunkhound. */
+	model?: string;
+	apiKey?: string;
+}
+
 export interface IndexingSettings {
 	include?: string[];
 	exclude?: string[];
@@ -32,6 +40,7 @@ export interface BaselineSettings {
 export interface ChhoundSettings {
 	version: typeof SETTINGS_VERSION;
 	embedding?: EmbeddingSettings;
+	llm?: LlmSettings;
 	indexing?: IndexingSettings;
 	research?: Record<string, unknown>;
 	baseline?: BaselineSettings;

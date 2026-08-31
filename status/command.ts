@@ -57,6 +57,7 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 				`embedding: ${settings.embedding?.provider && settings.embedding?.model
 					? `${settings.embedding.provider}/${settings.embedding.model}`
 					: "not configured — run /ch-setup"}`,
+				`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "not configured — research tools need it (/ch-setup)"}`,
 				`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
 				"",
 				`sandboxes (${sandboxes.length}):`,

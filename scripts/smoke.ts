@@ -12,7 +12,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseArgs } from "../chhound/args.js";
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
-import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
+import { adoptConfigFile, foldAdoptedInto, materializeConfig } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
@@ -33,6 +33,7 @@ import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { mcpToolPrefix } from "../mcp/manager.js";
 import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
 import { mcpStatusLines } from "../status/command.js";
+import { refreshMaterializedConfigs } from "../setup/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
@@ -261,6 +262,33 @@ async function main(): Promise<void> {
 		const cfg2 = JSON.parse(fs.readFileSync(p2, "utf8")) as Record<string, unknown>;
 		check("api_key materialized when set", (cfg2.embedding as Record<string, unknown>).api_key === "sk-KEY");
 		check("config file 0600", (fs.statSync(p2).mode & 0o777) === 0o600, `mode=${(fs.statSync(p2).mode & 0o777).toString(8)}`);
+
+		// LLM section (research tools) + preserve of non-owned sections.
+		const dir3 = path.join(tmp, "cfg-llm");
+		const p3 = materializeConfig(dir3, {
+			settings: { ...settings, llm: { provider: "openai", model: "gpt-5", apiKey: "sk-LLM" } },
+			dbDir: path.join(dir3, ".chhound.db"),
+		});
+		const cfg3 = JSON.parse(fs.readFileSync(p3, "utf8")) as Record<string, unknown>;
+		const llm3 = cfg3.llm as Record<string, unknown>;
+		check("llm block materialized", llm3?.provider === "openai" && llm3?.model === "gpt-5" && llm3?.api_key === "sk-LLM", JSON.stringify(cfg3));
+		const p3b = materializeConfig(dir3, {
+			settings,
+			dbDir: path.join(dir3, ".chhound.db"),
+			preserve: { research: { enabled: true } },
+		});
+		const cfg3b = JSON.parse(fs.readFileSync(p3b, "utf8")) as Record<string, unknown>;
+		check("preserve merges extra sections", (cfg3b.research as Record<string, unknown>)?.enabled === true);
+		check("preserve does not carry llm (owned keys rewritten)", (cfg3b.llm as Record<string, unknown> | undefined) === undefined);
+
+		// --config adoption: llm section folds in, secrets warned.
+		const adoptSrc = path.join(tmp, "adopt.json");
+		fs.writeFileSync(adoptSrc, JSON.stringify({ embedding: { provider: "voyageai" }, llm: { provider: "anthropic", api_key: "sk-ADOPT" }, database: { provider: "duckdb" } }));
+		const adopted = adoptConfigFile(adoptSrc, tmp);
+		check("adopt folds llm section", adopted.adopted.llm?.provider === "anthropic" && adopted.adopted.llm?.apiKey === "sk-ADOPT");
+		check("adopt warns on llm api_key", adopted.warnings.some((w) => w.includes("llm.api_key")));
+		const folded = foldAdoptedInto({ version: 1 }, adopted.adopted);
+		check("foldAdoptedInto carries llm", folded.llm?.provider === "anthropic");
 	}
 
 	// ── 4. scratch git repo + baseline prime ─────────────────────────
@@ -471,6 +499,17 @@ async function main(): Promise<void> {
 			liveStatus.includes("mcp connections (1)") && liveStatus.includes("●") && liveStatus.includes("2 tools"),
 			liveStatus,
 		);
+
+		// /ch-setup refresh: existing sandbox + baseline configs get the llm
+		// section from updated settings; non-owned sections survive.
+		const withCustom = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+		withCustom.research = { enabled: true };
+		fs.writeFileSync(configPath, JSON.stringify(withCustom, null, 2));
+		const refreshed = refreshMaterializedConfigs({ ...settings, llm: { provider: "openai", model: "gpt-5" } });
+		check("refresh: sandbox config re-materialized", refreshed.includes(configPath), refreshed.join(","));
+		const cfgAfter = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+		check("refresh: llm section added", (cfgAfter.llm as Record<string, unknown>)?.provider === "openai");
+		check("refresh: custom sections preserved", (cfgAfter.research as Record<string, unknown>)?.enabled === true);
 	}
 
 	// ── 6. listing + prune ────────────────────────────────────────────
@@ -511,6 +550,8 @@ async function main(): Promise<void> {
 	check("api key round-trips through settings", loaded.settings.embedding?.apiKey === "sk-ROUNDTRIP");
 	check("settings file 0600", (fs.statSync(saved).mode & 0o777) === 0o600, `mode=${(fs.statSync(saved).mode & 0o777).toString(8)}`);
 	check("project path used", loaded.projectPath === saved);
+	const savedLlm = saveSettings({ ...settings, llm: { provider: "gemini", model: "gemini-2.5-pro" } }, "project", proj);
+	check("llm settings round-trip", loadSettings(proj).settings.llm?.provider === "gemini" && loadSettings(proj).settings.llm?.model === "gemini-2.5-pro", savedLlm);
 
 	// ── 8. extension loads ────────────────────────────────────────────
 	section("extension entry loads");

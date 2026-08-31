@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "./args.js";
-import type { ChhoundSettings, EmbeddingSettings, IndexingSettings } from "./types.js";
+import type { ChhoundSettings, EmbeddingSettings, IndexingSettings, LlmSettings } from "./types.js";
 
 /**
  * Canonical chunkhound config filename (chunkhound config.py discovery: CLI
@@ -37,6 +37,7 @@ export const CHHOUND_DIR_EXCLUDE = "**/.chhound/**";
 
 export interface AdoptedConfig {
 	embedding?: EmbeddingSettings;
+	llm?: LlmSettings;
 	indexing?: IndexingSettings;
 	research?: Record<string, unknown>;
 }
@@ -54,6 +55,8 @@ export interface MaterializeOptions {
 	extraExcludes?: string[];
 	/** Config adopted from an existing chunkhound.json (--config). */
 	adopted?: AdoptedConfig;
+	/** Extra top-level sections preserved from an existing config (research, custom keys). */
+	preserve?: Record<string, unknown>;
 }
 
 function dedupe(items: string[]): string[] {
@@ -90,6 +93,18 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 		if (Object.keys(e).length > 0) adopted.embedding = e;
 	}
 
+	const llm = obj.llm as Record<string, unknown> | undefined;
+	if (llm && typeof llm === "object") {
+		const l: LlmSettings = {};
+		if (typeof llm.provider === "string") l.provider = llm.provider;
+		if (typeof llm.model === "string") l.model = llm.model;
+		if (typeof llm.api_key === "string" && llm.api_key) {
+			l.apiKey = llm.api_key;
+			warnings.push("llm.api_key adopted — stored in settings.json and materialized .chunkhound.json (0600).");
+		}
+		if (Object.keys(l).length > 0) adopted.llm = l;
+	}
+
 	const idx = obj.indexing as Record<string, unknown> | undefined;
 	if (idx && typeof idx === "object") {
 		const i: IndexingSettings = {};
@@ -111,6 +126,7 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 export function foldAdoptedInto(settings: ChhoundSettings, adopted: AdoptedConfig): ChhoundSettings {
 	const next: ChhoundSettings = { ...settings };
 	if (adopted.embedding) next.embedding = { ...(settings.embedding ?? {}), ...adopted.embedding };
+	if (adopted.llm) next.llm = { ...(settings.llm ?? {}), ...adopted.llm };
 	if (adopted.indexing) next.indexing = { ...(settings.indexing ?? {}), ...adopted.indexing };
 	if (adopted.research) next.research = { ...(settings.research ?? {}), ...adopted.research };
 	return next;
@@ -124,6 +140,16 @@ function embeddingBlock(settings: ChhoundSettings): Record<string, unknown> | un
 	if (e.model) out.model = e.model;
 	if (e.rerankModel) out.rerank_model = e.rerankModel;
 	if (e.apiKey) out.api_key = e.apiKey;
+	return out;
+}
+
+function llmBlock(settings: ChhoundSettings): Record<string, unknown> | undefined {
+	const l = settings.llm;
+	if (!l || (!l.provider && !l.model && !l.apiKey)) return undefined;
+	const out: Record<string, unknown> = {};
+	if (l.provider) out.provider = l.provider;
+	if (l.model) out.model = l.model;
+	if (l.apiKey) out.api_key = l.apiKey;
 	return out;
 }
 
@@ -153,8 +179,10 @@ export function materializeConfig(dir: string, opts: MaterializeOptions): string
 
 	const config: Record<string, unknown> = {
 		...(embeddingBlock(settings) ? { embedding: embeddingBlock(settings) } : {}),
+		...(llmBlock(settings) ? { llm: llmBlock(settings) } : {}),
 		indexing,
 		database: { provider: "duckdb", path: opts.dbDir },
+		...(opts.preserve ?? {}),
 	};
 	const adoptedResearch = opts.adopted?.research ?? settings.research;
 	if (adoptedResearch && Object.keys(adoptedResearch).length > 0) config.research = adoptedResearch;
