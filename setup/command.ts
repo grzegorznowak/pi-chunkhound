@@ -12,7 +12,7 @@ import { globalSettingsPath, projectSettingsPath } from "../chhound/paths.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 
 const USAGE =
-	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] " +
+	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--output-dims N] " +
 	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
 	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--api-key <key>] [--verify] [--project] [--reset]";
 
@@ -105,6 +105,16 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				settings.embedding = { ...(settings.embedding ?? {}), rerankModel: flags["rerank-model"] };
 				updates.push(`rerank_model=${flags["rerank-model"]}`);
 			}
+			if (typeof flags["output-dims"] === "string") {
+				const dims = Number(flags["output-dims"]);
+				if (Number.isInteger(dims) && dims > 0) {
+					settings.embedding = { ...(settings.embedding ?? {}), outputDims: dims };
+					updates.push(`output_dims=${dims}`);
+				} else {
+					ctx.ui.notify(`Invalid --output-dims: ${flags["output-dims"]} (positive integer)`, "error");
+					return;
+				}
+			}
 			if (typeof flags["llm-provider"] === "string") {
 				settings.llm = { ...(settings.llm ?? {}), provider: flags["llm-provider"] };
 				updates.push(`llm.provider=${flags["llm-provider"]}`);
@@ -165,6 +175,27 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
 				}
+				// Embedding output dims (positive integer; 256 default).
+				let outputDims = settings.embedding?.outputDims ?? 256;
+				let dimsOk = false;
+				for (let attempt = 0; attempt < 3 && !dimsOk; attempt++) {
+					const dimsRaw = await ask("Embedding output dims", String(outputDims));
+					if (dimsRaw === undefined) {
+						ctx.ui.notify("/ch-setup cancelled.", "info");
+						return;
+					}
+					const dims = Number(dimsRaw);
+					if (Number.isInteger(dims) && dims > 0) {
+						outputDims = dims;
+						dimsOk = true;
+					} else if (attempt < 2) {
+						ctx.ui.notify(`Invalid output dims: ${dimsRaw} (positive integer) — try again.`, "warning");
+					}
+				}
+				if (!dimsOk) {
+					ctx.ui.notify("Invalid output dims — cancelling.", "error");
+					return;
+				}
 				const key = await ask("API key (saved to settings — or leave empty and use CHUNKHOUND_EMBEDDING__API_KEY)", settings.embedding?.apiKey ?? "");
 				if (key === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
@@ -201,6 +232,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					provider,
 					model,
 					...(rerank ? { rerankModel: rerank } : {}),
+					outputDims,
 				};
 				if (key) {
 					state.apiKey = key;
@@ -216,7 +248,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					summary.push(`llm: ${llmProvider}/${llmModel || "default"}${llmKey ? " + key saved to settings (0600)" : " (key via env)"}`);
 				}
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
-				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""}`, key ? "api key saved to settings (0600)" : "api key: use CHUNKHOUND_EMBEDDING__API_KEY env");
+				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""} · dims ${outputDims}`, key ? "api key saved to settings (0600)" : "api key: use CHUNKHOUND_EMBEDDING__API_KEY env");
 				updates.push("interactive");
 			}
 
@@ -232,10 +264,11 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					USAGE,
 					"",
 					`settings: ${globalSettingsPath()}${loaded.projectPath ? ` + ${loaded.projectPath}` : ""}`,
-					`embedding: ${settings.embedding?.provider ?? "—"}/${settings.embedding?.model ?? "—"}`,
+					`embedding: ${settings.embedding?.provider ?? "—"}/${settings.embedding?.model ?? "—"}${settings.embedding?.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`,
 					`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "— (research tools disabled)"}`,
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
 					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
+					`llm api key: ${settings.llm?.apiKey ? "stored in settings ✓" : "not set (env or --llm-api-key)"}`,
 				];
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;

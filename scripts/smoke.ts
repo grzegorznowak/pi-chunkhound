@@ -281,6 +281,16 @@ async function main(): Promise<void> {
 		check("preserve merges extra sections", (cfg3b.research as Record<string, unknown>)?.enabled === true);
 		check("preserve does not carry llm (owned keys rewritten)", (cfg3b.llm as Record<string, unknown> | undefined) === undefined);
 
+		// output_dims: materialized when set, absent when unset.
+		const dir4 = path.join(tmp, "cfg-dims");
+		const p4 = materializeConfig(dir4, { settings: { ...settings, embedding: { provider: "voyageai", outputDims: 256 } }, dbDir: path.join(dir4, ".chhound.db") });
+		const cfg4 = JSON.parse(fs.readFileSync(p4, "utf8")) as Record<string, unknown>;
+		check("output_dims materialized", (cfg4.embedding as Record<string, unknown>).output_dims === 256, JSON.stringify(cfg4));
+		const p4b = materializeConfig(dir4, { settings, dbDir: path.join(dir4, ".chhound.db") });
+		const cfg4b = JSON.parse(fs.readFileSync(p4b, "utf8")) as Record<string, unknown>;
+		const emb4b = cfg4b.embedding as Record<string, unknown> | undefined;
+		check("no output_dims without setting", emb4b === undefined || emb4b.output_dims === undefined, JSON.stringify(cfg4b));
+
 		// --config adoption: llm section folds in, secrets warned.
 		const adoptSrc = path.join(tmp, "adopt.json");
 		fs.writeFileSync(adoptSrc, JSON.stringify({ embedding: { provider: "voyageai" }, llm: { provider: "anthropic", api_key: "sk-ADOPT" }, database: { provider: "duckdb" } }));

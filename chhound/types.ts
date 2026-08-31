@@ -7,6 +7,8 @@ export interface EmbeddingSettings {
 	model?: string;
 	/** camelCase twin of chunkhound's `rerank_model`. */
 	rerankModel?: string;
+	/** chunkhound `output_dims` — embedding dimension override (e.g. 256). */
+	outputDims?: number;
 	/**
 	 * v1 decision (user): API key IS persisted — in settings.json and
 	 * materialized into .chunkhound.json (files chmod 0600). Optional: keep it in

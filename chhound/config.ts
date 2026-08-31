@@ -86,6 +86,7 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 		if (typeof emb.provider === "string") e.provider = emb.provider;
 		if (typeof emb.model === "string") e.model = emb.model;
 		if (typeof emb.rerank_model === "string") e.rerankModel = emb.rerank_model;
+		if (typeof emb.output_dims === "number" && Number.isInteger(emb.output_dims) && emb.output_dims > 0) e.outputDims = emb.output_dims;
 		if (typeof emb.api_key === "string" && emb.api_key) {
 			e.apiKey = emb.api_key;
 			warnings.push("embedding.api_key adopted — stored in settings.json and materialized .chunkhound.json (0600).");
@@ -139,6 +140,7 @@ function embeddingBlock(settings: ChhoundSettings): Record<string, unknown> | un
 	if (e.provider) out.provider = e.provider;
 	if (e.model) out.model = e.model;
 	if (e.rerankModel) out.rerank_model = e.rerankModel;
+	if (e.outputDims !== undefined && Number.isInteger(e.outputDims) && e.outputDims > 0) out.output_dims = e.outputDims;
 	if (e.apiKey) out.api_key = e.apiKey;
 	return out;
 }
