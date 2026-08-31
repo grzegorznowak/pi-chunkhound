@@ -31,7 +31,7 @@ import {
 } from "../chhound/sandbox.js";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { mcpToolPrefix } from "../mcp/manager.js";
-import { mcpTargetLines } from "../mcp/command.js";
+import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
 import { mcpStatusLines } from "../status/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
@@ -452,6 +452,13 @@ async function main(): Promise<void> {
 			connectedText,
 		);
 		check("mcp: disconnect hint when connected", connectedLines.some((l) => l.startsWith("disconnect:")));
+
+		// Interactive picker options: one per sandbox, in list order.
+		const opts = mcpSelectOptions(settings, []);
+		check("mcp: picker option per sandbox", opts.length === 1 && opts[0]!.includes(wt) && !opts[0]!.includes("●"), JSON.stringify(opts));
+		const optsConnected = mcpSelectOptions(settings, [{ id: path.basename(sandboxDir) }]);
+		check("mcp: picker marks connected", optsConnected.length === 1 && optsConnected[0]!.includes("●") && optsConnected[0]!.includes("(connected)"), JSON.stringify(optsConnected));
+		check("mcp: picker empty library", mcpSelectOptions({ version: 1, sandboxRoot: path.join(tmp, "empty-sandboxes") }, []).length === 0);
 
 		// /ch-status mcp connections section (pure helper).
 		const idleStatus = mcpStatusLines([]).join("\n");

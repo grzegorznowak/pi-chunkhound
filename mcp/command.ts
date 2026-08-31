@@ -12,7 +12,8 @@ import type { McpConnection } from "./manager.js";
 
 /**
  * No-argument view: every sandbox is a connectable target, marked when a
- * connection is already live. Pure — smoke-tested headless.
+ * connection is already live. Shown when the interactive picker is
+ * unavailable (non-TUI contexts). Pure — smoke-tested headless.
  */
 export function mcpTargetLines(
 	settings: ChhoundSettings,
@@ -37,6 +38,14 @@ export function mcpTargetLines(
 	return lines;
 }
 
+/** One select-dialog option per sandbox, in listSandboxes order. */
+export function mcpSelectOptions(settings: ChhoundSettings, conns: readonly { id: string }[]): string[] {
+	return listSandboxes(settings).map((s) => {
+		const connected = conns.some((c) => c.id === path.basename(s.dir));
+		return `${connected ? "●" : "·"} ${s.meta.worktree}${connected ? " (connected)" : ""}`;
+	});
+}
+
 /**
  * Resolve a /ch-mcp argument to the sandboxes it names:
  * an absolute/relative worktree path, a sandbox dir name, or a worktree
@@ -53,11 +62,48 @@ export function resolveSandboxMatches(arg: string, settings: ChhoundSettings, cw
 	);
 }
 
+type McpCmdCtx = {
+	ui: {
+		notify(message: string, type?: "info" | "warning" | "error"): void;
+		select?(title: string, options: string[]): Promise<string | undefined>;
+	};
+};
+
+async function connectEntry(
+	pi: ExtensionAPI,
+	ctx: McpCmdCtx,
+	state: PluginState,
+	entry: SandboxEntry,
+	flags: Record<string, string | true>,
+): Promise<void> {
+	const id = path.basename(entry.dir);
+	if (listMcpConnections().some((c) => c.id === id)) {
+		ctx.ui.notify(`Already connected: ${id} — /ch-mcp ${id} --disconnect to stop.`, "info");
+		return;
+	}
+	try {
+		const conn = await connectMcp(pi, entry, {
+			prefix: typeof flags["prefix"] === "string" ? flags["prefix"] : undefined,
+			noDaemon: flags["no-daemon"] === true,
+			readOnly: flags["read-only"] === true,
+			apiKey: state.apiKey,
+		});
+		ctx.ui.notify(
+			`Connected chhound MCP '${conn.id}' → ${conn.worktree}\n` +
+				`tools: ${conn.toolNames.join(", ")}\n` +
+				`disconnect: /ch-mcp ${conn.id} --disconnect`,
+			"info",
+		);
+	} catch (e) {
+		ctx.ui.notify(`Connect failed: ${(e as Error).message}`, "error");
+	}
+}
+
 export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-mcp", {
 		description:
 			"Connect pi to a sandbox's chunkhound index over MCP. " +
-			"Usage: /ch-mcp [<worktree|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]",
+			"Usage: /ch-mcp [<worktree|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]] — no argument opens the target picker",
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args);
 			const repoRoot = await gitRootOrNull(ctx.cwd);
@@ -65,8 +111,28 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			if (loaded.issue) ctx.ui.notify(loaded.issue, "warning");
 			const settings = loaded.settings;
 
-			// No argument → every sandbox as a selectable target.
+			// No argument → pick a target interactively (list fallback).
 			if (positionals.length === 0) {
+				const sandboxes = listSandboxes(settings);
+				if (sandboxes.length === 0) {
+					ctx.ui.notify("chhound MCP — no sandboxes yet (run /chworktree <path> first).", "warning");
+					return;
+				}
+				if (typeof ctx.ui.select === "function") {
+					const options = mcpSelectOptions(settings, listMcpConnections());
+					const choice = await ctx.ui.select("Connect chhound MCP to:", options);
+					if (choice === undefined) {
+						ctx.ui.notify("Cancelled.", "info");
+						return;
+					}
+					const entry = sandboxes[options.indexOf(choice)];
+					if (!entry) {
+						ctx.ui.notify("Selection did not match a sandbox — cancelling.", "error");
+						return;
+					}
+					await connectEntry(pi, ctx, state, entry, {});
+					return;
+				}
 				ctx.ui.notify(mcpTargetLines(settings, listMcpConnections()).join("\n"), "info");
 				return;
 			}
@@ -101,22 +167,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 				return;
 			}
 
-			try {
-				const conn = await connectMcp(pi, entry, {
-					prefix: typeof flags["prefix"] === "string" ? flags["prefix"] : undefined,
-					noDaemon: flags["no-daemon"] === true,
-					readOnly: flags["read-only"] === true,
-					apiKey: state.apiKey,
-				});
-				ctx.ui.notify(
-					`Connected chhound MCP '${conn.id}' → ${conn.worktree}\n` +
-						`tools: ${conn.toolNames.join(", ")}\n` +
-						`disconnect: /ch-mcp ${conn.id} --disconnect`,
-					"info",
-				);
-			} catch (e) {
-				ctx.ui.notify(`Connect failed: ${(e as Error).message}`, "error");
-			}
+			await connectEntry(pi, ctx, state, entry, flags);
 		},
 	});
 }
