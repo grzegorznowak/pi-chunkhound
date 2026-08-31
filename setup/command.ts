@@ -157,11 +157,11 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				// Esc cancels; Enter with no typing accepts the current/default value.
 				// Defaults are PREFILLED in the field (promptText); secret prompts
 				// start empty with a keep-hint instead of echoing the stored key.
-				const ask = async (title: string, current: string, opts?: { secret?: boolean }): Promise<string | undefined> => {
+				const ask = async (title: string, current: string, opts?: { secret?: boolean; hint?: string }): Promise<string | undefined> => {
 					const v = await promptText(ctx.ui, {
 						title,
 						startValue: opts?.secret ? "" : current,
-						hint: opts?.secret && current ? "leave empty to keep the stored key" : undefined,
+						hint: opts?.secret && current ? "leave empty to keep the stored key" : opts?.hint,
 					});
 					if (v === undefined) return undefined;
 					const t = v.trim();
@@ -229,7 +229,14 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 						return;
 					}
 				}
-				const baseRef = await ask("Baseline ref (Enter for repo default)", settings.baseline?.ref ?? "");
+				// Baseline ref: the shared index cache is primed at this branch's
+				// commit and every new worktree is seeded from a copy of it, so it
+				// should be the branch worktrees branch off (usually the mainline).
+				const baseRef = await ask(
+					"Baseline ref (branch the shared index cache is primed at)",
+					settings.baseline?.ref ?? "",
+					{ hint: "every new worktree starts from a copy of this baseline; auto-refreshed when the branch moves (Enter = repo default branch)" },
+				);
 				if (baseRef === undefined) {
 					ctx.ui.notify("/ch-setup cancelled.", "info");
 					return;
