@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { listBaselines } from "../chhound/baseline.js";
+import { listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
@@ -28,7 +28,8 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 	pi.registerCommand("ch-status", {
 		description:
 			"List pi-chhound sandboxes and baselines (index library). " +
-			"Usage: /ch-status [--prune] (--prune removes sandboxes whose worktree is gone)",
+			"Usage: /ch-status [--prune] (--prune removes orphan sandboxes and garbage baselines: " +
+			"incomplete, dead repo, superseded)",
 		handler: async (args, ctx) => {
 			const { flags } = parseArgs(args);
 			const repoRoot = await gitRootOrNull(ctx.cwd);
@@ -38,12 +39,18 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 
 			if (flags["prune"] === true) {
 				const removed = pruneSandboxes(settings);
-				ctx.ui.notify(
-					removed.length > 0
-						? `Pruned ${removed.length} sandbox(es):\n${removed.join("\n")}`
-						: "Nothing to prune — all sandboxes have a live worktree.",
-					"info",
-				);
+				const removedBases = sweepBaselineGarbage(settings);
+				if (removed.length > 0 || removedBases.length > 0) {
+					ctx.ui.notify(
+						[
+							removed.length > 0 ? `Pruned ${removed.length} sandbox(es):\n${removed.join("\n")}` : "",
+							removedBases.length > 0 ? `Pruned ${removedBases.length} baseline(s):\n${removedBases.join("\n")}` : "",
+						].filter(Boolean).join("\n"),
+						"info",
+					);
+				} else {
+					ctx.ui.notify("Nothing to prune — all sandboxes have a live worktree and all baselines are valid.", "info");
+				}
 			}
 
 			const version = await chhoundVersion();
@@ -89,10 +96,14 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			} else {
 				for (const b of baselines) {
 					const meta = b.meta;
+					// Dir layout is <baseRoot>/<repo-slug>-<hash8>/<ref> — show the
+					// repo (slug part) so multi-repo libraries are readable.
+					const repoDirName = path.basename(path.dirname(b.dir));
+					const repoName = repoDirName.length > 9 ? repoDirName.slice(0, -9) : repoDirName;
 					lines.push(
 						meta
-							? `  ${path.basename(b.dir)} @ ${meta.baseCommit.slice(0, 8)} · ${meta.chhoundVersion} · updated ${meta.updatedAt.slice(0, 10)}`
-							: `  ${path.basename(b.dir)} (no meta — incomplete)`,
+							? `  ${repoName}/${path.basename(b.dir)} @ ${meta.baseCommit.slice(0, 8)} · ${meta.chhoundVersion} · updated ${meta.updatedAt.slice(0, 10)}`
+							: `  ${repoName}/${path.basename(b.dir)} (no meta — incomplete)`,
 					);
 				}
 			}

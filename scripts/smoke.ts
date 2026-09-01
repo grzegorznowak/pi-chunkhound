@@ -12,11 +12,11 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseArgs, WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 
-import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
+import { ensureBaseline, listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
 import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
-import { currentBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
+import { currentBranch, defaultRemoteBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
@@ -477,6 +477,67 @@ async function main(): Promise<void> {
 	const baseCommit2 = (await runGit(["rev-parse", "HEAD"], { cwd: repo })).stdout;
 	const b3 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
 	check("baseline refreshed on base move", b3.fresh === true && b3.meta.baseCommit === baseCommit2, b3.reason);
+
+	// ── 4b. baseline GC + default-branch normalization ───────────────
+	section("baseline gc + default branch");
+	{
+		const bases = settings.baseRoot!;
+		const mk = (repoSlug: string, ref: string, meta?: unknown) => {
+			const d = path.join(bases, repoSlug, ref);
+			fs.mkdirSync(d, { recursive: true });
+			if (meta) fs.writeFileSync(path.join(d, "meta.json"), JSON.stringify(meta) + "\n");
+			return d;
+		};
+		// Incomplete (no meta) → garbage.
+		const noMeta = mk("junk-11111111", "main");
+		// Dead repoRoot → garbage.
+		const deadRepo = mk("junk-22222222", "main", { version: 1, repoRoot: path.join(tmp, "gone-repo"), baseRef: "main", baseCommit: "a", chhoundVersion: "v", updatedAt: "2026-01-01T00:00:00.000Z" });
+		// Live repoRoot + fresh meta → kept (distinct fake repo so it can't be
+		// superseded by the smoke's own real baseline for `repo`).
+		const fakeRepo = path.join(tmp, "fake-repo");
+		fs.mkdirSync(fakeRepo);
+		const live = mk("junk-33333333", "main", { version: 1, repoRoot: fakeRepo, baseRef: "main", baseCommit: baseCommit2, chhoundVersion: "v", updatedAt: "2026-09-01T00:00:00.000Z" });
+		// Incomplete but with a LIVE prime lock → kept (prime in flight).
+		const locked = mk("junk-44444444", "main");
+		fs.writeFileSync(path.join(locked, ".prime.lock"), String(process.pid));
+		// Superseded duplicate (same repo+ref, older updatedAt) → garbage.
+		const older = mk("junk-55555555", "main", { version: 1, repoRoot: fakeRepo, baseRef: "main", baseCommit: baseCommit2, chhoundVersion: "v", updatedAt: "2026-08-01T00:00:00.000Z" });
+
+		const removed = sweepBaselineGarbage(settings);
+		check("gc: incomplete baseline removed", removed.includes(noMeta), removed.join(","));
+		check("gc: dead-repo baseline removed", removed.includes(deadRepo), removed.join(","));
+		check("gc: live baseline kept", !removed.includes(live) && fs.existsSync(live));
+		check("gc: live-locked dir kept", !removed.includes(locked) && fs.existsSync(locked));
+		check("gc: superseded duplicate removed", removed.includes(older) && fs.existsSync(live), removed.join(","));
+		check("gc: empty parent dirs cleaned", !fs.existsSync(path.join(bases, "junk-11111111")) && !fs.existsSync(path.join(bases, "junk-22222222")));
+		// GC is safe for in-flight primes only while the lock pid is alive — a dead
+		// lock must not protect garbage.
+		fs.mkdirSync(noMeta, { recursive: true }); // re-create (first sweep removed it)
+		fs.writeFileSync(path.join(noMeta, ".prime.lock"), "999999999");
+		const removed2 = sweepBaselineGarbage(settings);
+		check("gc: dead lock does not protect garbage", removed2.includes(noMeta), removed2.join(","));
+		// Leave the library as we found it for later sections.
+		fs.rmSync(path.join(bases, "junk-33333333"), { recursive: true, force: true });
+		fs.rmSync(path.join(bases, "junk-44444444"), { recursive: true, force: true });
+
+		// defaultRemoteBranch normalization: origin/HEAD stored as
+		// ref: refs/remotes/origin/main must resolve to "main", not "remotes/origin/main".
+		const repo3 = path.join(tmp, "head-repo");
+		fs.mkdirSync(repo3);
+		await runGit(["init", "-b", "main"], { cwd: repo3 });
+		await runGit(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: repo3 });
+		check("defaultRemoteBranch normalizes remotes/ prefix", (await defaultRemoteBranch(repo3)) === "main", await defaultRemoteBranch(repo3));
+		const repo4 = path.join(tmp, "head-repo2");
+		fs.mkdirSync(repo4);
+		await runGit(["init", "-b", "main"], { cwd: repo4 });
+		await runGit(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: repo4 });
+		await runGit(["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repo4 });
+		check("defaultRemoteBranch origin/ form", (await defaultRemoteBranch(repo4)) === "main", await defaultRemoteBranch(repo4));
+		const repo5 = path.join(tmp, "no-head");
+		fs.mkdirSync(repo5);
+		await runGit(["init", "-b", "main"], { cwd: repo5 });
+		check("defaultRemoteBranch undefined without origin/HEAD", (await defaultRemoteBranch(repo5)) === undefined, String(await defaultRemoteBranch(repo5)));
+	}
 
 	// ── 5. worktree spin-up: sandbox-anchored — copy + top-up ────────
 	section("worktree spin-up");

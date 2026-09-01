@@ -20,7 +20,8 @@ import { connectMcp, disconnectMcp } from "../mcp/manager.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chhound-settle-"));
-const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(tmp, "sandboxes") };
+// Temp roots — acceptance runs must never touch the real sandbox/baseline cache.
+const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(tmp, "sandboxes"), baseRoot: path.join(tmp, "bases") };
 
 function log(msg: string): void {
 	console.log(`[settle] ${msg}`);

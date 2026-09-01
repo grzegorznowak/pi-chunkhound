@@ -58,6 +58,75 @@ export function readBaselineMeta(dir: string): BaselineMeta | undefined {
 	}
 }
 
+/** True when a prime lock with a LIVE pid is present (a prime may be in flight). */
+function hasLivePrimeLock(dir: string): boolean {
+	try {
+		const pid = Number(fs.readFileSync(path.join(dir, LOCK_FILE), "utf8").trim());
+		if (!Number.isInteger(pid) || pid <= 0) return false;
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Baseline garbage collection (cache-safe, re-primable):
+ * - dirs with no readable meta (crashed primes) — unless a live prime lock
+ *   suggests a prime is still in flight there;
+ * - dirs whose meta.repoRoot no longer exists on disk (repo moved/deleted);
+ * - superseded duplicates: same (repoRoot, baseRef) in another dir with a
+ *   newer updatedAt (e.g. after a ref-naming change).
+ * Returns the removed dirs. Run automatically after baseline primes and via
+ * /ch-status --prune.
+ */
+export function sweepBaselineGarbage(settings: ChhoundSettings): string[] {
+	const root = baseRoot(settings);
+	if (!fs.existsSync(root)) return [];
+	const removed: string[] = [];
+	const all: Array<{ dir: string; meta?: BaselineMeta }> = [];
+	for (const repoDir of fs.readdirSync(root)) {
+		const rd = path.join(root, repoDir);
+		if (!fs.statSync(rd).isDirectory()) continue;
+		for (const refDir of fs.readdirSync(rd)) {
+			const d = path.join(rd, refDir);
+			if (!fs.statSync(d).isDirectory()) continue;
+			all.push({ dir: d, meta: readBaselineMeta(d) });
+		}
+	}
+	for (const entry of all) {
+		if (hasLivePrimeLock(entry.dir)) continue; // prime in flight — never touch
+		const garbage =
+			!entry.meta ||
+			!entry.meta.repoRoot ||
+			!fs.existsSync(entry.meta.repoRoot) ||
+			all.some((o) => {
+				if (o === entry || !entry.meta || !o.meta) return false;
+				return o.meta.repoRoot === entry.meta.repoRoot && o.meta.baseRef === entry.meta.baseRef && o.meta.updatedAt > entry.meta.updatedAt;
+			});
+		if (garbage) {
+			fs.rmSync(entry.dir, { recursive: true, force: true });
+			removed.push(entry.dir);
+		}
+	}
+	// Drop empty per-repo parent dirs (cosmetic).
+	for (const repoDir of fs.readdirSync(root)) {
+		const rd = path.join(root, repoDir);
+		try {
+			if (fs.statSync(rd).isDirectory() && fs.readdirSync(rd).length === 0) {
+				fs.rmSync(rd, { recursive: true, force: true });
+			}
+		} catch {
+			/* raced */
+		}
+	}
+	return removed;
+}
+
 function writeBaselineMeta(dir: string, meta: BaselineMeta): void {
 	fs.mkdirSync(dir, { recursive: true });
 	const tmp = `${baselineMetaPath(dir)}.${process.pid}.${Date.now()}.tmp`;
@@ -159,6 +228,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 	let reason = staleReason(meta, { version, baseCommit, force: opts.force, settings: opts.settings });
 	if (meta && !reason) {
 		opts.onLine?.(`baseline fresh: ${ref} @ ${meta.baseCommit.slice(0, 12)} (${version})`);
+		sweepBaselineGarbage(opts.settings); // cheap GC — piggyback on every prime
 		return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: false, reason: "fresh" };
 	}
 
@@ -211,6 +281,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 
 	meta = readBaselineMeta(dir);
 	if (!meta) throw new Error(`baseline priming failed for ${ref} (no meta written)`);
+	sweepBaselineGarbage(opts.settings); // cheap GC — piggyback on every prime
 	return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: true, reason: reason ?? "primed" };
 }
 

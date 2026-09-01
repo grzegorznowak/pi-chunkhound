@@ -97,7 +97,9 @@ export async function checkedOutBranches(cwd: string): Promise<Map<string, strin
 export async function defaultRemoteBranch(cwd: string): Promise<string | undefined> {
 	const r = await runGit(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd });
 	if (r.code !== 0) return undefined;
-	return r.stdout.replace(/^origin\//, "");
+	// `--short` may yield either "origin/main" or "remotes/origin/main" (when
+	// origin/HEAD is stored as ref: refs/remotes/origin/main) — normalize both.
+	return r.stdout.replace(/^remotes\//, "").replace(/^origin\//, "");
 }
 
 export async function remoteOrigin(cwd: string): Promise<string | undefined> {
