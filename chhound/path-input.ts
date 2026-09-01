@@ -5,8 +5,10 @@ import { dirCompletions, type CompletionItem } from "./completions.js";
 /**
  * Plugin-owned text input with the command-line dir-picker completion
  * mechanism: same dirCompletions rules — dirs only, trailing "/", ~
- * expansion, drill-down — TAB accepts the first item (whole-value replace,
- * like pi's applyCompletion), Enter confirms, Esc cancels.
+ * expansion, drill-down — ↑/↓ move the selection (wrapping, like pi's own
+ * select lists), TAB accepts the selected item (whole-value replace, like
+ * pi's applyCompletion), Enter confirms (the selected item once ↑/↓ was
+ * used, otherwise the typed value), Esc cancels.
  *
  * pi's own ctx.ui.input has NO completion support (plain
  * ExtensionInputComponent), so this component is the only plugin-side way to
@@ -233,6 +235,10 @@ export class PathInputComponent extends Container {
 	private readonly opts: PathInputOptions;
 	private readonly hint: Text;
 	private completions: CompletionItem[] = [];
+	/** Currently selected completion (the ▸ row; TAB/Enter-after-↑↓ accept it). */
+	private selectedIndex = 0;
+	/** True once ↑/↓ was used — Enter then accepts the selection, not the raw text. */
+	private selectionMoved = false;
 	private _focused = false;
 
 	constructor(
@@ -281,8 +287,27 @@ export class PathInputComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		// ↑/↓ move the completion selection (wrapping, like pi's select lists);
+		// with an empty list they fall through to the Input (inert there).
+		if (this.kb.matches(keyData, "tui.select.up") || this.kb.matches(keyData, "tui.select.down")) {
+			if (this.completions.length > 0) {
+				const delta = this.kb.matches(keyData, "tui.select.down") ? 1 : -1;
+				this.selectedIndex =
+					(this.selectedIndex + delta + this.completions.length) % this.completions.length;
+				this.selectionMoved = true;
+				this.refresh();
+			}
+			return;
+		}
 		if (this.kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
-			this.done(this.input.getValue());
+			// After ↑/↓ navigation Enter SUBMITS the selected item (like pi's
+			// select lists); otherwise it confirms whatever is in the field.
+			// (TAB is the "fill the field, keep navigating" action.)
+			if (this.selectionMoved && this.completions.length > 0) {
+				this.done(this.completions[this.selectedIndex]!.value);
+			} else {
+				this.done(this.input.getValue());
+			}
 			return;
 		}
 		if (this.kb.matches(keyData, "tui.select.cancel")) {
@@ -290,13 +315,23 @@ export class PathInputComponent extends Container {
 			return;
 		}
 		if (this.kb.matches(keyData, "tui.input.tab") || keyData === "\t") {
-			if (this.completions.length > 0) {
-				this.input.setValue(this.completions[0]!.value);
-				this.refresh();
-			}
+			if (this.completions.length > 0) this.accept(this.selectedIndex);
 			return;
 		}
+		// Anything else edits the field: reset the selection, recompute.
+		this.selectedIndex = 0;
+		this.selectionMoved = false;
 		this.input.handleInput(keyData);
+		this.refresh();
+	}
+
+	/** Whole-value replace with the selected completion (like pi's applyCompletion). */
+	private accept(index: number): void {
+		const item = this.completions[index];
+		if (!item) return;
+		this.input.setValue(item.value);
+		this.selectedIndex = 0;
+		this.selectionMoved = false;
 		this.refresh();
 	}
 
@@ -306,11 +341,13 @@ export class PathInputComponent extends Container {
 			paramLabel: this.opts.paramLabel,
 			limit: MAX_VISIBLE,
 		});
+		// Keep the selection valid when the list shrank (e.g. typing narrowed it).
+		if (this.selectedIndex >= this.completions.length) this.selectedIndex = 0;
 		// Drop the old completion lines AND the old bottom border (both live
 		// after FIXED_CHILDREN), then rebuild list + bottom border.
 		while (this.children.length > FIXED_CHILDREN) this.removeChild(this.children[this.children.length - 1]!);
 		this.completions.forEach((c, i) => {
-			const marker = i === 0 ? this.theme.fg("accent", "▸") : " ";
+			const marker = i === this.selectedIndex ? this.theme.fg("accent", "▸") : " ";
 			this.addChild(new Text(`${marker} ${c.label}`, 1, 0));
 		});
 		this.addChild(new BorderLine(this.theme));
@@ -318,7 +355,7 @@ export class PathInputComponent extends Container {
 			this.completions.length > 0
 				? this.theme.fg(
 						"dim",
-						`TAB accepts ${this.completions[0]!.label.replace(/\/+$/, "")} · Enter confirms · Esc cancels`,
+						`▸ ${this.completions[this.selectedIndex]!.label.replace(/\/+$/, "")} · ↑/↓ move · TAB accepts · Enter confirms · Esc cancels`,
 					)
 				: this.theme.fg("dim", "Enter confirms · Esc cancels"),
 		);

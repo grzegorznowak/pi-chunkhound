@@ -242,6 +242,39 @@ async function main(): Promise<void> {
 		comp4.handleInput("/");
 		check("~ expansion in dialog completions", comp4.currentCompletions().length > 0 && comp4.currentCompletions().every((c) => c.value.startsWith("~/")));
 
+		// List navigation: ↑/↓ move the selection (wrapping), TAB/Enter-after-↑↓
+		// accept the SELECTED item, typing resets to the first item. Fixture dirs
+		// sort as docs/, src/.
+		const { c: comp5, out: comp5Out } = makeComp();
+		comp5.handleInput("\x1b[B"); // ↓ → src/
+		comp5.handleInput("\t");
+		check("arrow down moves selection (TAB accepts selected)", comp5.getValue() === "src/", comp5.getValue());
+		comp5.handleInput("\n");
+		check("enter after accept submits the value", comp5Out() === "src/", String(comp5Out()));
+		const { c: comp6, out: comp6Out } = makeComp();
+		comp6.handleInput("\x1b[B"); // ↓ → src/
+		comp6.handleInput("\n");
+		check("enter accepts selected item after navigation", comp6Out() === "src/", String(comp6Out()));
+		const { c: comp7 } = makeComp();
+		comp7.handleInput("\x1b[A"); // ↑ at top wraps to last (src/)
+		comp7.handleInput("\t");
+		check("arrow up at top wraps to last item", comp7.getValue() === "src/", comp7.getValue());
+		const { c: comp8 } = makeComp();
+		comp8.handleInput("\x1b[B");
+		comp8.handleInput("\x1b[B"); // ↓ at bottom wraps to first (docs/)
+		comp8.handleInput("\t");
+		check("arrow down at bottom wraps to first item", comp8.getValue() === "docs/", comp8.getValue());
+		const { c: comp9 } = makeComp();
+		comp9.handleInput("\x1b[B"); // selection on src/
+		comp9.handleInput("d"); // typing resets selection
+		comp9.handleInput("\t");
+		check("typing resets selection to first item", comp9.getValue() === "docs/", comp9.getValue());
+		const { c: comp10 } = makeComp();
+		comp10.handleInput("zz"); // no completions
+		comp10.handleInput("\x1b[B");
+		comp10.handleInput("\x1b[A");
+		check("arrows with empty list are inert", comp10.getValue() === "zz", comp10.getValue());
+
 		// Generic prefilled text prompt (wizard defaults): prefill, confirm, cancel.
 		const { TextPromptComponent } = await import("../chhound/path-input.js");
 		let tpOut: string | undefined = "unset";
