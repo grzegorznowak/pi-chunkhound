@@ -285,6 +285,26 @@ async function main(): Promise<void> {
 		});
 		tp2.handleInput("\x1b");
 		check("text prompt Esc cancels", tpOut2 === undefined, String(tpOut2));
+		// Terminal-originated input while pristine must ALSO replace the prefill
+		// (repros from the TAB reliability review): kitty CSI-u, astral Unicode,
+		// chunked bracketed paste, and cursor movement marks the prefill touched.
+		const tp7 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
+		tp7.handleInput("\x1b[120u");
+		check("kitty CSI-u printable replaces prefill", tp7.getValue() === "x", tp7.getValue());
+		const tp8 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
+		tp8.handleInput("😀");
+		check("astral unicode replaces prefill", tp8.getValue() === "😀", tp8.getValue());
+		const tp9 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
+		tp9.handleInput("\x1b[200~x");
+		tp9.handleInput("yz");
+		tp9.handleInput("\x1b[201~");
+		check("chunked bracketed paste replaces prefill", tp9.getValue() === "xyz", tp9.getValue());
+		tp9.handleInput("!");
+		check("typing continues after paste-replace", tp9.getValue() === "xyz!", tp9.getValue());
+		const tp10 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
+		tp10.handleInput("\x1b[D");
+		tp10.handleInput("x");
+		check("cursor movement marks prefill touched (insert at cursor)", tp10.getValue() === "xvoyageai", tp10.getValue());
 	}
 
 	// ── 3. adoptConfigFile strips secrets ─────────────────────────────

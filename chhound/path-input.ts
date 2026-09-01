@@ -1,4 +1,4 @@
-import { Container, Input, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Input, Spacer, Text, decodeKittyPrintable } from "@earendil-works/pi-tui";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { dirCompletions, type CompletionItem } from "./completions.js";
 
@@ -102,6 +102,9 @@ export class TextPromptComponent extends Container {
 	/** While the prefill is untouched, printable keys build this replacement buffer. */
 	private typed = "";
 	private pristine = true;
+	/** Bracketed-paste buffering while pristine (paste chunks replace the prefill). */
+	private pasteMode = false;
+	private pasteBuf = "";
 
 	constructor(
 		theme: ThemeLike,
@@ -155,23 +158,60 @@ export class TextPromptComponent extends Container {
 		}
 		// Prefill ergonomics (pi-tui Input has no select-all/cursor-end API and
 		// setValue leaves the cursor at 0): while the default is untouched, the
-		// first printable chars REPLACE it (type-to-replace); backspace clears.
+		// first printable input REPLACES it (type-to-replace); backspace clears.
+		// "Printable" is decided AFTER terminal decoding — kitty CSI-u
+		// ("\x1b[97u"), plain Unicode and bracketed paste are all typing; cursor
+		// movement and editing keys mark the prefill as touched and fall through.
 		if (this.pristine && this.startValue) {
-			const code = keyData.length === 1 ? keyData.charCodeAt(0) : 0;
-			if (code >= 32 && code !== 127) {
-				this.typed += keyData;
-				this.input.setValue(this.typed);
-				return;
-			}
-			if (code === 8 || code === 127) {
+			const kitty = decodeKittyPrintable(keyData);
+			if (kitty === "\x7f" || keyData === "\b" || keyData === "\x7f") {
 				this.typed = "";
 				this.input.setValue("");
 				this.pristine = false;
 				return;
 			}
+			// Bracketed paste while pristine: capture the WHOLE paste (it may
+			// arrive across several chunks) and replace the prefill with it —
+			// Input's own paste buffering would insert at cursor 0 instead.
+			if (keyData.includes("\x1b[200~")) {
+				this.pasteMode = true;
+				this.pasteBuf = keyData.replace("\x1b[200~", "");
+				this.flushPaste();
+				return;
+			}
+			if (this.pasteMode) {
+				this.pasteBuf += keyData;
+				this.flushPaste();
+				return;
+			}
+			const hasControlChars = [...keyData].some((ch) => {
+				const code = ch.charCodeAt(0);
+				return code < 32 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+			});
+			const plain = kitty !== undefined || (keyData !== "" && !hasControlChars);
+			if (plain) {
+				this.typed += kitty ?? keyData;
+				this.input.setValue(this.typed);
+				return;
+			}
 			this.pristine = false;
 		}
 		this.input.handleInput(keyData);
+	}
+
+	/** Complete a pending paste: replace the prefill with its content. */
+	private flushPaste(): void {
+		const end = this.pasteBuf.indexOf("\x1b[201~");
+		if (end === -1) return;
+		const content = this.pasteBuf.slice(0, end);
+		const remaining = this.pasteBuf.slice(end + 6); // 6 = length of \x1b[201~
+		this.pasteMode = false;
+		this.pasteBuf = "";
+		if (content) {
+			this.typed = content;
+			this.input.setValue(content);
+		}
+		if (remaining) this.handleInput(remaining);
 	}
 }
 
