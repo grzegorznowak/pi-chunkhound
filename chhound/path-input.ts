@@ -119,7 +119,7 @@ export class TextPromptComponent extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(this.input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", opts.hint ?? "Enter confirms · Esc cancels"), 1, 0));
+		this.addChild(new Text(theme.fg("dim", opts.hint ?? "TAB skips (keeps current) · Enter confirms · Esc cancels"), 1, 0));
 		this.input.setValue(this.startValue);
 	}
 
@@ -144,6 +144,13 @@ export class TextPromptComponent extends Container {
 		}
 		if (this.kb.matches(keyData, "tui.select.cancel")) {
 			this.done(undefined);
+			return;
+		}
+		// TAB = skip: keep the ORIGINAL value (discards any typed edits) and move
+		// on — re-running /ch-setup with everything already answered becomes a
+		// TAB-through. (PathInputComponent keeps TAB for completions.)
+		if (this.kb.matches(keyData, "tui.input.tab") || keyData === "\t") {
+			this.done(this.startValue);
 			return;
 		}
 		// Prefill ergonomics (pi-tui Input has no select-all/cursor-end API and

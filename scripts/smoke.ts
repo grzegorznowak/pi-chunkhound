@@ -254,6 +254,20 @@ async function main(): Promise<void> {
 		const tp4 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, () => {});
 		tp4.handleInput("\b");
 		check("backspace on pristine clears field", tp4.getValue() === "", tp4.getValue());
+		// TAB = skip: keeps the ORIGINAL value, discarding typed edits.
+		let tpOut5: string | undefined = "unset";
+		const tp5 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "voyageai" }, (v) => {
+			tpOut5 = v;
+		});
+		tp5.handleInput("x");
+		tp5.handleInput("\t");
+		check("TAB skips to original value (edits discarded)", tpOut5 === "voyageai", String(tpOut5));
+		let tpOut6: string | undefined = "unset";
+		const tp6 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "" }, (v) => {
+			tpOut6 = v;
+		});
+		tp6.handleInput("\t");
+		check("TAB on empty prompt skips as empty", tpOut6 === "", String(tpOut6));
 		let tpOut2: string | undefined = "unset";
 		const tp2 = new TextPromptComponent(themeStub, getKeybindings(), { title: "t", startValue: "" }, (v) => {
 			tpOut2 = v;
