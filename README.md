@@ -1,65 +1,120 @@
 # pi-chhound
 
-ChunkHound worktree, setup, and status commands for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent).
+> **⚠ Status: early development.** Commands, flags, settings, and on-disk layout may
+> change without notice. Nothing has been released — install from source; there is no
+> stable API or versioning contract yet.
 
-Wraps the `chunkhound` CLI/datastore: every git worktree gets its own index, spun up
-by low-level copy of a per-repo **baseline** index (the mainline branch, regularly
-refreshed) plus an incremental **top-up** at the worktree's branch point — the same
-mechanics the CURe engine uses for PR sandboxes.
+ChunkHound commands for the [pi coding agent](https://github.com/earendil-works/pi-coding-agent):
+git worktrees with their **own chunkhound index**, an MCP bridge into those indexes,
+plus setup and status tooling.
+
+Wraps the `chunkhound` CLI/datastore. Every worktree gets its own index, built from a
+shared per-repo **baseline** (the mainline branch, regularly refreshed) plus an
+incremental **top-up** at the worktree's branch point — the same mechanics the CURe
+engine uses for PR sandboxes.
+
+## Requirements
+
+- Node.js >= 22.19
+- pi >= 0.84.1
+- the `chunkhound` CLI on `PATH` (5.x)
+
+## Install
+
+Symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`), then run
+`/reload` in pi:
+
+```
+ln -s /path/to/pi-chhound ~/.pi/agent/extensions/pi-chhound
+```
+
+Configure once with `/ch-setup` (embedding provider/model, LLM for research tools,
+baseline ref & max age, worktree base folder).
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `/chworktree [repo] [branch] [-b <new-branch>] [--dest <dir>] [--from <commit-ish>] [--no-index] [--config <file>] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index (baseline copy + top-up), streamed live to the session. |
-| `/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--baseline-ref <ref>] [--baseline-max-age <days>] [--api-key <key>] [--verify] [--project] [--reset]` | Configure pi-chhound. Interactive wizard in the TUI; flag-driven headlessly. |
-| `/ch-status [--prune]` | List the sandbox library and baselines; prune sandboxes whose worktree is gone. |
+| `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. |
+| `/ch-mcp [<worktree\|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
+| `/ch-status [--prune]` | List sandboxes, baselines, and live MCP connections. |
+| `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
 
-## Layout
+### /chworktree — two ways to invoke
+
+- **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
+  name (Enter = new branch `<repo>-wt`) and the destination folder (Enter = the
+  repo's parent). With no argument at all it also lets you pick the repo (current
+  repo, repos from the index library, or a typed path). Path prompts support TAB
+  completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
+- **One-go (agents)** — everything on one line, fully non-interactive:
+  `/chworktree [repo] -b <branch> --dest <dir>`. With `--dest` the folder is named
+  after the branch (`<repo>-wt` when no branch is given, `-2` suffix on collision);
+  without `--dest` the first positional is the worktree location itself.
+
+In all modes, the final location must not already be part of another chunkhound
+index — the wizard re-prompts, one-go aborts. Indexes live in the sandbox library,
+**outside** the worktree; the repo only sees a git-excluded `.chhound/daemon.log`.
+Long index runs stream live progress to the footer (`embedding · batch 3/12 · db 5.8 MB …`).
+
+### /ch-mcp
+
+Dynamically connects pi to a sandbox's chunkhound index over MCP — no pre-registered
+servers needed. With no argument it opens an interactive picker of all sandboxes.
+`--prefix` namespaces the exposed tools, `--read-only` restricts them,
+`--no-daemon` attaches to an already-running chunkhound daemon.
+
+### /ch-status
+
+Shows chunkhound's version, sandbox/baseline roots, embedding and LLM config,
+API-key status, every sandbox (worktree alive?, branch, base commit, db size,
+claimed index root), every baseline, and live MCP connections. `--prune` removes
+sandboxes whose worktree is gone.
+
+### /ch-setup
+
+Interactive wizard in the TUI (defaults prefill the fields, TAB skips already
+answered questions) or fully flag-driven: `--provider --model --rerank-model
+--output-dims --llm-provider --llm-model --llm-api-key --baseline-ref
+--baseline-max-age --worktree-base --api-key --verify --project --reset`.
+`--config <file>` adopts an existing `chunkhound.json`; `--worktree-base` sets the
+default destination for `/chworktree`.
+
+## Where things live
 
 ```
-~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/     # baselines (per repo + base ref)
-    .chunkhound.json  db/.chhound.db/  meta.json
-~/.local/state/pi-chhound/sandboxes/<repo>-<wt>-<hash>/   # one dir per worktree index
-    .chunkhound.json  .chhound.db/  meta.json
+~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/           # baselines (per repo + base ref)
+~/.local/state/pi-chhound/sandboxes/<repo>-<wt>-<hash>/  # one dir per worktree index
 ```
 
 - Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` env or settings.
-- Indexes live **outside** the worktree; the repo only ever sees `.chhound/daemon.log`
-  (git-excluded repo-wide via `info/exclude`).
-- Configs never contain secrets; the duckdb path is pinned absolute per sandbox.
-
-## /chworktree: two ways to invoke
-
-- **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
-  name (Enter = new branch `<repo>-wt`) and the destination folder (Enter = repo
-  sibling). With no argument at all it also lets you pick the repo (current repo,
-  repos from the baseline/sandbox library, or a typed path). Path prompts
-  support TAB completion — the same dir picker as the command line (dirs only,
-  trailing `/`, `~` expansion, drill-down): TAB accepts the first item, Enter
-  confirms, Esc cancels. The destination is blocked when the resulting location
-  is already part of another chunkhound index.
-- **One-go (agents)** — everything on one line, fully non-interactive:
-  `/chworktree [repo] -b <branch> --dest <dir>`. With `--dest`, the worktree dir
-  is `dest/<repo>-wt` (`-wt-2` on collision) and the first argument only
-  resolves the repo (optional when the cwd is inside one). Without `--dest`,
-  the first argument is the worktree location itself, as before.
+- Settings: global `~/.pi/agent/pi-chhound/settings.json`, project
+  `<repo>/.pi/pi-chhound/settings.json` (project shadows global). Versioned JSON.
 
 ## Security
 
-- **v1 stores the embedding API key** in `settings.json` and in every materialized
-  `.chunkhound.json` (sandbox + baseline) — files are chmod 0600. Treat them as secrets;
-  the sandbox/baseline dirs are not part of any git repo.
-- Prefer env-only if you want the key off disk: export `CHUNKHOUND_EMBEDDING__API_KEY`
-  and skip the key in `/ch-setup` — materialized configs then carry no key.
-- Slash-command args never reach the LLM (command dispatch happens before any
+- The embedding API key is stored in `settings.json` and in every materialized
+  `.chunkhound.json` (sandbox + baseline) — files are chmod 0600 and never inside a
+  git repo. Prefer env-only: export `CHUNKHOUND_EMBEDDING__API_KEY` and skip the key
+  in `/ch-setup` — materialized configs then carry no key.
+- Slash-command arguments never reach the LLM (command dispatch happens before any
   message is built; nothing is written to session files).
 
-## Settings
+## Completion UX (no pi patches)
 
-Versioned JSON, project shadows global:
-- global: `~/.pi/agent/pi-chhound/settings.json`
-- project: `<repo>/.pi/pi-chhound/settings.json`
+All completion UX is plugin-side and works on a **pristine pi install** — nothing
+under the global pi installation is ever modified:
+
+- Natural typing after `/chworktree ` shows the directory picker (dirs only,
+  trailing `/`, drill-down), then the branch picker (leading with a
+  **new-branch** item), flags, `--config` files, `--from`/`-b` refs.
+- `TAB` accepts a completion and re-opens the picker for the next slot;
+  `--flag=value` equals forms, quoted paths with spaces, and `--` separators are
+  all handled. `TAB` after the command name (no space) completes the command itself.
+- In the wizard's path prompts, ↑/↓ move a wrapping selection, TAB fills the field,
+  Enter submits the selected item (or the typed value), Esc cancels.
+- Note: `Enter` on a `/`-prefixed completion may submit the prompt (pi behavior) —
+  use `TAB` to accept a completion instead.
 
 ## Development
 
@@ -70,39 +125,5 @@ npm run smoke              # end-to-end mechanics test (real chunkhound CLI, --n
 npm run verify:completions # completion behavior against pristine pi-tui's public provider API
 ```
 
-Dev install: symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`)
-and run `/reload` in pi. Typecheck requires the matching `@earendil-works/pi-coding-agent` types.
-
-### Completion UX (no pi patches)
-
-All completion UX is plugin-side and works on a **pristine pi install** — nothing
-under the global pi installation is ever modified:
-
-- **New worktree first**: `/chworktree <path>` alone creates a NEW branch named
-  after the path (like `git worktree add`). After the path + space, the picker
-  leads with a **new-branch item** — TAB on it, then type the branch name.
-  Typing a name that doesn't exist as a branch offers `create branch: <name>`
-  right at the top; existing branches are listed below it (secondary).
-- Natural typing after `/chworktree ` shows the directory picker (dirs only,
-  trailing `/`), then the branch picker, flags, `--config` files,
-  `--from`/`-b` refs. `-b`'s value position suggests nothing (free name typing).
-- `TAB` accepts a completion; a `TAB` in `/chworktree`'s argument position
-  shows the plugin's own picker again (a plugin-owned provider wrapper routes
-  TAB there — pi's built-in file picker never appears inside `/chworktree`
-  arguments). Accepting a directory and `TAB`-ing again drills into it.
-- `TAB` after the command name (no space) completes the command itself, like
-  any pi command; commands without argument completions accept cleanly.
-- `Enter` on a `/`-prefixed completion may submit the prompt (pi behavior) —
-  use `TAB` to accept a completion instead.
-
-### Live index progress
-
-Long index runs stream progress to the footer (1s heartbeat):
-
-- `embedding · batch 3/12 (300 chunks) · db 5.8 MB +3.1 MB · 2:05` — real
-  per-batch progress from `chunkhound index --verbose` stderr lines, plus the
-  duckdb file (+ `.wal`) byte size sampled every second.
-- Batches that have *completed* take precedence (`embedding · 7/12`), so the
-  counter never looks stuck while the embedding API is the bottleneck.
-- The last few surfaced output lines also show above the editor; loguru DEBUG
-  noise is filtered out.
+Typecheck requires the matching `@earendil-works/pi-coding-agent` types; the smoke
+and completion suites are headless and need no terminal.
