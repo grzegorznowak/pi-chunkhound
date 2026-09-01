@@ -31,8 +31,9 @@ import {
 	sandboxDirFor,
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
-import { mcpToolPrefix } from "../mcp/manager.js";
+import { connectMcp, disconnectMcp, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
 import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
 import { mcpStatusLines } from "../status/command.js";
 import { refreshMaterializedConfigs } from "../setup/command.js";
@@ -637,6 +638,58 @@ async function main(): Promise<void> {
 		await c2.close();
 		check("mcp: proxy exits on close (daemonized)", await waitFor(() => pid2 !== null && !isAlive(pid2), 10_000), `pid=${pid2}`);
 		check("mcp: daemon self-shutdown removes lock", await waitFor(() => !fs.existsSync(lockFile), 15_000), lockFile);
+
+		// connectMcp + per-session replay: a child session re-runs the extension
+		// factory, so bridge tools registered at runtime in the parent's api must
+		// be re-registerable into a fresh api from the stored connection state.
+		const capturePi = (into: Map<string, unknown>) =>
+			({ registerTool(t: { name: string }) { into.set(t.name, t); } }) as unknown as ExtensionAPI;
+		const firstApi = new Map<string, unknown>();
+		process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = daemonRuntime;
+		const entry = listSandboxes(settings)[0]!;
+		const conn = await connectMcp(capturePi(firstApi), entry, { extraArgs: ["--no-embeddings"] });
+		const expected = conn.toolNames;
+		check(
+			"mcp: connectMcp registers bridge tools into session api",
+			expected.length > 0 && expected.every((n) => firstApi.has(n)),
+			expected.join(","),
+		);
+		check("mcp: connection stores replayable tool metadata", conn.tools.length === expected.length && conn.tools.every((t) => typeof t.name === "string"));
+		const childApi = new Map<string, unknown>();
+		reRegisterBridgeTools(capturePi(childApi), [conn]);
+		check(
+			"mcp: bridge tools replay into a fresh (child) session api",
+			expected.length > 0 && expected.every((n) => childApi.has(n)),
+			[...childApi.keys()].join(",") || "(none)",
+		);
+		// A replayed definition must be a live bridge: same closures, same registry.
+		const daemonTool = [...childApi.entries()].find(([n]) => n.endsWith("_daemon_status"))?.[1] as {
+			execute: (...args: unknown[]) => Promise<unknown>;
+		} | undefined;
+		const stBridge = daemonTool ? await daemonTool.execute("call-1", {}, undefined, undefined) : undefined;
+		check(
+			"bridge: replayed tool calls the live server",
+			typeof stBridge === "object" && JSON.stringify(stBridge).includes("query_ready"),
+			JSON.stringify(stBridge)?.slice(0, 160) ?? "(no daemon_status tool)",
+		);
+		await disconnectMcp(conn.id);
+		delete process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR;
+		// After disconnect the same replayed definition must fail with the clear
+		// reconnect error (registry entry gone) — the child-facing behavior.
+		const guardMessage = daemonTool
+			? await (async () => {
+					try {
+						await daemonTool.execute("call-2", {}, undefined, undefined);
+						return "no-throw";
+					} catch (e) {
+						return (e as Error).message;
+					}
+				})()
+			: "(no daemon_status tool)";
+		check("bridge: replayed execute guards disconnected registry", guardMessage.includes("not connected"), guardMessage);
+		const afterDisconnect = new Map<string, unknown>();
+		reRegisterBridgeTools(capturePi(afterDisconnect));
+		check("bridge: no live connections → replay is a no-op", afterDisconnect.size === 0, `registered ${afterDisconnect.size}`);
 
 		// No-argument target list (pure helper — same view the command shows).
 		const targetLines = mcpTargetLines(settings, []);

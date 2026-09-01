@@ -27,6 +27,13 @@ const CALL_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_LINES = 2000;
 const DEFAULT_MAX_BYTES = 50 * 1024;
 
+/** Raw MCP tool metadata as listed by the server — replayable into other sessions. */
+export interface McpToolMeta {
+	name: string;
+	description?: string;
+	inputSchema?: unknown;
+}
+
 export interface McpConnection {
 	/** Sandbox dir name — the stable id for connect/disconnect. */
 	id: string;
@@ -36,6 +43,8 @@ export interface McpConnection {
 	client: Client;
 	transport: StdioClientTransport;
 	toolNames: string[];
+	/** The tools as listed at connect (registerBridgeTool input). */
+	tools: McpToolMeta[];
 	connectedAt: string;
 }
 
@@ -44,6 +53,8 @@ export interface ConnectMcpOptions {
 	noDaemon?: boolean;
 	readOnly?: boolean;
 	apiKey?: string;
+	/** Extra CLI args for the chunkhound mcp server (test seam, mirrors hotStartIndex). */
+	extraArgs?: string[];
 }
 
 const connections = new Map<string, McpConnection>();
@@ -68,6 +79,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	const args = ["mcp", entry.meta.worktree, "--config", sandboxConfigPath(entry.dir)];
 	if (opts.noDaemon) args.push("--no-daemon");
 	if (opts.readOnly) args.push("--read-only");
+	if (opts.extraArgs) args.push(...opts.extraArgs);
 
 	const transport = new StdioClientTransport({
 		command: chhoundBinary(),
@@ -91,8 +103,9 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 
 	const prefix = mcpToolPrefix(entry.meta.worktree, opts.prefix);
 	const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
+	const mcpTools: McpToolMeta[] = listed.tools ?? [];
 	const toolNames: string[] = [];
-	for (const tool of listed.tools ?? []) {
+	for (const tool of mcpTools) {
 		const piName = `${prefix}_${tool.name}`;
 		registerBridgeTool(pi, id, piName, tool);
 		toolNames.push(piName);
@@ -105,6 +118,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 		client,
 		transport,
 		toolNames,
+		tools: mcpTools,
 		connectedAt: new Date().toISOString(),
 	};
 	connections.set(id, conn);
@@ -135,6 +149,28 @@ export async function disconnectMcp(id: string): Promise<void> {
 /** Disconnect everything (session_shutdown / /reload). */
 export async function closeAllMcp(): Promise<void> {
 	await Promise.allSettled([...connections.keys()].map((id) => disconnectMcp(id)));
+}
+
+/**
+ * Re-register bridge tools for connections into a session's extension api.
+ *
+ * pi re-runs every extension factory once per session (main, spawned children,
+ * post-reload registry rebuilds). Runtime registrations like /ch-mcp's live
+ * only in the extension object of the session that connected — without a
+ * replay, a spawned child's tool whitelist (built from the parent's active
+ * tools) silently drops chh_* names because the child's registry never had
+ * them. The execute closures target the shared module-level connections
+ * registry, so replayed tools work in any in-process session.
+ */
+export function reRegisterBridgeTools(
+	pi: ExtensionAPI,
+	conns: readonly Pick<McpConnection, "id" | "prefix" | "tools">[] = [...connections.values()],
+): void {
+	for (const conn of conns) {
+		for (const tool of conn.tools) {
+			registerBridgeTool(pi, conn.id, `${conn.prefix}_${tool.name}`, tool);
+		}
+	}
 }
 
 function isAlive(pid: number): boolean {

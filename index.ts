@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { closeAllMcp } from "./mcp/manager.js";
+import { closeAllMcp, reRegisterBridgeTools } from "./mcp/manager.js";
 import { registerMcpCommand } from "./mcp/command.js";
 import type { PluginState } from "./chhound/types.js";
 import { ChhoundArgumentProvider } from "./chhound/provider-wrap.js";
@@ -13,6 +13,15 @@ export default function (pi: ExtensionAPI): void {
 	registerWorktreeCommand(pi, state);
 	registerStatusCommand(pi, state);
 	registerMcpCommand(pi, state);
+
+	// Replay live MCP bridge tools into this session's extension object. pi
+	// re-runs the factory per session (main, spawned children, /reload registry
+	// rebuilds), and tools registered at runtime — like /ch-mcp's chh_* — would
+	// otherwise exist only in the session that connected, making them invisible
+	// to spawned children (their tool whitelist is built from the parent's
+	// active tools but resolved against their own registry). No-ops when no
+	// connection is live.
+	reRegisterBridgeTools(pi);
 
 	// Tear down any live chunkhound MCP connections on session end / /reload
 	// (chunkhound daemons shut themselves down when their client disconnects).
