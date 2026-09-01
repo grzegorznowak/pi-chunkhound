@@ -197,7 +197,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	// "/chworktree wt -b ") or second-to-last ("/chworktree wt -b name").
 	const valueFlag = hasTrailingSpace ? nonEmpty[nonEmpty.length - 1] : prev;
 	if (valueFlag === "--config") return withBase(dirCompletions(current, cwd, { includeFiles: true, paramLabel: "config file (optional)" }));
-	if (valueFlag === "--dest") return withBase(dirCompletions(current, cwd, { paramLabel: "worktree destination folder (optional)" }));
+	if (valueFlag === "--dest") return withBase(dirCompletions(current, cwd, { paramLabel: "worktree base folder (branch-named)" }));
 	// -b takes a NEW branch name — free typing, no existing-branch suggestions
 	// (git refuses -b with a name that already exists).
 	if (valueFlag === "-b") return [];

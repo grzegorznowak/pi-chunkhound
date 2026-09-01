@@ -149,7 +149,7 @@ async function main(): Promise<void> {
 		const argDestFlag = await worktreeArgumentCompletions("wt --d", proj);
 		check("arg completions: --dest flag name", argDestFlag.some((c) => c.value === "wt --dest"), JSON.stringify(argDestFlag));
 		const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
-		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree destination folder (optional)"), JSON.stringify(argDest));
+		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree base folder (branch-named)"), JSON.stringify(argDest));
 		check("--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
 	}
 
@@ -178,6 +178,15 @@ async function main(): Promise<void> {
 		check("--dest collision → -wt-2", loc2.wtPath === path.join(dest, "dest-repo-wt-2"), loc2.wtPath);
 		check("deriveWorktreePath(parent)", deriveWorktreePath(repo2, dest) === path.join(dest, "dest-repo-wt-2"));
 		check("deriveWorktreePath default sibling", deriveWorktreePath(repo2) === path.join(tmp, "dest-repo-wt"));
+		// Branch-named folders: the worktree folder follows the branch.
+		check("deriveWorktreePath branch", deriveWorktreePath(repo2, dest, "chworktree-test") === path.join(dest, "chworktree-test"));
+		fs.mkdirSync(path.join(dest, "chworktree-test"), { recursive: true });
+		check("deriveWorktreePath branch collision → -2", deriveWorktreePath(repo2, dest, "chworktree-test") === path.join(dest, "chworktree-test-2"));
+		check("deriveWorktreePath branch slashes → dashes", deriveWorktreePath(repo2, dest, "fix/foo") === path.join(dest, "fix-foo"));
+		const locB = resolveWorktreeLocation({ repoRoot: repo2, dest, branch: "chworktree-test" });
+		check("resolveWorktreeLocation branch-named", locB.wtPath === path.join(dest, "chworktree-test-2"), locB.wtPath);
+		const locSib = resolveWorktreeLocation({ repoRoot: repo2, positional: repo2, branch: "feat-x" });
+		check("repo itself → branch-named sibling", locSib.wtPath === path.join(tmp, "feat-x"), locSib.wtPath);
 
 		const idx = [path.join(tmp, "idx-a")];
 		check("conflict: exact match", findConflictingIndexed(path.join(tmp, "idx-a"), idx) === path.join(tmp, "idx-a"));

@@ -148,7 +148,7 @@ check("K: TAB on command name delegates to command completion", !!k && k.items.s
 
 // L: --dest value position → destination dir picker (dirs only, optional label)
 const l = await s("/chworktree wt --dest ", false);
-check("L: --dest value → destination dir picker", !!l && l.items.every((i: any) => i.value.startsWith("wt --dest ")) && l.items.some((i: any) => i.value === "wt --dest src/" && i.label === "src/" && i.description === "worktree destination folder (optional)"), JSON.stringify(l?.items?.map((i: any) => i.label)));
+check("L: --dest value → destination dir picker", !!l && l.items.every((i: any) => i.value.startsWith("wt --dest ")) && l.items.some((i: any) => i.value === "wt --dest src/" && i.label === "src/" && i.description === "worktree base folder (branch-named)"), JSON.stringify(l?.items?.map((i: any) => i.label)));
 check("L: --dest picker dirs only", !!l && !l.items.some((i: any) => i.value.endsWith("a.txt")), JSON.stringify(l?.items?.map((i: any) => i.value)));
 
 // M: --dest value through the wrapper (TAB force)

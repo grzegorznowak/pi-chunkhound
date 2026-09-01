@@ -9,7 +9,7 @@ import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
-import { promptPath, type PathPromptUI } from "../chhound/path-input.js";
+import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -24,9 +24,10 @@ const HELP = [
 	"  [branch]            existing branch to check out (picker leads with 'new branch')",
 	"  -b <name>           create a new branch with an explicit name",
 	"  --from <ref>        base commit/branch/tag for the worktree",
-	"  --dest <dir>        parent folder for the worktree — the worktree dir is named",
-	"                      <repo>-wt (suffix -2 on collision). Blocks when the location",
-	"                      is already part of another chunkhound index.",
+	"  --dest <dir>        base folder for the worktree — the worktree folder is named",
+	"                      after the branch (<repo>-wt when none; suffix -2 on collision).",
+	"                      Blocks when the location is already part of another chunkhound",
+	"                      index.",
 	"  --config <file>     adopt an existing chunkhound.json for this worktree",
 	"  --no-index          skip indexing (worktree only)",
 	"  --force-reindex    full re-index instead of baseline top-up",
@@ -125,35 +126,14 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			if (!dest && !wtArg) {
 				notify(
 					"A worktree location is required: /chworktree <path> … (or give --dest <dir> and the " +
-						"worktree dir is derived as <repo>-wt).",
-					"error",
-				);
-				return;
-			}
-			const { wtPath, note } = resolveWorktreeLocation({ repoRoot, positional: requestedPath, dest });
-			if (note) notify(note, "info");
-			if (dest) fs.mkdirSync(dest, { recursive: true });
-			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
-				notify(`Refusing: ${wtPath} exists and is not empty.`, "error");
-				return;
-			}
-
-			const loaded = loadSettings(repoRoot);
-			if (loaded.issue) notify(loaded.issue, "warning");
-			const settings = loaded.settings;
-			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
-			if (conflict) {
-				notify(
-					`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
-						"Pick a different destination (/ch-status lists indexed worktrees).",
+						"worktree folder is named after the branch).",
 					"error",
 				);
 				return;
 			}
 
-			// Branch semantics mirror `git worktree add`:
-			//   /chworktree <path> [<existing-branch>]
-			//   /chworktree <path> -b <new-branch> [--from <commit-ish>]
+			// ── Branch intent (one-go) — decided BEFORE the location, since the
+			// folder is named after the branch. ──
 			let createBranch: string | undefined;
 			let branch: string | undefined;
 			let commitIsh: string | undefined;
@@ -193,15 +173,45 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 					return;
 				}
 			}
-			// No branch given: git derives one from the worktree path's basename
-			// ("<path>/pi-agenticoding-wt" → branch pi-agenticoding-wt). Run that
-			// through the same in-use resolution so a second worktree on the
-			// path-derived branch can't collide (the reported failure mode).
+			// No branch given: derive one — with --dest (or a repo-as-positional)
+			// the folder is <repo>-wt; with a plain positional the folder is the
+			// positional, so the branch is its basename (git's own derivation,
+			// but run through in-use resolution so it can't collide).
 			if (!branch && !createBranch && !commitIsh) {
-				const derived = path.basename(wtPath);
+				const derived =
+					dest || requestedPath === repoRoot
+						? `${path.basename(repoRoot)}-wt`
+						: path.basename(requestedPath!);
 				const choice = await resolveBranchChoice(repoRoot, derived, notify);
 				branch = choice.branch;
 				createBranch = choice.createBranch;
+			}
+
+			// ── Location (folder = final branch name) ──
+			const { wtPath, note } = resolveWorktreeLocation({
+				repoRoot,
+				positional: requestedPath,
+				dest,
+				branch: branch ?? createBranch,
+			});
+			if (note) notify(note, "info");
+			if (dest) fs.mkdirSync(dest, { recursive: true });
+			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
+				notify(`Refusing: ${wtPath} exists and is not empty.`, "error");
+				return;
+			}
+
+			const loaded = loadSettings(repoRoot);
+			if (loaded.issue) notify(loaded.issue, "warning");
+			const settings = loaded.settings;
+			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
+			if (conflict) {
+				notify(
+					`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
+						"Pick a different destination (/ch-status lists indexed worktrees).",
+					"error",
+				);
+				return;
 			}
 
 			await createIndexedWorktree(ctx, state, {
@@ -227,10 +237,11 @@ export function isWizardInvocation(positionals: string[], flags: Record<string, 
 
 /**
  * Final worktree location.
- * - With --dest: parent = dest, name = <repo>-wt (suffix -2 on collision) —
- *   the first positional only resolved the repo.
+ * - With --dest: parent = dest; the folder is named after the branch
+ *   (fallback <repo>-wt, suffix -2 on collision) — the first positional only
+ *   resolved the repo.
  * - Without --dest: the first positional IS the location; picking the source
- *   repo itself derives a sibling <repo>-wt (as before).
+ *   repo itself derives a sibling (branch-named, as with --dest).
  */
 export function resolveWorktreeLocation(opts: {
 	repoRoot: string;
@@ -238,12 +249,14 @@ export function resolveWorktreeLocation(opts: {
 	positional?: string;
 	/** Absolute --dest, when given. */
 	dest?: string;
+	/** Final branch name (folder = branch). Undefined → <repo>-wt fallback. */
+	branch?: string;
 }): { wtPath: string; note?: string } {
 	if (opts.dest) {
-		return { wtPath: deriveWorktreePath(opts.repoRoot, opts.dest) };
+		return { wtPath: deriveWorktreePath(opts.repoRoot, opts.dest, opts.branch) };
 	}
 	if (opts.positional && opts.positional === opts.repoRoot) {
-		const sibling = deriveWorktreePath(opts.repoRoot);
+		const sibling = deriveWorktreePath(opts.repoRoot, undefined, opts.branch);
 		return {
 			wtPath: sibling,
 			note: `${path.basename(opts.positional)} is the source repo itself — creating the worktree at ${sibling} instead.`,
@@ -252,12 +265,16 @@ export function resolveWorktreeLocation(opts: {
 	return { wtPath: opts.positional! };
 }
 
-/** Worktree location for a repo: `<parent>/<repo>-wt`, `<repo>-wt-2`, … */
-export function deriveWorktreePath(repoRoot: string, parent?: string): string {
+/**
+ * Worktree location for a repo: `<parent>/<branch>` (branch slashes → "-";
+ * `<repo>-wt` when no branch is known), suffixing -2, -3, … while the folder
+ * already exists.
+ */
+export function deriveWorktreePath(repoRoot: string, parent?: string, branch?: string): string {
 	const dir = parent ?? path.dirname(repoRoot);
-	const base = path.basename(repoRoot);
-	let candidate = path.join(dir, `${base}-wt`);
-	for (let i = 2; fs.existsSync(candidate); i++) candidate = path.join(dir, `${base}-wt-${i}`);
+	const base = branch ? branch.replace(/\//g, "-") : `${path.basename(repoRoot)}-wt`;
+	let candidate = path.join(dir, base);
+	for (let i = 2; fs.existsSync(candidate); i++) candidate = path.join(dir, `${base}-${i}`);
 	return candidate;
 }
 
@@ -269,7 +286,7 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 		`No git repo found: ${base}`,
 		"/chworktree creates a worktree OF an existing git repo.",
 		"Try: run it from inside the repo, or pass the repo's own directory as the first argument",
-		"(a sibling <repo>-wt is derived automatically). If the project should be a repo:",
+		"(a sibling folder named after the branch is derived automatically). If the project should be a repo:",,
 		`git init ${wtArg ?? cwd} && git -C ${wtArg ?? cwd} add -A && git -C ${wtArg ?? cwd} commit -m init, then retry.`,
 		"Bare /chworktree (no arguments) opens an interactive repo picker.",
 	].join("\n");
@@ -460,8 +477,13 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 
 	// 2) Branch name — Enter accepts the suggested new branch (<repo>-wt);
 	//    a typed name that exists is checked out, anything else is created.
+	//    Prefilled (promptText); typing replaces the suggested name.
 	const defaultBranch = `${path.basename(repoRoot)}-wt`;
-	const branchRaw = await ctx.ui.input(`Branch name (Enter = new branch ${defaultBranch}):`, defaultBranch);
+	const branchRaw = await promptText(ctx.ui, {
+		title: "Branch name",
+		startValue: defaultBranch,
+		hint: `Enter accepts the new branch ${defaultBranch} — typing replaces it`,
+	});
 	if (branchRaw === undefined) {
 		notify("Cancelled.", "info");
 		return;
@@ -475,12 +497,13 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		createBranch = choice.createBranch;
 	}
 
-	// 3) Destination — parent folder; final dir = dest/<repo>-wt (-2 on
-	//    collision). Locations already part of another chunkhound index block.
+	// 3) Destination — base folder; the worktree lands at <base>/<branch>
+	//    (-2 on collision). Locations already part of another chunkhound index block.
 	//    Prefilled with the default; TAB completes like the command-line picker.
 	const defaultDest = path.dirname(repoRoot);
+	const finalBranch = branch ?? createBranch;
 	let destRaw = await promptPath(ctx.ui, {
-		title: `Destination folder (parent of the worktree, default: ${defaultDest}):`,
+		title: `Destination folder (base folder — the worktree lands at <base>/${finalBranch ?? "<branch>"}; default: ${defaultDest}):`,
 		cwd: ctx.cwd,
 		startValue: defaultDest,
 		paramLabel: "destination folder",
@@ -490,12 +513,12 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		return;
 	}
 	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultDest));
-	let wtPath = deriveWorktreePath(repoRoot, dest);
+	let wtPath = deriveWorktreePath(repoRoot, dest, finalBranch);
 	let conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
 		notify(`Blocked: ${wtPath} is already part of the chunkhound index for ${conflict}. Choose another destination.`, "error");
 		destRaw = await promptPath(ctx.ui, {
-			title: `Destination folder (parent of the worktree, default: ${defaultDest}):`,
+			title: `Destination folder (base folder — the worktree lands at <base>/${finalBranch ?? "<branch>"}; default: ${defaultDest}):`,
 			cwd: ctx.cwd,
 			startValue: defaultDest,
 			paramLabel: "destination folder",
@@ -505,7 +528,7 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 			return;
 		}
 		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultDest));
-		wtPath = deriveWorktreePath(repoRoot, dest);
+		wtPath = deriveWorktreePath(repoRoot, dest, finalBranch);
 		conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 	}
 	if (conflict) {
