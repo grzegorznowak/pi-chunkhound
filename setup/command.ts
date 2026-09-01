@@ -16,7 +16,7 @@ import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 const USAGE =
 	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--output-dims N] " +
 	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
-	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--verify] [--project] [--reset]";
+	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--auto-reconnect on|off] [--verify] [--project] [--reset]";
 
 /**
  * Re-materialize every sandbox + baseline config from current settings,
@@ -167,6 +167,18 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				updates.push(`sandboxRoot=${base}`);
 			}
 
+			// Auto-reconnect toggle: recorded /ch-mcp connections are restored on
+			// session start; off keeps connections fully manual.
+			if (typeof flags["auto-reconnect"] === "string") {
+				const v = flags["auto-reconnect"].toLowerCase();
+				if (v !== "on" && v !== "off") {
+					ctx.ui.notify(`Invalid --auto-reconnect: ${flags["auto-reconnect"]} (on|off)`, "error");
+					return;
+				}
+				settings.autoReconnect = v === "on";
+				updates.push(`autoReconnect=${v}`);
+			}
+
 			// Secret: persisted (v1 decision) — settings.json + materialized configs, 0600.
 			if (typeof flags["api-key"] === "string") {
 				settings.embedding = { ...(settings.embedding ?? {}), apiKey: flags["api-key"] };
@@ -286,6 +298,21 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				}
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
 
+				// Auto-reconnect: y = recorded /ch-mcp connections come back on
+				// session start; n = connections stay manual.
+				const autoRaw = await ask(
+					"Auto-reconnect MCP connections on session start? (y/n)",
+					settings.autoReconnect === false ? "n" : "y",
+					{ hint: "recorded /ch-mcp connections are restored automatically; 'n' keeps them manual" },
+				);
+				if (autoRaw === undefined) {
+					ctx.ui.notify("/ch-setup cancelled.", "info");
+					return;
+				}
+				const autoReconnect = !["n", "no", "off", "false", "0"].includes(autoRaw.trim().toLowerCase());
+				settings.autoReconnect = autoReconnect;
+				summary.push(`auto-reconnect: ${autoReconnect ? "on" : "off"}`);
+
 				// Sandbox library root — suggested from the cwd unless it (or a
 				// parent) is already a chunkhound index root, then it must be elsewhere.
 				const suggested = settings.sandboxRoot ?? settings.worktreeBase ?? suggestWorktreeBase(ctx.cwd);
@@ -347,6 +374,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "— (research tools disabled)"}`,
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
 					`sandbox root: ${sandboxRoot(settings)}`,
+					`auto-reconnect: ${settings.autoReconnect === false ? "off" : "on"}`,
 					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
 					`llm api key: ${settings.llm?.apiKey ? "stored in settings ✓" : "not set (env or --llm-api-key)"}`,
 				];

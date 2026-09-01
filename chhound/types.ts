@@ -52,6 +52,13 @@ export interface ChhoundSettings {
 	sandboxRoot?: string;
 	/** Override baseline cache root. Default: $XDG_CACHE_HOME/pi-chhound/bases. */
 	baseRoot?: string;
+	/**
+	 * Restore recorded (/ch-mcp connected) MCP connections when a session
+	 * starts. Records live in the session log; read-only and --no-daemon
+	 * connections are never recorded. Default: on. Toggle via /ch-setup
+	 * (--auto-reconnect on|off or the wizard).
+	 */
+	autoReconnect?: boolean;
 }
 
 export interface SandboxMeta {

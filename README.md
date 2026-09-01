@@ -73,6 +73,18 @@ servers needed. With no argument it opens an interactive picker of all sandboxes
 `--prefix` namespaces the exposed tools, `--read-only` restricts them,
 `--no-daemon` attaches to an already-running chunkhound daemon.
 
+**Auto-reconnect.** Connections are recorded in the session log (`pi.appendEntry`,
+same mechanism as the notebook plugin's pages). When a session starts — resume,
+restart, or `/reload` — the recorded connections are restored automatically and
+the `chh_*` tools come back without a manual `/ch-mcp`; when a session ends, the
+connections close and the chunkhound daemon stops itself (its designed behavior
+once the last client detaches). Records are branch-scoped like notebook pages:
+a resumed session sees exactly the connections it had. `--disconnect` forgets a
+connection (a tombstone record is appended). Read-only and `--no-daemon`
+connections are never recorded (single-process stdio — two of them on one
+database would clash on the file lock); API keys never enter the log. Toggle the
+auto-restore via `/ch-setup --auto-reconnect on|off` (default on).
+
 ### /ch-status
 
 Shows chunkhound's version, sandbox/baseline roots, embedding and LLM config,
@@ -88,7 +100,8 @@ baseline prime — the cache is self-healing, no manual cleanup needed.
 Interactive wizard in the TUI (defaults prefill the fields, TAB skips already
 answered questions) or fully flag-driven: `--provider --model --rerank-model
 --output-dims --llm-provider --llm-model --llm-api-key --baseline-ref
---baseline-max-age --sandbox-root --api-key --verify --project --reset`.
+--baseline-max-age --sandbox-root --api-key --auto-reconnect --verify --project
+--reset`.
 `--config <file>` adopts an existing `chunkhound.json`; `--sandbox-root` sets the
 sandbox library root for `/chworktree` (`--worktree-base` is a legacy alias).
 

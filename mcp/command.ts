@@ -10,6 +10,7 @@ import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 import { connectMcp, disconnectMcp, listMcpConnections } from "./manager.js";
 import type { McpConnection } from "./manager.js";
+import { recordConnection } from "./persist.js";
 
 /**
  * No-argument view: every sandbox is a connectable target, marked when a
@@ -89,6 +90,17 @@ async function connectEntry(
 			readOnly: flags["read-only"] === true,
 			apiKey: state.apiKey,
 		});
+		// Session-log record → auto-restored on the next session start. Only
+		// daemon-mode connections are recorded: read-only / --no-daemon force
+		// single-process stdio and would clash on the DuckDB file lock if two
+		// of them targeted one database. API keys never go into the log.
+		if (!flags["no-daemon"] && !flags["read-only"]) {
+			recordConnection(pi, {
+				sandboxId: conn.id,
+				state: "connected",
+				prefix: typeof flags["prefix"] === "string" ? flags["prefix"] : undefined,
+			});
+		}
 		ctx.ui.notify(
 			`Connected chhound MCP '${conn.id}' → ${conn.worktree}\n` +
 				`tools: ${conn.toolNames.join(", ")}\n` +
@@ -161,6 +173,9 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			if (flags["disconnect"] === true) {
 				try {
 					await disconnectMcp(id);
+					// Tombstone: the append-only log keeps the old `connected` record,
+					// but the latest record per sandbox wins on rehydrate.
+					recordConnection(pi, { sandboxId: id, state: "disconnected" });
 					ctx.ui.notify(`Disconnected ${id} — the chunkhound daemon exits on its own.`, "info");
 				} catch (e) {
 					ctx.ui.notify(`Disconnect failed: ${(e as Error).message}`, "error");

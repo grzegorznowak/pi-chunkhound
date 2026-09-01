@@ -31,12 +31,14 @@ import {
 	sandboxDirFor,
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
-import { connectMcp, disconnectMcp, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
+import { connectMcp, disconnectMcp, listMcpConnections, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
+import { CONNECTION_ENTRY_TYPE, recordConnection, rehydrateConnections, restoreConnections } from "../mcp/persist.js";
+import type { ConnectionRecord } from "../mcp/persist.js";
 import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
 import { mcpStatusLines } from "../status/command.js";
-import { refreshMaterializedConfigs } from "../setup/command.js";
+import { refreshMaterializedConfigs, registerSetupCommand } from "../setup/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
@@ -807,6 +809,151 @@ async function main(): Promise<void> {
 		const cfgAfter = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
 		check("refresh: llm section added", (cfgAfter.llm as Record<string, unknown>)?.provider === "openai");
 		check("refresh: custom sections preserved", (cfgAfter.research as Record<string, unknown>)?.enabled === true);
+	}
+
+	// ── 5c. connection persistence + auto-restore (session-log records) ──
+	section("mcp persistence + auto-restore");
+	{
+		const entryLog: Array<{ type: string; data: unknown }> = [];
+		const persistPi = {
+			registerTool(_t: { name: string }) {
+				/* connectMcp needs a registerTool surface */
+			},
+			appendEntry(type: string, data: unknown) {
+				entryLog.push({ type, data });
+			},
+		} as unknown as ExtensionAPI;
+		const fakeEntry = (customType: string, data: unknown): SessionEntry =>
+			({ type: "custom", customType, data, id: "e", parentId: "p", timestamp: "t" }) as unknown as SessionEntry;
+
+		recordConnection(persistPi, { sandboxId: "sb-1", state: "connected" });
+		recordConnection(persistPi, { sandboxId: "sb-1", state: "disconnected", prefix: "mine" });
+		check(
+			"persist: records appended to session log",
+			entryLog.length === 2 && entryLog.every((e) => e.type === CONNECTION_ENTRY_TYPE),
+			JSON.stringify(entryLog),
+		);
+		const first = entryLog[0]!.data as Record<string, unknown>;
+		check(
+			"persist: record shape (version/sandboxId/state)",
+			first.version === 1 && first.sandboxId === "sb-1" && first.state === "connected",
+			JSON.stringify(entryLog[0]),
+		);
+		const second = entryLog[1]!.data as Record<string, unknown>;
+		check("persist: prefix recorded when set", second.prefix === "mine", JSON.stringify(entryLog[1]));
+
+		check("persist: empty branch → no records", rehydrateConnections([]).size === 0);
+		const branch = [
+			fakeEntry("some-other-type", { version: 1 }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: "sb-a", state: "connected" }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: "sb-b", state: "connected", prefix: "pfx" }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: "sb-a", state: "disconnected" }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 2, sandboxId: "sb-c", state: "connected" }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { sandboxId: "sb-d", state: "connected" }),
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: 42, state: "connected" }),
+		];
+		const hydrated = rehydrateConnections(branch);
+		check("persist: rehydrate parses records", hydrated.size === 3, [...hydrated.keys()].join(",") || "(none)");
+		check("persist: later record wins (tombstone)", hydrated.get("sb-a")?.state === "disconnected");
+		check("persist: prefix survives rehydrate", hydrated.get("sb-b")?.prefix === "pfx");
+		check("persist: future version ignored", !hydrated.has("sb-c"));
+		check("persist: legacy version accepted", hydrated.get("sb-d")?.state === "connected");
+		check("persist: malformed sandboxId ignored", !hydrated.has("42"));
+
+		// Restore against the REAL fixture sandbox (daemonized, like §5b).
+		const persistRuntime = path.join(tmp, "persist-runtime");
+		fs.mkdirSync(persistRuntime, { recursive: true });
+		process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = persistRuntime;
+		const realId = path.basename(sandboxDir);
+		const realRecord = new Map<string, ConnectionRecord>();
+		realRecord.set(realId, { sandboxId: realId, state: "connected" });
+		realRecord.set("ghost-sandbox", { sandboxId: "ghost-sandbox", state: "connected" });
+		await restoreConnections(persistPi, settings, realRecord, { extraArgs: ["--no-embeddings"] });
+		check(
+			"persist: restore connects recorded sandbox",
+			listMcpConnections().some((c) => c.id === realId),
+			listMcpConnections().map((c) => c.id).join(",") || "(none)",
+		);
+		check(
+			"persist: unknown sandbox forgotten (tombstone)",
+			entryLog.some((e) => {
+				const d = e.data as Record<string, unknown>;
+				return d.sandboxId === "ghost-sandbox" && d.state === "disconnected";
+			}),
+			JSON.stringify(entryLog),
+		);
+		const liveCount = listMcpConnections().length;
+		await restoreConnections(persistPi, settings, realRecord, { extraArgs: ["--no-embeddings"] });
+		check("persist: restore skips already-live connections", listMcpConnections().length === liveCount);
+		await disconnectMcp(realId);
+
+		const tombstoneOnly = rehydrateConnections([
+			fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: realId, state: "disconnected" }),
+		]);
+		await restoreConnections(persistPi, settings, tombstoneOnly, { extraArgs: ["--no-embeddings"] });
+		check("persist: disconnected-only records → no connect", listMcpConnections().length === 0);
+
+		const logLen = entryLog.length;
+		await restoreConnections(persistPi, { ...settings, autoReconnect: false }, realRecord, {
+			extraArgs: ["--no-embeddings"],
+		});
+		check(
+			"persist: autoReconnect off → no restore, no records",
+			listMcpConnections().length === 0 && entryLog.length === logLen,
+			`conns=${listMcpConnections().length} newEntries=${entryLog.length - logLen}`,
+		);
+		delete process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR;
+
+		// /ch-setup --auto-reconnect flag (isolated HOME — never touches real
+		// settings/sandboxes/baselines).
+		const home = process.env.HOME;
+		const xdgState = process.env.XDG_STATE_HOME;
+		const xdgCache = process.env.XDG_CACHE_HOME;
+		const setupHome = path.join(tmp, "setup-home");
+		fs.mkdirSync(setupHome, { recursive: true });
+		const setupProj = path.join(tmp, "setup-proj");
+		fs.mkdirSync(path.join(setupProj, ".pi", "pi-chhound"), { recursive: true });
+		try {
+			process.env.HOME = setupHome;
+			delete process.env.XDG_STATE_HOME;
+			delete process.env.XDG_CACHE_HOME;
+			delete process.env.CHHOUND_SANDBOX_ROOT;
+			delete process.env.CHHOUND_BASE_ROOT;
+			let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+			const setupPi = {
+				registerCommand(_name: string, def: { handler: typeof handler }) {
+					handler = def.handler;
+				},
+			} as unknown as ExtensionAPI;
+			registerSetupCommand(setupPi, {});
+			const notices: string[] = [];
+			const setupCtx = {
+				cwd: setupProj,
+				mode: "print",
+				hasUI: false,
+				ui: { notify: (m: string) => notices.push(m) },
+			};
+			await handler!("--project --auto-reconnect off", setupCtx as never);
+			check(
+				"setup: --auto-reconnect off persisted (project scope)",
+				loadSettings(setupProj).settings.autoReconnect === false,
+			);
+			await handler!("--project --auto-reconnect banana", setupCtx as never);
+			check(
+				"setup: invalid --auto-reconnect rejected",
+				notices.some((n) => n.includes("Invalid --auto-reconnect")),
+				notices.join(" | "),
+			);
+			await handler!("--project --auto-reconnect on", setupCtx as never);
+			check("setup: --auto-reconnect on persisted", loadSettings(setupProj).settings.autoReconnect === true);
+		} finally {
+			if (home === undefined) delete process.env.HOME;
+			else process.env.HOME = home;
+			if (xdgState === undefined) delete process.env.XDG_STATE_HOME;
+			else process.env.XDG_STATE_HOME = xdgState;
+			if (xdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+			else process.env.XDG_CACHE_HOME = xdgCache;
+		}
 	}
 
 	// ── 6. listing + prune ────────────────────────────────────────────
