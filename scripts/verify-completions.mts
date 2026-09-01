@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
+import { parseArgs } from "../chhound/args.ts";
 import { runGit } from "../chhound/git.ts";
 import { mcpArgumentCompletions, worktreeArgumentCompletions } from "../chhound/completions.ts";
 import { ChhoundArgumentProvider } from "../chhound/provider-wrap.ts";
@@ -22,6 +23,9 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tui-verify-"));
 const cwd = path.join(tmp, "proj");
 fs.mkdirSync(path.join(cwd, "src", "nested"), { recursive: true });
 fs.mkdirSync(path.join(cwd, "docs"), { recursive: true });
+// Pathological-but-real fixtures: a dir with a space and one starting with "-".
+fs.mkdirSync(path.join(cwd, "my project"), { recursive: true });
+fs.mkdirSync(path.join(cwd, "-target"), { recursive: true });
 fs.writeFileSync(path.join(cwd, "README.md"), "# r\n");
 
 // The project dir doubles as the git repo (branch completions need a repo cwd).
@@ -166,6 +170,59 @@ check("N: /ch-mcp flags offered", !!n3 && n3.items.some((i: any) => i.value === 
 // O: /ch-mcp TAB (force) through the wrapper → our picker, not pi's
 const o = await w("/ch-mcp ", true);
 check("O: TAB (force) on /ch-mcp shows sandbox", !!o && o.items.some((i: any) => i.value === fakeWt), JSON.stringify(o?.items?.map((i: any) => i.value)));
+
+// ── Flag-aware slot routing (flags must never shift positional slots) ──
+
+// P: boolean flag BEFORE the path position must not shift it to branch slot
+const p = await s("/chworktree --no-index ", false);
+check("P: flags don't shift positional slots", !!p && p.items.some((i: any) => i.value === "--no-index src/" && i.label === "src/"), JSON.stringify(p?.items?.map((i: any) => i.label)));
+
+// Q: branch position survives interleaved boolean flags
+const q = await s("/chworktree repo --no-index ma", false);
+check("Q: branch position survives interleaved flags", !!q && q.items.some((i: any) => i.value === "repo --no-index main"), JSON.stringify(q?.items?.map((i: any) => i.value)));
+
+// ── Equals-form flag values (--dest=value) ──
+
+const r = await s("/chworktree --dest=", false);
+check("R: --dest= equals value slot", !!r && r.items.some((i: any) => i.value === "--dest=src/" && i.label === "src/"), JSON.stringify(r?.items?.map((i: any) => i.value)));
+const s2 = await s("/chworktree wt --config=", false);
+check("S: --config= equals value slot (files)", !!s2 && s2.items.some((i: any) => i.value === "wt --config=README.md" && i.label === "README.md"), JSON.stringify(s2?.items?.map((i: any) => i.value)));
+
+// ── Paths with spaces: quoted values round-trip through parseArgs ──
+
+const t = await s("/chworktree my", false);
+const tItem = t?.items.find((i: any) => i.value === '"my project/');
+check("T: space path completes quoted", !!tItem, JSON.stringify(t?.items?.map((i: any) => i.value)));
+const tLine = tItem && t ? provider.applyCompletion(["/chworktree my"], 0, "/chworktree my".length, tItem, t.prefix).lines[0]! : "";
+const tParsed = parseArgs(tLine.slice("/chworktree ".length));
+check("T: quoted value parses as ONE positional", tParsed.positionals.length === 1 && tParsed.positionals[0] === "my project/", JSON.stringify(tParsed));
+
+// U: typing INSIDE quotes completes within the quote context
+const u = await s('/chworktree "my', false);
+check("U: typing inside quotes completes", !!u && u.items.some((i: any) => i.value === '"my project/'), JSON.stringify(u?.items?.map((i: any) => i.value)));
+
+// ── Dash-named paths ("-target") — completed via the -- separator ──
+
+const v = await s("/chworktree -t", false);
+const vItem = v?.items.find((i: any) => i.value === "-- -target/");
+check("V: dash path completes via -- separator", !!vItem, JSON.stringify(v?.items?.map((i: any) => i.value)));
+const vLine = vItem && v ? provider.applyCompletion(["/chworktree -t"], 0, "/chworktree -t".length, vItem, v.prefix).lines[0]! : "";
+check("V: accepted dash path parses as positional", parseArgs(vLine.slice("/chworktree ".length)).positionals.includes("-target/"), JSON.stringify(parseArgs(vLine.slice("/chworktree ".length))));
+
+// ── /ch-mcp: values carry the typed base; invalid slots are suppressed ──
+
+const w2 = await s("/ch-mcp --read-only ", false);
+check("W: MCP items carry the typed base", !!w2 && w2.items.some((i: any) => i.value === `--read-only ${fakeWt}`), JSON.stringify(w2?.items?.map((i: any) => i.value)));
+const x = await s("/ch-mcp chosen --prefix ", false);
+check("X: MCP --prefix value slot has no sandbox items", !x || !x.items.some((i: any) => String(i.value).includes(fakeWt)), JSON.stringify(x?.items?.map((i: any) => i.value)));
+const y = await s("/ch-mcp chosen ", false);
+check("Y: no sandbox items after the target", !y || !y.items.some((i: any) => String(i.value).includes(fakeWt)), JSON.stringify(y?.items?.map((i: any) => i.value)));
+
+// ── Deterministic ordering: dirs first, then name (dialog TAB picks items[0]) ──
+
+const z = await s("/chworktree ", false);
+const zItems = z?.items.map((i: any) => i.value) ?? [];
+check("Z: dir entries sorted (dirs first, alpha)", zItems[0] === "-target/" && zItems.indexOf("docs/") < zItems.indexOf('"my project/') && zItems.indexOf('"my project/') < zItems.indexOf("src/"), JSON.stringify(zItems));
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

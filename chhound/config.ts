@@ -238,7 +238,7 @@ export function materializeTempConfig(settings: ChhoundSettings): { configPath: 
 
 /** Convenience: parse `--config <file>` out of raw command args. */
 export function configFileFromArgs(args: string, cwd: string): AdoptResult | undefined {
-	const parsed = parseArgs(args);
+	const parsed = parseArgs(args, new Set(["config"]));
 	const file = parsed.flags["config"];
 	if (typeof file !== "string" || !file) return undefined;
 	return adoptConfigFile(file, cwd);

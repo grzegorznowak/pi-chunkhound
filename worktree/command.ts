@@ -5,6 +5,7 @@ import { parseArgs } from "../chhound/args.js";
 import { baselineDbDirFor, ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
+import { WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
@@ -89,7 +90,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			"[--no-index] [--force-reindex] [--refresh-baseline] — /chworktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
-			const { positionals, flags } = parseArgs(args);
+			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
 			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 
 			if (flags["help"] || flags["h"]) {

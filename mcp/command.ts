@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { expandHome } from "../chhound/completions.js";
+import { MCP_VALUE_FLAGS } from "../chhound/args.js";
 import { listSandboxes, fmtSize } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
@@ -105,7 +106,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			"Connect pi to a sandbox's chunkhound index over MCP. " +
 			"Usage: /ch-mcp [<worktree|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]] — no argument opens the target picker",
 		handler: async (args, ctx) => {
-			const { positionals, flags } = parseArgs(args);
+			const { positionals, flags } = parseArgs(args, MCP_VALUE_FLAGS);
 			const repoRoot = await gitRootOrNull(ctx.cwd);
 			const loaded = loadSettings(repoRoot ?? ctx.cwd);
 			if (loaded.issue) ctx.ui.notify(loaded.issue, "warning");
