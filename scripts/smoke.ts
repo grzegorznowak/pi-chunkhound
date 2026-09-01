@@ -10,7 +10,8 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { parseArgs } from "../chhound/args.js";
+import { parseArgs, WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
+
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
@@ -78,6 +79,16 @@ async function main(): Promise<void> {
 		check("--dest = form", p3.flags["dest"] === "/tmp/x", JSON.stringify(p3));
 		const p4 = parseArgs(`--dest`);
 		check("--dest bare → true", p4.flags["dest"] === true, JSON.stringify(p4));
+		// With the command's value-flag schema, a boolean flag NEVER eats the
+		// token after it (the runtime fix for flags before positionals).
+		const p5 = parseArgs(`--no-index wt main`, WORKTREE_VALUE_FLAGS);
+		check("schema: boolean flag doesn't consume positionals", p5.flags["no-index"] === true && JSON.stringify(p5.positionals) === JSON.stringify(["wt", "main"]), JSON.stringify(p5));
+		const p6 = parseArgs(`-b feature/x --no-index main`, WORKTREE_VALUE_FLAGS);
+		check("schema: value flag consumes, boolean doesn't", p6.flags["b"] === "feature/x" && p6.flags["no-index"] === true && JSON.stringify(p6.positionals) === JSON.stringify(["main"]), JSON.stringify(p6));
+		const p7 = parseArgs(`-- --no-index wt`);
+		check("-- ends flag parsing (rest is positional)", JSON.stringify(p7.positionals) === JSON.stringify(["--no-index", "wt"]) && !("" in p7.flags), JSON.stringify(p7));
+		const p8 = parseArgs(`"my project/`);
+		check("unterminated quote is one positional", JSON.stringify(p8.positionals) === JSON.stringify(["my project/"]), JSON.stringify(p8));
 	}
 
 	// ── 1b. progress extraction (parseChhoundLine / surfaceChhoundLine / buildStatusText) ──
