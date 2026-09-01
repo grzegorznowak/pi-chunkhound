@@ -44,6 +44,8 @@ export interface ChhoundSettings {
 	embedding?: EmbeddingSettings;
 	llm?: LlmSettings;
 	indexing?: IndexingSettings;
+	/** Default base folder for new worktrees (folder = branch name). */
+	worktreeBase?: string;
 	research?: Record<string, unknown>;
 	baseline?: BaselineSettings;
 	/** Override sandbox library root. Default: $XDG_STATE_HOME/pi-chhound/sandboxes. */

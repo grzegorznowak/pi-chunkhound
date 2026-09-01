@@ -156,6 +156,29 @@ function llmBlock(settings: ChhoundSettings): Record<string, unknown> | undefine
 }
 
 /**
+ * True when `dir` or any ancestor contains a .chunkhound.json — i.e. it sits
+ * inside a chunkhound index root, so it must not be used as a worktree base
+ * (worktrees under an indexed tree are blocked at creation anyway).
+ */
+export function insideChunkhoundRoot(dir: string): boolean {
+	let p = path.resolve(dir);
+	for (;;) {
+		if (fs.existsSync(path.join(p, CONFIG_FILE_NAME))) return true;
+		const parent = path.dirname(p);
+		if (parent === p) return false;
+		p = parent;
+	}
+}
+
+/**
+ * Suggested worktree base folder for /ch-setup: the cwd, unless it or any
+ * parent already contains a .chunkhound.json (then it has to be elsewhere).
+ */
+export function suggestWorktreeBase(cwd: string): string | undefined {
+	return insideChunkhoundRoot(cwd) ? undefined : path.resolve(cwd);
+}
+
+/**
  * Materialize a chunkhound.json into `dir`. Never contains api_key; the duckdb
  * path is pinned absolute to `dbDir`; the .chhound exclusion pattern is guaranteed.
  * Returns the config file path.

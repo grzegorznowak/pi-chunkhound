@@ -54,6 +54,7 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 				`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
 				`sandbox root: ${sandboxRoot(settings)}`,
 				`baseline root: ${baseRoot(settings)}`,
+				`worktree base: ${settings.worktreeBase ?? "— (worktrees default to the repo's parent)"}`,
 				`embedding: ${settings.embedding?.provider && settings.embedding?.model
 					? `${settings.embedding.provider}/${settings.embedding.model}${settings.embedding.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`
 					: "not configured — run /ch-setup"}`,

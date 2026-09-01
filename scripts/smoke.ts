@@ -12,7 +12,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { parseArgs } from "../chhound/args.js";
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
-import { adoptConfigFile, foldAdoptedInto, materializeConfig } from "../chhound/config.js";
+import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
@@ -321,6 +321,19 @@ async function main(): Promise<void> {
 		check("preserve merges extra sections", (cfg3b.research as Record<string, unknown>)?.enabled === true);
 		check("preserve does not carry llm (owned keys rewritten)", (cfg3b.llm as Record<string, unknown> | undefined) === undefined);
 
+		// Worktree-base suggestion rules: cwd is suggested unless it (or a
+		// parent) already contains a .chunkhound.json.
+		const wtProj = path.join(tmp, "wtbase");
+		const wtSub = path.join(wtProj, "sub");
+		fs.mkdirSync(wtSub, { recursive: true });
+		check("suggestWorktreeBase: clean cwd suggested", suggestWorktreeBase(wtProj) === wtProj, String(suggestWorktreeBase(wtProj)));
+		check("insideChunkhoundRoot: clean → false", insideChunkhoundRoot(wtProj) === false);
+		fs.writeFileSync(path.join(wtProj, ".chunkhound.json"), "{}");
+		check("insideChunkhoundRoot: own dir → true", insideChunkhoundRoot(wtProj) === true);
+		check("insideChunkhoundRoot: parent walk → true", insideChunkhoundRoot(wtSub) === true);
+		check("suggestWorktreeBase: inside root → undefined", suggestWorktreeBase(wtProj) === undefined);
+		check("suggestWorktreeBase: subdir of root also undefined", suggestWorktreeBase(wtSub) === undefined);
+
 		// output_dims: materialized when set, absent when unset.
 		const dir4 = path.join(tmp, "cfg-dims");
 		const p4 = materializeConfig(dir4, { settings: { ...settings, embedding: { provider: "voyageai", outputDims: 256 } }, dbDir: path.join(dir4, ".chhound.db") });
@@ -620,6 +633,8 @@ async function main(): Promise<void> {
 	check("project path used", loaded.projectPath === saved);
 	const savedLlm = saveSettings({ ...settings, llm: { provider: "gemini", model: "gemini-2.5-pro" } }, "project", proj);
 	check("llm settings round-trip", loadSettings(proj).settings.llm?.provider === "gemini" && loadSettings(proj).settings.llm?.model === "gemini-2.5-pro", savedLlm);
+	const savedBase = saveSettings({ ...settings, worktreeBase: "/home/x/wt-base" }, "project", proj);
+	check("worktreeBase settings round-trip", loadSettings(proj).settings.worktreeBase === "/home/x/wt-base", savedBase);
 
 	// ── 8. extension loads ────────────────────────────────────────────
 	section("extension entry loads");

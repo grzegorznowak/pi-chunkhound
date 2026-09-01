@@ -108,7 +108,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				notify("--dest requires a directory: /chworktree [repo] --dest <dir>", "error");
 				return;
 			}
-			const dest = typeof flags["dest"] === "string" ? path.resolve(ctx.cwd, expandHome(flags["dest"])) : undefined;
+			let dest = typeof flags["dest"] === "string" ? path.resolve(ctx.cwd, expandHome(flags["dest"])) : undefined;
 			const wtArg = positionals[0];
 			const requestedPath = wtArg ? path.resolve(ctx.cwd, wtArg) : undefined;
 
@@ -123,13 +123,21 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			}
 			repoRoot = path.resolve(repoRoot);
 
-			if (!dest && !wtArg) {
+			const loaded = loadSettings(repoRoot);
+			if (loaded.issue) notify(loaded.issue, "warning");
+			const settings = loaded.settings;
+
+			if (!dest && !wtArg && !settings.worktreeBase) {
 				notify(
-					"A worktree location is required: /chworktree <path> … (or give --dest <dir> and the " +
+					"A worktree location is required: /chworktree <path> … (or give --dest <dir> — the " +
 						"worktree folder is named after the branch).",
 					"error",
 				);
 				return;
+			}
+			if (!dest && !wtArg && settings.worktreeBase) {
+				dest = settings.worktreeBase;
+				notify(`Using the configured worktree base: ${dest}`, "info");
 			}
 
 			// ── Branch intent (one-go) — decided BEFORE the location, since the
@@ -201,9 +209,6 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				return;
 			}
 
-			const loaded = loadSettings(repoRoot);
-			if (loaded.issue) notify(loaded.issue, "warning");
-			const settings = loaded.settings;
 			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 			if (conflict) {
 				notify(
@@ -498,9 +503,10 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 	}
 
 	// 3) Destination — base folder; the worktree lands at <base>/<branch>
-	//    (-2 on collision). Locations already part of another chunkhound index block.
+	//    (-2 on collision). Default: the configured worktree base, else the
+	//    repo's parent. Locations already part of another chunkhound index block.
 	//    Prefilled with the default; TAB completes like the command-line picker.
-	const defaultDest = path.dirname(repoRoot);
+	const defaultDest = settings.worktreeBase ?? path.dirname(repoRoot);
 	const finalBranch = branch ?? createBranch;
 	let destRaw = await promptPath(ctx.ui, {
 		title: `Destination folder (base folder — the worktree lands at <base>/${finalBranch ?? "<branch>"}; default: ${defaultDest}):`,
