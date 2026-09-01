@@ -21,15 +21,21 @@ engine uses for PR sandboxes.
 
 ## Install
 
-Symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`), then run
-`/reload` in pi:
+**As a pi package (git)** — add to `packages` in `~/.pi/agent/settings.json` (or project `.pi/settings.json`):
+
+```json
+"packages": ["git:github.com/grzegorznowak/pi-chunkhound@main"]
+```
+
+or `pi install git:github.com/grzegorznowak/pi-chunkhound@main` (try first with `pi -e …` — installs for one run only). Pi clones the repo, runs `npm install` for its dependencies, and loads it on startup. `pi update --extensions` reconciles the clone to the pinned ref.
+
+**From source (development)** — symlink this folder into `~/.pi/agent/extensions/` (or `.pi/extensions/`), then `/reload`:
 
 ```
 ln -s /path/to/pi-chhound ~/.pi/agent/extensions/pi-chhound
 ```
 
-Configure once with `/ch-setup` (embedding provider/model, LLM for research tools,
-baseline ref & max age, worktree base folder).
+Don't use both install paths at once — the commands would register twice. Configure once with `/ch-setup` (embedding provider/model, LLM for research tools, baseline ref & max age, worktree base folder).
 
 ## Commands
 
