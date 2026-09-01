@@ -145,10 +145,17 @@ function embeddingBlock(settings: ChhoundSettings): Record<string, unknown> | un
 	return out;
 }
 
+/** Always-on llm-section defaults — research quality + call budget. NOT asked in the wizard. */
+const LLM_DEFAULTS = {
+	codex_reasoning_effort_utility: "minimal",
+	codex_reasoning_effort_synthesis: "high",
+	timeout: 300,
+} as const;
+
 function llmBlock(settings: ChhoundSettings): Record<string, unknown> | undefined {
 	const l = settings.llm;
 	if (!l || (!l.provider && !l.model && !l.apiKey)) return undefined;
-	const out: Record<string, unknown> = {};
+	const out: Record<string, unknown> = { ...LLM_DEFAULTS };
 	if (l.provider) out.provider = l.provider;
 	if (l.model) out.model = l.model;
 	if (l.apiKey) out.api_key = l.apiKey;

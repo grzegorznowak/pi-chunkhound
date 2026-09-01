@@ -325,7 +325,21 @@ async function main(): Promise<void> {
 		});
 		const cfg3 = JSON.parse(fs.readFileSync(p3, "utf8")) as Record<string, unknown>;
 		const llm3 = cfg3.llm as Record<string, unknown>;
-		check("llm block materialized", llm3?.provider === "openai" && llm3?.model === "gpt-5" && llm3?.api_key === "sk-LLM", JSON.stringify(cfg3));
+		check(
+			"llm block materialized",
+			llm3?.provider === "openai" &&
+				llm3?.model === "gpt-5" &&
+				llm3?.api_key === "sk-LLM" &&
+				llm3?.codex_reasoning_effort_utility === "minimal" &&
+				llm3?.codex_reasoning_effort_synthesis === "high" &&
+				llm3?.timeout === 300,
+			JSON.stringify(cfg3),
+		);
+		check("llm defaults present without llm settings", (() => {
+			const p = materializeConfig(dir3, { settings: { ...settings, llm: { provider: "openai" } }, dbDir: path.join(dir3, ".chhound.db") });
+			const llm = (JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>).llm as Record<string, unknown>;
+			return llm?.codex_reasoning_effort_synthesis === "high" && llm?.timeout === 300;
+		})());
 		const p3b = materializeConfig(dir3, {
 			settings,
 			dbDir: path.join(dir3, ".chhound.db"),
