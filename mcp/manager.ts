@@ -1,8 +1,12 @@
 /**
- * Dynamic MCP connection manager: spawns `chunkhound mcp <worktree>
+ * Dynamic MCP connection manager: spawns `chunkhound mcp <sandbox-dir>
  * --config <sandbox-config>` (daemonized proxy by default) and bridges the
  * server's tools into pi via registerTool() (which auto-refreshes the tool
  * registry — newly registered tools become active immediately).
+ *
+ * Design 1 (sandbox-anchored): the daemon's project dir is the SANDBOX DIR,
+ * never the worktree — .chunkhound/ (daemon.log, watchman) and the index db
+ * live next to the config, while the checkout stays pristine.
  *
  * Lifecycle:
  * - connect: spawn → SDK stdio connect → listTools → register `chh_*` tools.
@@ -76,7 +80,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	const id = path.basename(entry.dir);
 	if (connections.has(id)) throw new Error(`already connected (${id}) — run /ch-mcp ${id} --disconnect first`);
 
-	const args = ["mcp", entry.meta.worktree, "--config", sandboxConfigPath(entry.dir)];
+	const args = ["mcp", entry.dir, "--config", sandboxConfigPath(entry.dir)];
 	if (opts.noDaemon) args.push("--no-daemon");
 	if (opts.readOnly) args.push("--read-only");
 	if (opts.extraArgs) args.push(...opts.extraArgs);
@@ -84,7 +88,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	const transport = new StdioClientTransport({
 		command: chhoundBinary(),
 		args,
-		cwd: entry.meta.worktree,
+		cwd: entry.dir,
 		env: { ...process.env, ...(chhoundApiKeyEnv(opts.apiKey) ?? {}) } as Record<string, string>,
 		stderr: "pipe",
 	});

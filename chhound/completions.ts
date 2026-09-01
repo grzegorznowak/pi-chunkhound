@@ -286,7 +286,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 				);
 			case "dest":
 				return withBase(
-					dirCompletions(rawValuePart, cwd, { quote: true, paramLabel: "worktree base folder (branch-named)" }).map((i) => ({
+					dirCompletions(rawValuePart, cwd, { quote: true, paramLabel: "sandbox library root (worktree + index land there)" }).map((i) => ({
 						...i,
 						value: prefix + i.value,
 					})),

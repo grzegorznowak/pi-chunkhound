@@ -119,19 +119,3 @@ export async function revParse(cwd: string, ref: string): Promise<string | undef
 	const r = await runGit(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd });
 	return r.code === 0 ? r.stdout : undefined;
 }
-
-/** Absolute git dir for a work tree (main repo or linked worktree). */
-export async function absoluteGitDir(cwd: string): Promise<string | undefined> {
-	const r = await runGit(["rev-parse", "--absolute-git-dir"], { cwd });
-	return r.code === 0 ? r.stdout : undefined;
-}
-
-/**
- * Path to the repo's info/exclude file (COMMON git dir — linked worktrees
- * share it; per-worktree .git/worktrees/<name>/info/exclude is NOT read).
- */
-export async function repoExcludePath(cwd: string): Promise<string | undefined> {
-	const r = await runGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
-	if (r.code !== 0) return undefined;
-	return `${r.stdout}/info/exclude`;
-}

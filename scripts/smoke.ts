@@ -16,7 +16,7 @@ import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
-import { currentBranch, findRepoRoot, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
+import { currentBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
@@ -41,7 +41,7 @@ import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } f
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
-import { deriveWorktreePath, isWizardInvocation, resolveWorktreeLocation } from "../worktree/command.js";
+import { isWizardInvocation, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -161,7 +161,7 @@ async function main(): Promise<void> {
 		const argDestFlag = await worktreeArgumentCompletions("wt --d", proj);
 		check("arg completions: --dest flag name", argDestFlag.some((c) => c.value === "wt --dest"), JSON.stringify(argDestFlag));
 		const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
-		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree base folder (branch-named)"), JSON.stringify(argDest));
+		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "sandbox library root (worktree + index land there)"), JSON.stringify(argDest));
 		check("--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
 	}
 
@@ -179,26 +179,22 @@ async function main(): Promise<void> {
 		check("wizard: --help is not wizard", isWizardInvocation(["repo"], { help: true }) === false);
 		check("wizard: -h is not wizard", isWizardInvocation(["repo"], { h: true }) === false);
 
-		const loc = resolveWorktreeLocation({ repoRoot: repo2, dest });
-		check("--dest → dest/<repo>-wt", loc.wtPath === path.join(dest, "dest-repo-wt"), loc.wtPath);
-		const loc3 = resolveWorktreeLocation({ repoRoot: repo2, positional: repo2 });
-		check("repo itself → sibling <repo>-wt", loc3.wtPath === path.join(tmp, "dest-repo-wt"), `${loc3.wtPath} (note: ${loc3.note})`);
-		const loc4 = resolveWorktreeLocation({ repoRoot: repo2, positional: path.join(tmp, "custom") });
-		check("plain path → itself (no dest)", loc4.wtPath === path.join(tmp, "custom"));
-		fs.mkdirSync(path.join(dest, "dest-repo-wt"), { recursive: true });
-		const loc2 = resolveWorktreeLocation({ repoRoot: repo2, dest });
-		check("--dest collision → -wt-2", loc2.wtPath === path.join(dest, "dest-repo-wt-2"), loc2.wtPath);
-		check("deriveWorktreePath(parent)", deriveWorktreePath(repo2, dest) === path.join(dest, "dest-repo-wt-2"));
-		check("deriveWorktreePath default sibling", deriveWorktreePath(repo2) === path.join(tmp, "dest-repo-wt"));
-		// Branch-named folders: the worktree folder follows the branch.
-		check("deriveWorktreePath branch", deriveWorktreePath(repo2, dest, "chworktree-test") === path.join(dest, "chworktree-test"));
-		fs.mkdirSync(path.join(dest, "chworktree-test"), { recursive: true });
-		check("deriveWorktreePath branch collision → -2", deriveWorktreePath(repo2, dest, "chworktree-test") === path.join(dest, "chworktree-test-2"));
-		check("deriveWorktreePath branch slashes → dashes", deriveWorktreePath(repo2, dest, "fix/foo") === path.join(dest, "fix-foo"));
-		const locB = resolveWorktreeLocation({ repoRoot: repo2, dest, branch: "chworktree-test" });
-		check("resolveWorktreeLocation branch-named", locB.wtPath === path.join(dest, "chworktree-test-2"), locB.wtPath);
-		const locSib = resolveWorktreeLocation({ repoRoot: repo2, positional: repo2, branch: "feat-x" });
-		check("repo itself → branch-named sibling", locSib.wtPath === path.join(tmp, "feat-x"), locSib.wtPath);
+		// Design 1: the checkout lives INSIDE its sandbox dir — name derived
+		// from repo + branch, folder = branch (slashes → "-").
+		const sb = resolveSandboxLocation(repo2, undefined, settings, dest);
+		check("sandbox: name from repo+branch (repo-wt default)", path.basename(sb.sandboxDir).startsWith("dest-repo-"), path.basename(sb.sandboxDir));
+		check("sandbox: worktree inside sandbox dir", sb.wtPath === path.join(sb.sandboxDir, "dest-repo-wt"), sb.wtPath);
+		const sbBranch = resolveSandboxLocation(repo2, "fix/foo", settings, dest);
+		check("sandbox: branch-named folder (slashes → dashes)", sbBranch.wtPath === path.join(sbBranch.sandboxDir, "fix-foo"), sbBranch.wtPath);
+		check("sandbox: distinct branch → distinct sandbox", sbBranch.sandboxDir !== sb.sandboxDir, `${sbBranch.sandboxDir} vs ${sb.sandboxDir}`);
+		// Branch-rename safety: the name never depends on the worktree path (no circularity).
+		const sbSame = resolveSandboxLocation(repo2, "fix/foo", settings, dest);
+		check("sandbox: stable for same (repo, branch)", sbSame.sandboxDir === sbBranch.sandboxDir && sbSame.wtPath === sbBranch.wtPath);
+		// --dest re-scoped: sandbox library root override — same (repo, branch) at a
+		// different root yields a different sandbox dir.
+		const sbOther = resolveSandboxLocation(repo2, "fix/foo", settings, path.join(tmp, "other-root"));
+		check("sandbox: --dest = library root override", sbOther.sandboxDir.startsWith(path.join(tmp, "other-root")) && sbOther.sandboxDir !== sbBranch.sandboxDir, sbOther.sandboxDir);
+		check("sandbox: folder name independent of root", path.basename(sbOther.wtPath) === "fix-foo");
 
 		const idx = [path.join(tmp, "idx-a")];
 		check("conflict: exact match", findConflictingIndexed(path.join(tmp, "idx-a"), idx) === path.join(tmp, "idx-a"));
@@ -482,13 +478,20 @@ async function main(): Promise<void> {
 	const b3 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
 	check("baseline refreshed on base move", b3.fresh === true && b3.meta.baseCommit === baseCommit2, b3.reason);
 
-	// ── 5. worktree spin-up: copy + top-up ────────────────────────────
+	// ── 5. worktree spin-up: sandbox-anchored — copy + top-up ────────
 	section("worktree spin-up");
-	const wt = path.join(tmp, "wt-fix");
+	const sandboxDir = sandboxDirFor(repo, "fix/smoke", settings);
+	const wt = path.join(sandboxDir, "fix-smoke");
+	fs.mkdirSync(sandboxDir, { recursive: true });
 	await gitWorktreeAdd({ cwd: repo, path: wt, createBranch: "fix/smoke", commitIsh: "main" });
 	fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
+	// Commit the branch change (mirrors a real dev edit) so the final status
+	// check proves the checkout stays CLEAN — no chunkhound artifacts.
+	await runGit(["add", "-A"], { cwd: wt });
+	await runGit(["commit", "-m", "add c"], { cwd: wt });
 	const branch = await currentBranch(wt);
 	check("worktree branch", branch === "fix/smoke", branch);
+	check("worktree inside sandbox dir", wt.startsWith(sandboxDir + path.sep), wt);
 
 	// Branch-in-use handling: fix/smoke is checked out at wt — the wizard must
 	// derive a fresh name instead of trying to check it out again.
@@ -528,30 +531,24 @@ async function main(): Promise<void> {
 	check("findRepoRoot walks up from nested dir", resolved === repo, `${resolved} vs ${repo}`);
 	const none = await findRepoRoot(path.join(tmp, "not-a-repo"));
 	check("findRepoRoot undefined outside repos", none === undefined, `${none}`);
-	check("deriveWorktreePath sibling", deriveWorktreePath(repo) === path.join(tmp, "repo-wt"), deriveWorktreePath(repo));
 	const argComp2 = await worktreeArgumentCompletions("repo fix", tmp);
 	check("arg completions resolve repo from path (cwd not a repo)", argComp2.some((b) => b.value === "repo fix/smoke"), JSON.stringify(argComp2));
 
-	const sandboxDir = sandboxDirFor(repo, wt, settings);
 	const dbDir = sandboxDbDir(sandboxDir);
 	const configPath = materializeConfig(sandboxDir, { settings, dbDir });
-	const r = await hotStartIndex({ sourceDbDir: b2.dbDir, targetDbDir: dbDir, indexDir: wt, configPath, onLine, extraArgs });
+	const r = await hotStartIndex({ sourceDbDir: b2.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, onLine, extraArgs });
 	check("index ok", r.code === 0, `code=${r.code}`);
 	check("db copied from baseline", r.copied === true && fs.existsSync(dbDir));
 	check("db bigger than baseline copy (top-up added c.ts)", dirSize(dbDir) > 0);
 
-	const excludePath = await repoExcludePath(wt);
-	if (excludePath) {
-		fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-		fs.appendFileSync(excludePath, "\n.chhound/\n.chunkhound.json\n");
-	}
-	const excl = excludePath ? fs.readFileSync(excludePath, "utf8") : "";
-	check("repo git exclude", !!excludePath && excl.includes(".chhound/"), excludePath ?? "no exclude path");
-	// Prove the exclude actually bites (common-dir exclude applies repo-wide).
-	fs.mkdirSync(path.join(wt, ".chhound"), { recursive: true });
-	fs.writeFileSync(path.join(wt, ".chhound", "daemon.log"), "log\n");
+	// Design 1: ZERO operational files in the worktree or the repo — no
+	// git-exclude writes, no .chhound/, no config inside the checkout.
+	const excl = fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");
+	check("no git-exclude writes in the repo", !excl.includes("pi-chhound") && !excl.includes(".chhound"), excl);
+	check("no .chhound inside the checkout", !fs.existsSync(path.join(wt, ".chhound")), "found .chhound in checkout");
+	check("no config inside the checkout", !fs.existsSync(path.join(wt, ".chunkhound.json")), "found config in checkout");
 	const wtStatus = (await runGit(["status", "--porcelain"], { cwd: wt })).stdout;
-	check("worktree ignores .chhound (daemon.log untracked noise)", !wtStatus.includes(".chhound"), wtStatus);
+	check("worktree git status clean after index", wtStatus === "", wtStatus);
 	const repoStatus = (await runGit(["status", "--porcelain"], { cwd: repo })).stdout;
 	check("repo clean after worktree+index", repoStatus === "", repoStatus);
 
@@ -599,8 +596,8 @@ async function main(): Promise<void> {
 		// --no-daemon: single-process server; must exit when stdin closes.
 		const t1 = new StdioClientTransport({
 			command: chhoundBinary(),
-			args: ["mcp", wt, "--config", configPath, "--no-daemon", "--no-embeddings"],
-			cwd: wt,
+			args: ["mcp", sandboxDir, "--config", configPath, "--no-daemon", "--no-embeddings"],
+			cwd: sandboxDir,
 			env: mcpEnv,
 			stderr: "pipe",
 		});
@@ -620,12 +617,12 @@ async function main(): Promise<void> {
 
 		// Default daemonized mode: stdio proxy + background daemon. The daemon
 		// must shut itself down (delay 0) once the client disconnects.
-		const projectHash = createHash("sha256").update(path.resolve(wt)).digest("hex").slice(0, 16);
+		const projectHash = createHash("sha256").update(path.resolve(sandboxDir)).digest("hex").slice(0, 16);
 		const lockFile = path.join(daemonRuntime, "daemon-locks", `${projectHash}.json`);
 		const t2 = new StdioClientTransport({
 			command: chhoundBinary(),
-			args: ["mcp", wt, "--config", configPath, "--no-embeddings"],
-			cwd: wt,
+			args: ["mcp", sandboxDir, "--config", configPath, "--no-embeddings"],
+			cwd: sandboxDir,
 			env: mcpEnv,
 			stderr: "pipe",
 		});
@@ -634,6 +631,19 @@ async function main(): Promise<void> {
 		const st2 = await c2.callTool({ name: "daemon_status", arguments: {} });
 		check("mcp: daemonized mode callable", JSON.stringify(st2).includes("query_ready"));
 		check("mcp: daemon lock registered", await waitFor(() => fs.existsSync(lockFile), 10_000), lockFile);
+		// Design 1 core claim: daemon state lands in the SANDBOX dir, never in the
+		// checkout — daemon.log, and the root-claim sidecar (indexed root = sandbox).
+		check(
+			"mcp: daemon.log lands in the sandbox dir",
+			await waitFor(() => fs.existsSync(path.join(sandboxDir, ".chunkhound", "daemon.log")), 15_000),
+			sandboxDir,
+		);
+		check("mcp: no .chunkhound in the worktree", !fs.existsSync(path.join(wt, ".chunkhound")), "found .chunkhound in checkout");
+		check(
+			"mcp: daemon claims the sandbox dir as indexed root",
+			await waitFor(() => readClaimedRoot(dbDir) === sandboxDir, 15_000),
+			readClaimedRoot(dbDir) ?? "unclaimed",
+		);
 		const pid2 = t2.pid;
 		await c2.close();
 		check("mcp: proxy exits on close (daemonized)", await waitFor(() => pid2 !== null && !isAlive(pid2), 10_000), `pid=${pid2}`);
@@ -743,15 +753,16 @@ async function main(): Promise<void> {
 	const sandboxes = listSandboxes(settings);
 	check("sandbox listed", sandboxes.length === 1 && sandboxes[0]!.meta.worktree === wt);
 	check("db size reported", sandboxes[0]!.dbSizeBytes > 0);
-	// chunkhound's root-claim sidecar (written at index time) — read + match helpers.
+	// chunkhound's root-claim sidecar (written at index time) — Design 1: it
+	// claims the SANDBOX DIR (the daemon's project dir), not the checkout.
 	const claimPath = `${dbDir}.root.json`;
-	fs.writeFileSync(claimPath, JSON.stringify({ version: 1, indexed_root_path: wt }) + "\n", "utf8");
-	check("claimed root read from sidecar", readClaimedRoot(dbDir) === wt);
+	fs.writeFileSync(claimPath, JSON.stringify({ version: 1, indexed_root_path: sandboxDir }) + "\n", "utf8");
+	check("claimed root read from sidecar", readClaimedRoot(dbDir) === sandboxDir);
 	const claimed = listSandboxes(settings);
-	check("sandbox entry carries claimed root", claimed[0]!.claimedRoot === wt);
-	check("claimed root matches worktree", claimedRootMatches(claimed[0]!.claimedRoot!, wt));
+	check("sandbox entry carries claimed root", claimed[0]!.claimedRoot === sandboxDir);
+	check("claimed root matches sandbox dir", claimedRootMatches(claimed[0]!.claimedRoot!, sandboxDir));
 	check("mismatch detected", !claimedRootMatches(claimed[0]!.claimedRoot!, "/somewhere/else"));
-	check("trailing-slash mismatch tolerated", claimedRootMatches(`${wt}/`, wt));
+	check("trailing-slash mismatch tolerated", claimedRootMatches(`${sandboxDir}/`, sandboxDir));
 	fs.rmSync(claimPath, { force: true });
 	check("missing sidecar → unclaimed", listSandboxes(settings)[0]!.claimedRoot === undefined);
 	const baselines = listBaselines(settings);

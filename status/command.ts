@@ -52,9 +52,8 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 
 			const lines: string[] = [
 				`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
-				`sandbox root: ${sandboxRoot(settings)}`,
+				`sandbox root: ${sandboxRoot(settings)}${settings.worktreeBase && !settings.sandboxRoot ? ` (legacy worktreeBase)` : ""}`,
 				`baseline root: ${baseRoot(settings)}`,
-				`worktree base: ${settings.worktreeBase ?? "— (worktrees default to the repo's parent)"}`,
 				`embedding: ${settings.embedding?.provider && settings.embedding?.model
 					? `${settings.embedding.provider}/${settings.embedding.model}${settings.embedding.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`
 					: "not configured — run /ch-setup"}`,
@@ -68,13 +67,15 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			} else {
 				for (const s of sandboxes) {
 					const alive = fs.existsSync(s.meta.worktree) ? "✓" : "✗ gone";
+					// Design 1: the claimed root is the SANDBOX dir (the daemon's
+					// project dir — the checkout lives inside it), not the worktree.
 					let rootTxt: string;
 					if (!s.claimedRoot) {
-						rootTxt = "root unclaimed — run chunkhound index from the worktree";
-					} else if (claimedRootMatches(s.claimedRoot, s.meta.worktree)) {
+						rootTxt = "root unclaimed — run chunkhound index/mcp from the sandbox dir";
+					} else if (claimedRootMatches(s.claimedRoot, s.dir)) {
 						rootTxt = `root ${s.claimedRoot}`;
 					} else {
-						rootTxt = `⚠ root ${s.claimedRoot} ≠ worktree — run chunkhound index/mcp from ${s.claimedRoot}`;
+						rootTxt = `⚠ root ${s.claimedRoot} ≠ sandbox — run chunkhound index/mcp from ${s.dir}`;
 					}
 					lines.push(
 						`  ${alive} ${path.basename(s.dir)} → ${s.meta.worktree}`,

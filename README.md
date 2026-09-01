@@ -35,7 +35,7 @@ or `pi install git:github.com/grzegorznowak/pi-chunkhound@main` (try first with 
 ln -s /path/to/pi-chhound ~/.pi/agent/extensions/pi-chhound
 ```
 
-Don't use both install paths at once — the commands would register twice. Configure once with `/ch-setup` (embedding provider/model, LLM for research tools, baseline ref & max age, worktree base folder).
+Don't use both install paths at once — the commands would register twice. Configure once with `/ch-setup` (embedding provider/model, LLM for research tools, baseline ref & max age, sandbox library root).
 
 ## Commands
 
@@ -49,18 +49,21 @@ Don't use both install paths at once — the commands would register twice. Conf
 ### /chworktree — two ways to invoke
 
 - **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
-  name (Enter = new branch `<repo>-wt`) and the destination folder (Enter = the
-  repo's parent). With no argument at all it also lets you pick the repo (current
+  name (Enter = new branch `<repo>-wt`) and the sandbox library root (Enter = the
+  configured root). With no argument at all it also lets you pick the repo (current
   repo, repos from the index library, or a typed path). Path prompts support TAB
   completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
 - **One-go (agents)** — everything on one line, fully non-interactive:
-  `/chworktree [repo] -b <branch> --dest <dir>`. With `--dest` the folder is named
-  after the branch (`<repo>-wt` when no branch is given, `-2` suffix on collision);
-  without `--dest` the first positional is the worktree location itself.
+  `/chworktree [repo] -b <branch> [--dest <dir>]`. The first argument is always
+  the repo. `--dest` overrides the sandbox library root for this invocation
+  (default: the configured root); the worktree and its index land at
+  `<root>/<sandbox>/<branch>`.
 
-In all modes, the final location must not already be part of another chunkhound
-index — the wizard re-prompts, one-go aborts. Indexes live in the sandbox library,
-**outside** the worktree; the repo only sees a git-excluded `.chhound/daemon.log`.
+In all modes the location must not overlap another chunkhound sandbox or index —
+the wizard re-prompts, one-go aborts. **Sandbox-anchored layout**: the checkout
+lives inside its sandbox dir together with the config, index db and daemon state
+(the `/workspaces` pattern). Nothing is ever written into the checkout or the
+source repo — no `.chunkhound/`, no git-exclude edits.
 Long index runs stream live progress to the footer (`embedding · batch 3/12 · db 5.8 MB …`).
 
 ### /ch-mcp
@@ -82,15 +85,17 @@ sandboxes whose worktree is gone.
 Interactive wizard in the TUI (defaults prefill the fields, TAB skips already
 answered questions) or fully flag-driven: `--provider --model --rerank-model
 --output-dims --llm-provider --llm-model --llm-api-key --baseline-ref
---baseline-max-age --worktree-base --api-key --verify --project --reset`.
-`--config <file>` adopts an existing `chunkhound.json`; `--worktree-base` sets the
-default destination for `/chworktree`.
+--baseline-max-age --sandbox-root --api-key --verify --project --reset`.
+`--config <file>` adopts an existing `chunkhound.json`; `--sandbox-root` sets the
+sandbox library root for `/chworktree` (`--worktree-base` is a legacy alias).
 
 ## Where things live
 
 ```
 ~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/           # baselines (per repo + base ref)
-~/.local/state/pi-chhound/sandboxes/<repo>-<wt>-<hash>/  # one dir per worktree index
+~/.local/state/pi-chhound/sandboxes/<repo>-<branch>-<hash>/  # one sandbox per (repo, branch):
+                                                          #   config + index db + daemon state
+                                                          #   + the worktree checkout itself
 ```
 
 - Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` env or settings.

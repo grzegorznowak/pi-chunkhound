@@ -10,13 +10,13 @@ import { gitRootOrNull } from "../chhound/git.js";
 import { listSandboxes, sandboxConfigPath } from "../chhound/sandbox.js";
 import { promptText, promptPath } from "../chhound/path-input.js";
 import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "../chhound/settings.js";
-import { globalSettingsPath, projectSettingsPath } from "../chhound/paths.js";
+import { globalSettingsPath, projectSettingsPath, sandboxRoot } from "../chhound/paths.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 
 const USAGE =
 	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--output-dims N] " +
 	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
-	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--worktree-base <dir>] [--api-key <key>] [--verify] [--project] [--reset]";
+	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--verify] [--project] [--reset]";
 
 /**
  * Re-materialize every sandbox + baseline config from current settings,
@@ -145,16 +145,26 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				}
 			}
 			if (typeof flags["worktree-base"] === "string") {
-				const base = path.resolve(ctx.cwd, expandHome(flags["worktree-base"]));
+				warnings.push("--worktree-base is a legacy alias of --sandbox-root.");
+			}
+			const sandboxRootFlag =
+				typeof flags["sandbox-root"] === "string"
+					? flags["sandbox-root"]
+					: typeof flags["worktree-base"] === "string"
+						? flags["worktree-base"]
+						: undefined;
+			if (sandboxRootFlag) {
+				const base = path.resolve(ctx.cwd, expandHome(sandboxRootFlag));
 				if (insideChunkhoundRoot(base)) {
 					ctx.ui.notify(
-						`--worktree-base must be outside any chunkhound index root — ${base} or a parent contains a .chunkhound.json.`,
+						`--sandbox-root must be outside any chunkhound index root — ${base} or a parent contains a .chunkhound.json.`,
 						"error",
 					);
 					return;
 				}
-				settings.worktreeBase = base;
-				updates.push(`worktreeBase=${base}`);
+				settings.sandboxRoot = base;
+				if (settings.worktreeBase) delete settings.worktreeBase;
+				updates.push(`sandboxRoot=${base}`);
 			}
 
 			// Secret: persisted (v1 decision) — settings.json + materialized configs, 0600.
@@ -276,16 +286,16 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				}
 				if (baseRef) settings.baseline = { ...(settings.baseline ?? {}), ref: baseRef };
 
-				// Worktree base folder — suggested from the cwd unless it (or a
+				// Sandbox library root — suggested from the cwd unless it (or a
 				// parent) is already a chunkhound index root, then it must be elsewhere.
-				const suggested = settings.worktreeBase ?? suggestWorktreeBase(ctx.cwd);
+				const suggested = settings.sandboxRoot ?? settings.worktreeBase ?? suggestWorktreeBase(ctx.cwd);
 				let basePicked: string | undefined;
 				for (let attempt = 0; attempt < 3 && basePicked === undefined; attempt++) {
 					const raw = await promptPath(ctx.ui, {
-						title: `Worktree base folder (worktrees land at <base>/<branch>; default: ${suggested ?? "none — must be outside any chunkhound index"}):`,
+						title: `Sandbox library root (worktrees + their indexes land at <root>/<sandbox>/<branch>; default: ${suggested ?? "none — must be outside any chunkhound index"}):`,
 						cwd: ctx.cwd,
 						startValue: suggested ?? "",
-						paramLabel: "worktree base folder",
+						paramLabel: "sandbox library root",
 					});
 					if (raw === undefined) {
 						ctx.ui.notify("/ch-setup cancelled.", "info");
@@ -299,7 +309,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					const base = path.resolve(ctx.cwd, expandHome(trimmed));
 					if (insideChunkhoundRoot(base)) {
 						ctx.ui.notify(
-							`${base} or a parent already contains a .chunkhound.json (an indexed root) — worktrees must be based elsewhere.`,
+							`${base} or a parent already contains a .chunkhound.json (an indexed root) — sandboxes must live outside it.`,
 						"warning",
 					);
 						continue;
@@ -307,14 +317,15 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					basePicked = base;
 				}
 				if (basePicked === undefined) {
-					ctx.ui.notify("No valid worktree base folder — cancelling.", "error");
+					ctx.ui.notify("No valid sandbox library root — cancelling.", "error");
 					return;
 				}
 				if (basePicked) {
-					settings.worktreeBase = basePicked;
-					summary.push(`worktree base: ${basePicked}`);
+					settings.sandboxRoot = basePicked;
+					if (settings.worktreeBase) delete settings.worktreeBase;
+					summary.push(`sandbox root: ${basePicked}`);
 				} else {
-					delete settings.worktreeBase;
+					delete settings.sandboxRoot;
 				}
 				summary.push(`wizard: ${provider}/${model}${rerank ? ` + ${rerank}` : ""} · dims ${outputDims}`, key ? "api key saved to settings (0600)" : "api key: use CHUNKHOUND_EMBEDDING__API_KEY env");
 				updates.push("interactive");
@@ -335,7 +346,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					`embedding: ${settings.embedding?.provider ?? "—"}/${settings.embedding?.model ?? "—"}${settings.embedding?.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`,
 					`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "— (research tools disabled)"}`,
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
-					`worktree base: ${settings.worktreeBase ?? "— (worktrees default to <repo> parent)"}`,
+					`sandbox root: ${sandboxRoot(settings)}`,
 					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
 					`llm api key: ${settings.llm?.apiKey ? "stored in settings ✓" : "not set (env or --llm-api-key)"}`,
 				];

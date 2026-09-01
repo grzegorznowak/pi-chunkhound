@@ -7,8 +7,9 @@ import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, repoExcludePath, runGit } from "../chhound/git.js";
+import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
+import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
@@ -25,10 +26,10 @@ const HELP = [
 	"  [branch]            existing branch to check out (picker leads with 'new branch')",
 	"  -b <name>           create a new branch with an explicit name",
 	"  --from <ref>        base commit/branch/tag for the worktree",
-	"  --dest <dir>        base folder for the worktree — the worktree folder is named",
-	"                      after the branch (<repo>-wt when none; suffix -2 on collision).",
-	"                      Blocks when the location is already part of another chunkhound",
-	"                      index.",
+	"  --dest <dir>        sandbox library root for this invocation — the worktree AND",
+	"                      its index land at <dir>/<sandbox>/<branch> (default: the",
+	"                      configured sandbox root). Blocks when the location would",
+	"                      overlap another chunkhound sandbox/index.",
 	"  --config <file>     adopt an existing chunkhound.json for this worktree",
 	"  --no-index          skip indexing (worktree only)",
 	"  --force-reindex    full re-index instead of baseline top-up",
@@ -36,17 +37,18 @@ const HELP = [
 	"",
 	"Two ways to invoke:",
 	"  wizard:  /chworktree [repo] with no other arguments — asks for the branch name",
-	"           and the destination folder interactively (with no argument at all it",
-	"           also lets you pick the repo). Path prompts support TAB completion",
+	"           and the sandbox library root interactively (with no argument at all",
+	"           it also lets you pick the repo). Path prompts support TAB completion",
 	"           (dirs only, drill-down; TAB accepts, Enter confirms, Esc cancels).",
-	"           The destination must not already be part of another chunkhound",
-	"           index — such locations are blocked.",
-	"  one-go:  /chworktree [repo] -b <branch> --dest <dir> [options] — everything on",
-	"           one line, non-interactive (agents). Without --dest the first argument",
-	"           is the worktree location itself, as before.",
+	"  one-go:  /chworktree [repo] -b <branch> [--dest <dir>] [options] — everything",
+	"           on one line, non-interactive (agents). The first argument is always",
+	"           the repo.",
 	"",
-	"Each worktree gets its own chunkhound index: baseline copy + top-up at the",
-	"branch point. Indexes live in the sandbox library, not in the worktree.",
+	"Each worktree gets its own chunkhound index (baseline copy + top-up at the",
+	"branch point). The checkout lives INSIDE its sandbox dir in the sandbox",
+	"library — config, index db, daemon state and checkout together, mirroring the",
+	"'/workspaces' pattern. Nothing is ever written into the worktree checkout or",
+	"the source repo (no .chunkhound/, no git-exclude edits).",
 ].join("\n");
 
 /**
@@ -128,21 +130,8 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			if (loaded.issue) notify(loaded.issue, "warning");
 			const settings = loaded.settings;
 
-			if (!dest && !wtArg && !settings.worktreeBase) {
-				notify(
-					"A worktree location is required: /chworktree <path> … (or give --dest <dir> — the " +
-						"worktree folder is named after the branch).",
-					"error",
-				);
-				return;
-			}
-			if (!dest && !wtArg && settings.worktreeBase) {
-				dest = settings.worktreeBase;
-				notify(`Using the configured worktree base: ${dest}`, "info");
-			}
-
 			// ── Branch intent (one-go) — decided BEFORE the location, since the
-			// folder is named after the branch. ──
+			// sandbox (and thus the worktree folder) is named after the branch. ──
 			let createBranch: string | undefined;
 			let branch: string | undefined;
 			let commitIsh: string | undefined;
@@ -182,33 +171,19 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 					return;
 				}
 			}
-			// No branch given: derive one — with --dest (or a repo-as-positional)
-			// the folder is <repo>-wt; with a plain positional the folder is the
-			// positional, so the branch is its basename (git's own derivation,
-			// but run through in-use resolution so it can't collide).
+			// No branch given: derive one — the sandbox/worktree folder is named
+			// after the branch, so the default is <repo>-wt (run through in-use
+			// resolution so it can't collide).
 			if (!branch && !createBranch && !commitIsh) {
-				const derived =
-					dest || requestedPath === repoRoot
-						? `${path.basename(repoRoot)}-wt`
-						: path.basename(requestedPath!);
-				const choice = await resolveBranchChoice(repoRoot, derived, notify);
+				const choice = await resolveBranchChoice(repoRoot, `${path.basename(repoRoot)}-wt`, notify);
 				branch = choice.branch;
 				createBranch = choice.createBranch;
 			}
 
-			// ── Location (folder = final branch name) ──
-			const { wtPath, note } = resolveWorktreeLocation({
-				repoRoot,
-				positional: requestedPath,
-				dest,
-				branch: branch ?? createBranch,
-			});
-			if (note) notify(note, "info");
-			if (dest) fs.mkdirSync(dest, { recursive: true });
-			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
-				notify(`Refusing: ${wtPath} exists and is not empty.`, "error");
-				return;
-			}
+			// ── Location: sandbox-anchored — the checkout lives INSIDE its
+			// sandbox dir at <library>/<sandbox>/<branch>. --dest overrides the
+			// sandbox library root for this invocation. ──
+			const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, branch ?? createBranch, settings, dest);
 
 			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 			if (conflict) {
@@ -219,9 +194,23 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				);
 				return;
 			}
+			const sandboxConflict = findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
+			if (sandboxConflict) {
+				notify(
+					`Refusing: the sandbox dir ${sandboxDir} would overlap the sandbox ${sandboxConflict}. ` +
+						"Pick a different destination (/ch-status lists sandboxes).",
+					"error",
+				);
+				return;
+			}
+			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
+				notify(`Refusing: ${wtPath} exists and is not empty (leftover from a failed run?).`, "error");
+				return;
+			}
 
 			await createIndexedWorktree(ctx, state, {
 				repoRoot,
+				sandboxDir,
 				wtPath,
 				settings,
 				createBranch,
@@ -235,53 +224,32 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 /**
  * Wizard mode = no branch positional, no flags: /chworktree [repo] alone asks
- * for the branch name and destination (and, with no argument at all, the repo).
+ * for the branch name and the sandbox library root (and, with no argument at
+ * all, the repo).
  */
 export function isWizardInvocation(positionals: string[], flags: Record<string, string | true>): boolean {
 	return positionals.length <= 1 && Object.keys(flags).length === 0;
 }
 
 /**
- * Final worktree location.
- * - With --dest: parent = dest; the folder is named after the branch
- *   (fallback <repo>-wt, suffix -2 on collision) — the first positional only
- *   resolved the repo.
- * - Without --dest: the first positional IS the location; picking the source
- *   repo itself derives a sibling (branch-named, as with --dest).
+ * Design-1 location: the worktree checkout lives INSIDE its sandbox dir at
+ * `<library>/<sandbox>/<branch>` (folder = branch, slashes → "-"). `dest`
+ * overrides the sandbox library root for this invocation (--dest / wizard
+ * pick); otherwise the configured root applies (settings > env > default).
+ * No collision suffixing: the sandbox name is unique per (repo, branch), so a
+ * fresh sandbox always yields a fresh folder.
  */
-export function resolveWorktreeLocation(opts: {
-	repoRoot: string;
-	/** Absolute first positional, when given. */
-	positional?: string;
-	/** Absolute --dest, when given. */
-	dest?: string;
-	/** Final branch name (folder = branch). Undefined → <repo>-wt fallback. */
-	branch?: string;
-}): { wtPath: string; note?: string } {
-	if (opts.dest) {
-		return { wtPath: deriveWorktreePath(opts.repoRoot, opts.dest, opts.branch) };
-	}
-	if (opts.positional && opts.positional === opts.repoRoot) {
-		const sibling = deriveWorktreePath(opts.repoRoot, undefined, opts.branch);
-		return {
-			wtPath: sibling,
-			note: `${path.basename(opts.positional)} is the source repo itself — creating the worktree at ${sibling} instead.`,
-		};
-	}
-	return { wtPath: opts.positional! };
-}
-
-/**
- * Worktree location for a repo: `<parent>/<branch>` (branch slashes → "-";
- * `<repo>-wt` when no branch is known), suffixing -2, -3, … while the folder
- * already exists.
- */
-export function deriveWorktreePath(repoRoot: string, parent?: string, branch?: string): string {
-	const dir = parent ?? path.dirname(repoRoot);
-	const base = branch ? branch.replace(/\//g, "-") : `${path.basename(repoRoot)}-wt`;
-	let candidate = path.join(dir, base);
-	for (let i = 2; fs.existsSync(candidate); i++) candidate = path.join(dir, `${base}-${i}`);
-	return candidate;
+export function resolveSandboxLocation(
+	repoRoot: string,
+	branch: string | undefined,
+	settings: ChhoundSettings,
+	dest?: string,
+): { sandboxDir: string; wtPath: string } {
+	const eff = dest ? { ...settings, sandboxRoot: dest } : settings;
+	const finalBranch = branch ?? `${path.basename(repoRoot)}-wt`;
+	const sandboxDir = sandboxDirFor(repoRoot, finalBranch, eff);
+	const wtPath = path.join(sandboxDir, finalBranch.replace(/\//g, "-"));
+	return { sandboxDir, wtPath };
 }
 
 function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: string | undefined): string {
@@ -292,18 +260,20 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 		`No git repo found: ${base}`,
 		"/chworktree creates a worktree OF an existing git repo.",
 		"Try: run it from inside the repo, or pass the repo's own directory as the first argument",
-		"(a sibling folder named after the branch is derived automatically). If the project should be a repo:",,
+		"(the worktree + its index land in the sandbox library). If the project should be a repo:",,
 		`git init ${wtArg ?? cwd} && git -C ${wtArg ?? cwd} add -A && git -C ${wtArg ?? cwd} commit -m init, then retry.`,
 		"Bare /chworktree (no arguments) opens an interactive repo picker.",
 	].join("\n");
 }
 
-/** Shared worktree creation: baseline ensure → sandbox → exclude → top-up. */
+/** Shared worktree creation: sandbox dir → git add → baseline → config → top-up → meta. */
 async function createIndexedWorktree(
 	ctx: { cwd: string; hasUI: boolean; ui: WizardUI },
 	state: PluginState,
 	opts: {
 		repoRoot: string;
+		/** Sandbox dir — the daemon's project dir (config + db + meta + checkout inside). */
+		sandboxDir: string;
 		wtPath: string;
 		settings: ChhoundSettings;
 		createBranch?: string;
@@ -313,11 +283,14 @@ async function createIndexedWorktree(
 	},
 ): Promise<void> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
-	const { repoRoot, wtPath, settings, createBranch, branch, commitIsh, flags } = opts;
+	const { repoRoot, sandboxDir, wtPath, settings, createBranch, branch, commitIsh, flags } = opts;
 
 	const progress = createProgressUI(ctx);
 	try {
 		notify(`Creating worktree ${wtPath}…`, "info");
+		// The checkout lands INSIDE the sandbox dir — make sure the sandbox
+		// (config + db + meta live there too) exists before `git worktree add`.
+		fs.mkdirSync(sandboxDir, { recursive: true });
 		try {
 			await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
 		} catch (err) {
@@ -338,7 +311,9 @@ async function createIndexedWorktree(
 
 		if (flags["no-index"]) {
 			notify(
-				`Worktree created (no index): ${wtPath} @ ${branchNow}\nRun /chworktree ${wtPath} --force-reindex later to index it.`,
+				`Worktree created (no index): ${wtPath} @ ${branchNow}\n` +
+					`The sandbox dir has no index yet (nothing is written into the checkout). Re-indexing an\n` +
+					`existing worktree is not wired up yet — /ch-status --reindex is the pending path for it.`,
 				"info",
 			);
 			return;
@@ -364,8 +339,8 @@ async function createIndexedWorktree(
 			apiKey: state.apiKey,
 		});
 
-		// 2) Sandbox: config (no secrets, pinned duckdb) + db copy target
-		const sandboxDir = sandboxDirFor(repoRoot, wtPath, settings);
+		// 2) Sandbox config (no secrets, pinned duckdb) + db copy target — the
+		// daemon's project dir is the sandbox dir itself (Design 1).
 		const dbDir = sandboxDbDir(sandboxDir);
 		let adopted;
 		if (typeof flags["config"] === "string") {
@@ -378,24 +353,11 @@ async function createIndexedWorktree(
 		}
 		const configPath = materializeConfig(sandboxDir, { settings, dbDir, adopted });
 
-		// 3) Keep the worktree clean: git-exclude .chhound artifacts (repo-wide
-		//    info/exclude — the only one git reads for linked worktrees)
-		const excludePath = await repoExcludePath(wtPath);
-		if (excludePath) {
-			const extra = [".chhound/", ".chunkhound.json"].filter((p) => {
-				try {
-					return !fs.readFileSync(excludePath, "utf8").split("\n").includes(p.trim());
-				} catch {
-					return true;
-				}
-			});
-			if (extra.length > 0) {
-				fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-				fs.appendFileSync(excludePath, "\n# pi-chhound\n" + extra.join("\n") + "\n");
-			}
-		}
-
-		// 4) Sync index: baseline db copy + top-up at the worktree's branch point
+		// 3) Sync index: baseline db copy + top-up at the worktree's branch point.
+		// indexDir = the SANDBOX DIR: the db paths, the daemon log and the root
+		// claim sidecar must all anchor on the daemon's project dir. State files
+		// inside it are inert (.chhound.db is the engine's own duckdb, .chunkhound.json
+		// and .chhound/ are excluded, meta.json is a tiny json).
 		progress.setPhase("worktree index (top-up)");
 		progress.setWatchDir(dbDir);
 		notify(
@@ -405,7 +367,7 @@ async function createIndexedWorktree(
 		const result = await hotStartIndex({
 			sourceDbDir: baseline.dbDir,
 			targetDbDir: dbDir,
-			indexDir: wtPath,
+			indexDir: sandboxDir,
 			configPath,
 			forceReindex: flags["force-reindex"] === true,
 			env: chhoundApiKeyEnv(state.apiKey),
@@ -417,7 +379,7 @@ async function createIndexedWorktree(
 			return;
 		}
 
-		// 5) Meta + summary
+		// 4) Meta + summary
 		writeSandboxMeta(sandboxDir, {
 			version: 1,
 			worktree: wtPath,
@@ -433,11 +395,11 @@ async function createIndexedWorktree(
 		notify(
 			[
 				`✓ ${branchNote} @ ${wtPath} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
+				`worktree: ${wtPath} (inside the sandbox — the repo stays untouched)`,
 				`db: ${dbDir}`,
 				`config: ${sandboxConfigPath(sandboxDir)}`,
-				`Next: cd ${wtPath} && chunkhound mcp --config ${sandboxConfigPath(sandboxDir)}`,
-				`Tip: chunkhound auto-discovers .chunkhound.json in the project dir — copy the sandbox config`,
-				`     into the worktree (it's git-excluded) and the daemon runs without --config.`,
+				`Next: chunkhound mcp ${sandboxDir} --config ${sandboxConfigPath(sandboxDir)}`,
+				`Tip: .chunkhound.json sits in the sandbox dir, so 'chunkhound mcp ${sandboxDir}' auto-discovers it — no --config needed.`,
 			].join("\n"),
 			"info",
 		);
@@ -503,48 +465,54 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		createBranch = choice.createBranch;
 	}
 
-	// 3) Destination — base folder; the worktree lands at <base>/<branch>
-	//    (-2 on collision). Default: the configured worktree base, else the
-	//    repo's parent. Locations already part of another chunkhound index block.
-	//    Prefilled with the default; TAB completes like the command-line picker.
-	const defaultDest = settings.worktreeBase ?? path.dirname(repoRoot);
+	// 3) Sandbox library root — the worktree AND its index land at
+	//    <root>/<sandbox>/<branch>. Default: the configured sandbox root
+	//    (settings > env > XDG state). Roots that would overlap another
+	//    chunkhound sandbox/index are blocked. Prefilled with the default;
+	//    TAB completes like the command-line picker.
+	const defaultRoot = sandboxRoot(settings);
 	const finalBranch = branch ?? createBranch;
+	const promptTitle = (): string =>
+		`Sandbox library root (worktree + index land at <root>/<sandbox>/${finalBranch ?? "<branch>"}; default: ${defaultRoot}):`;
 	let destRaw = await promptPath(ctx.ui, {
-		title: `Destination folder (base folder — the worktree lands at <base>/${finalBranch ?? "<branch>"}; default: ${defaultDest}):`,
+		title: promptTitle(),
 		cwd: ctx.cwd,
-		startValue: defaultDest,
-		paramLabel: "destination folder",
+		startValue: defaultRoot,
+		paramLabel: "sandbox library root",
 	});
 	if (destRaw === undefined) {
 		notify("Cancelled.", "info");
 		return;
 	}
-	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultDest));
-	let wtPath = deriveWorktreePath(repoRoot, dest, finalBranch);
-	let conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
+	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
+	let { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, finalBranch, settings, dest);
+	let conflict =
+		findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
+		findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
 	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
-		notify(`Blocked: ${wtPath} is already part of the chunkhound index for ${conflict}. Choose another destination.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound sandbox ${conflict}. Choose another root.`, "error");
 		destRaw = await promptPath(ctx.ui, {
-			title: `Destination folder (base folder — the worktree lands at <base>/${finalBranch ?? "<branch>"}; default: ${defaultDest}):`,
+			title: promptTitle(),
 			cwd: ctx.cwd,
-			startValue: defaultDest,
-			paramLabel: "destination folder",
+			startValue: defaultRoot,
+			paramLabel: "sandbox library root",
 		});
 		if (destRaw === undefined) {
 			notify("Cancelled.", "info");
 			return;
 		}
-		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultDest));
-		wtPath = deriveWorktreePath(repoRoot, dest, finalBranch);
-		conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
+		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
+		({ sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, finalBranch, settings, dest));
+		conflict =
+			findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
+			findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
 	}
 	if (conflict) {
-		notify(`Blocked: ${wtPath} is already part of the chunkhound index for ${conflict}. /ch-status lists indexed worktrees.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound sandbox ${conflict}. /ch-status lists sandboxes.`, "error");
 		return;
 	}
-	fs.mkdirSync(dest, { recursive: true });
 
-	await createIndexedWorktree(ctx, state, { repoRoot, wtPath, settings, createBranch, branch, flags: {} });
+	await createIndexedWorktree(ctx, state, { repoRoot, sandboxDir, wtPath, settings, createBranch, branch, flags: {} });
 }
 
 const OTHER_REPO = "type a path…";

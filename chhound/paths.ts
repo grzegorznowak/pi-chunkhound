@@ -24,11 +24,15 @@ export function xdgCacheHome(): string {
 	return process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache");
 }
 
-/** Managed sandbox library root — one dir per worktree index. */
+/** Managed sandbox library root — one dir per (repo, branch): config + duckdb + meta + worktree checkout. */
 export function sandboxRoot(settings: ChhoundSettings): string {
 	return (
 		settings.sandboxRoot ||
 		process.env.CHHOUND_SANDBOX_ROOT ||
+		// Legacy alias: pre-Design-1 settings named this "worktree base" (worktrees
+		// lived at <base>/<branch>). Under Design 1 worktrees live inside their
+		// sandbox, so the base IS the sandbox library root.
+		settings.worktreeBase ||
 		path.join(xdgStateHome(), PKG_DIR_NAME, "sandboxes")
 	);
 }

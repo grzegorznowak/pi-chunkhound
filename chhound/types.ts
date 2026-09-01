@@ -44,7 +44,7 @@ export interface ChhoundSettings {
 	embedding?: EmbeddingSettings;
 	llm?: LlmSettings;
 	indexing?: IndexingSettings;
-	/** Default base folder for new worktrees (folder = branch name). */
+	/** Default sandbox library root for new worktrees (worktree + index live at <root>/<sandbox>/<branch>). */
 	worktreeBase?: string;
 	research?: Record<string, unknown>;
 	baseline?: BaselineSettings;

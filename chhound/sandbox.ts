@@ -4,10 +4,16 @@ import { sandboxRoot, shortHash, slugify } from "./paths.js";
 import { CONFIG_FILE_NAME } from "./config.js";
 import type { ChhoundSettings, SandboxMeta } from "./types.js";
 
-/** One managed dir per worktree: config + duckdb + meta. */
-export function sandboxDirFor(repoRoot: string, worktree: string, settings: ChhoundSettings): string {
-	const wt = path.resolve(worktree);
-	const name = `${slugify(path.basename(repoRoot))}-${slugify(path.basename(wt))}-${shortHash(wt)}`;
+/**
+ * One managed dir per (repo, branch): config + duckdb + meta + the worktree
+ * checkout itself (Design 1: sandbox-anchored). The name is derived from
+ * repoRoot + branch ONLY — it must never depend on the worktree path, which
+ * lives INSIDE the sandbox dir (circular otherwise). The branch slug keeps
+ * the name readable; the hash over (repoRoot, branch) makes it collision-free
+ * (e.g. `feature/foo` vs `feature-foo` both slug to `feature-foo`).
+ */
+export function sandboxDirFor(repoRoot: string, branch: string, settings: ChhoundSettings): string {
+	const name = `${slugify(path.basename(repoRoot))}-${slugify(branch)}-${shortHash(`${path.resolve(repoRoot)}\u0000${branch}`)}`;
 	return path.join(sandboxRoot(settings), name);
 }
 
