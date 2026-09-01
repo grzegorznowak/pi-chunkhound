@@ -77,8 +77,11 @@ servers needed. With no argument it opens an interactive picker of all sandboxes
 
 Shows chunkhound's version, sandbox/baseline roots, embedding and LLM config,
 API-key status, every sandbox (worktree alive?, branch, base commit, db size,
-claimed index root), every baseline, and live MCP connections. `--prune` removes
-sandboxes whose worktree is gone.
+claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
+live MCP connections. `--prune` removes orphan sandboxes (worktree gone) and
+garbage baselines (incomplete from a crashed prime, source repo deleted, or a
+superseded duplicate). The same baseline GC also runs automatically after each
+baseline prime — the cache is self-healing, no manual cleanup needed.
 
 ### /ch-setup
 
