@@ -2,7 +2,7 @@
   "name": "pi-chhound",
   "version": "0.0.1",
   "type": "module",
-  "description": "ChunkHound worktree, MCP bridge, setup, and status commands for the pi coding agent"
+  "description": "ChunkHound worktree, MCP bridge, setup, and status commands for the pi coding agent",
   "license": "MIT",
   "keywords": [
     "pi-package"
