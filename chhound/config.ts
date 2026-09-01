@@ -30,10 +30,13 @@ export const DEFAULT_EXCLUDES = [
 ];
 
 /**
- * MANDATORY: the daemon writes <indexed-root>/.chhound/daemon.log (CURe fails
- * closed without this exclusion). Also covers any db/artifacts under .chhound/.
+ * MANDATORY: the daemon writes <indexed-root>/.chunkhound/daemon.log (CURe fails
+ * closed without this exclusion). ChunkHound's own defaults also exclude
+ * .chunkhound/, but the materialized config must carry it itself so the daemon
+ * stays clean even against older chunkhound installs. `.chhound/` is kept for
+ * legacy artifacts from before the .chunkhound rename.
  */
-export const CHHOUND_DIR_EXCLUDE = "**/.chhound/**";
+export const CHHOUND_DIR_EXCLUDES = ["**/.chhound/**", "**/.chunkhound/**"];
 
 export interface AdoptedConfig {
 	embedding?: EmbeddingSettings;
@@ -187,7 +190,8 @@ export function suggestWorktreeBase(cwd: string): string | undefined {
 
 /**
  * Materialize a chunkhound.json into `dir`. Never contains api_key; the duckdb
- * path is pinned absolute to `dbDir`; the .chhound exclusion pattern is guaranteed.
+ * path is pinned absolute to `dbDir`; the .chhound/.chunkhound exclusion patterns
+ * are guaranteed.
  * Returns the config file path.
  */
 export function materializeConfig(dir: string, opts: MaterializeOptions): string {
@@ -198,7 +202,7 @@ export function materializeConfig(dir: string, opts: MaterializeOptions): string
 		...(idx.exclude ?? []),
 		...(opts.adopted?.indexing?.exclude ?? []),
 		...(opts.extraExcludes ?? []),
-		CHHOUND_DIR_EXCLUDE,
+		...CHHOUND_DIR_EXCLUDES,
 	]);
 
 	const indexing: Record<string, unknown> = {
