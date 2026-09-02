@@ -169,6 +169,16 @@ export function pruneSandboxes(settings: ChhoundSettings): string[] {
 	return removed;
 }
 
+/** Display label for a sandbox's branch slot — PR sandboxes carry head context
+ * (head branch @ commit) on top of their pull/<n> identity. */
+export function sandboxBranchLabel(meta: { branch: string; headRef?: string; headOid?: string }): string {
+	let label = meta.branch;
+	if (meta.headRef) {
+		label += ` · head ${meta.headRef}${meta.headOid ? ` @ ${meta.headOid.slice(0, 8)}` : ""}`;
+	}
+	return label;
+}
+
 export function fmtSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

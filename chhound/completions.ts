@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { tokenizeArgs, WORKTREE_VALUE_FLAGS, MCP_VALUE_FLAGS } from "./args.js";
 import { findRepoRoot, gitRootOrNull, runGit } from "./git.js";
-import { listSandboxes } from "./sandbox.js";
+import { listSandboxes, sandboxBranchLabel } from "./sandbox.js";
 import { loadSettings } from "./settings.js";
 
 /** Structural match for pi-tui's AutocompleteItem (avoids a pi-tui type import). */
@@ -219,7 +219,7 @@ export async function mcpArgumentCompletions(argumentPrefix: string, cwd: string
 			items.push({
 				value: quote(wt),
 				label: path.basename(wt),
-				description: `storage ID ${path.basename(e.dir)} · ${e.meta.branch}`,
+				description: `storage ID ${path.basename(e.dir)} · ${sandboxBranchLabel(e.meta)}`,
 			});
 		}
 		const name = path.basename(e.dir);

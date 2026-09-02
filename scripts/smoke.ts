@@ -17,6 +17,7 @@ import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConf
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, defaultRemoteBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
+import { ownerRepoFromRemoteUrl, parsePrUrl, ghPrView, ensureMirror, mirrorDir, findLocalRepo } from "../chhound/pr.js";
 import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
@@ -31,6 +32,7 @@ import {
 	sandboxDirFor,
 	sandboxStateDir,
 	writeSandboxMeta,
+	sandboxBranchLabel,
 } from "../chhound/sandbox.js";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
@@ -44,7 +46,7 @@ import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } f
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildWidgetLines, classifyChhoundLine, filledCells, formatBytes, groupDigits } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
-import { isWizardInvocation, resolveSandboxLocation } from "../worktree/command.js";
+import { isWizardInvocation, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -1183,6 +1185,121 @@ async function main(): Promise<void> {
 	check("llm settings round-trip", loadSettings(proj).settings.llm?.provider === "gemini" && loadSettings(proj).settings.llm?.model === "gemini-2.5-pro", savedLlm);
 	const savedBase = saveSettings({ ...settings, worktreeBase: "/home/x/wt-base" }, "project", proj);
 	check("worktreeBase settings round-trip", loadSettings(proj).settings.worktreeBase === "/home/x/wt-base", savedBase);
+
+	// ── 7b. PR sandboxes (hermetic: fake gh shim + local bare with pull refs) ──
+	section("PR resolution (hermetic)");
+	{
+		// Seed repo with main + feature (the PR head); its bare clone is the
+		// fixture origin and carries refs/pull/1/head (GitHub-style).
+		const seed = path.join(tmp, "pr-seed");
+		fs.mkdirSync(seed);
+		await runGit(["init", "-q", "-b", "main"], { cwd: seed });
+		await runGit(["config", "user.email", "smoke@test"], { cwd: seed });
+		await runGit(["config", "user.name", "Smoke"], { cwd: seed });
+		fs.writeFileSync(path.join(seed, "a.ts"), "export const a = 1;\n");
+		await runGit(["add", "-A"], { cwd: seed });
+		await runGit(["commit", "-qm", "init"], { cwd: seed });
+		const baseSha = (await runGit(["rev-parse", "HEAD"], { cwd: seed })).stdout;
+		const prBare = path.join(tmp, "pr-origin.git");
+		// The bare clone happens AFTER the feature commit so the head object is
+		// in it (update-ref refuses refs to nonexistent objects).
+		await runGit(["checkout", "-q", "-b", "feature"], { cwd: seed });
+		fs.writeFileSync(path.join(seed, "a.ts"), "export const a = 2;\n");
+		await runGit(["add", "-A"], { cwd: seed });
+		await runGit(["commit", "-qm", "feature change"], { cwd: seed });
+		const headSha = (await runGit(["rev-parse", "feature"], { cwd: seed })).stdout;
+		await runGit(["clone", "-q", "--bare", seed, prBare], { cwd: tmp });
+		await runGit(["--git-dir", prBare, "update-ref", "refs/pull/1/head", headSha], { cwd: tmp });
+		const pullRef = await runGit(["--git-dir", prBare, "show-ref", "--verify", "--quiet", "refs/pull/1/head"], { cwd: tmp });
+		check("setup: refs/pull/1/head on the fixture origin", pullRef.code === 0 && headSha !== baseSha, `${headSha.slice(0, 8)} vs ${baseSha.slice(0, 8)}`);
+
+		// Fake gh on PATH: answers `gh pr view … --json` with canned facts.
+		const ghShim = path.join(tmp, "gh-shim");
+		fs.mkdirSync(ghShim);
+		const ghJson = JSON.stringify({ number: 1, baseRefName: "main", headRefName: "feature", headRefOid: headSha, state: "OPEN", title: "t" });
+		fs.writeFileSync(path.join(ghShim, "gh"), `#!/bin/sh\ncat <<'EOF'\n${ghJson}\nEOF\n`);
+		fs.chmodSync(path.join(ghShim, "gh"), 0o755);
+		const savedPath = process.env.PATH;
+		process.env.PATH = ghShim + path.delimiter + (process.env.PATH ?? "");
+		const restorePath = () => {
+			process.env.PATH = savedPath;
+		};
+		try {
+			const info = await ghPrView("ghuser", "add", 1);
+			check("ghPrView parses the shim json", info.baseRefName === "main" && info.headRefName === "feature" && info.headRefOid === headSha && info.state === "OPEN", JSON.stringify(info));
+
+		// URL parsing + remote-url identity (pure).
+		const pu = parsePrUrl("https://github.com/ghuser/add/pull/29");
+		check("parsePrUrl full URL", pu?.owner === "ghuser" && pu?.repo === "add" && pu?.number === 29, JSON.stringify(pu));
+		check("parsePrUrl tolerates trailing slash/query", parsePrUrl("https://github.com/ghuser/add/pull/29/?x=1")?.number === 29, "");
+		check("parsePrUrl rejects non-PR input", parsePrUrl("feature/x") === undefined && parsePrUrl("https://github.com/a/b/tree/main") === undefined && parsePrUrl("github.com/a/b/issues/3") === undefined, "");
+		check("ownerRepoFromRemoteUrl https", JSON.stringify(ownerRepoFromRemoteUrl("https://github.com/GhUser/Add.git")) === JSON.stringify({ owner: "ghuser", repo: "add" }), "");
+		check("ownerRepoFromRemoteUrl ssh", JSON.stringify(ownerRepoFromRemoteUrl("git@github.com:ghuser/add.git")) === JSON.stringify({ owner: "ghuser", repo: "add" }), "");
+		check("ownerRepoFromRemoteUrl non-github → undefined", ownerRepoFromRemoteUrl("https://gitlab.com/a/b") === undefined && ownerRepoFromRemoteUrl("/tmp/bare.git") === undefined, "");
+
+		const prSettings: ChhoundSettings = { ...settings, mirrorRoot: path.join(tmp, "mirrors") };
+
+		// Host ladder rung 1 — a local checkout whose origin IS the repo. The
+		// url is github-shaped on purpose: resolution only READS origin urls.
+		const localHost = path.join(tmp, "pr-localhost");
+		await runGit(["clone", "-q", seed, localHost], { cwd: tmp });
+		await runGit(["remote", "set-url", "origin", "https://github.com/ghuser/add"], { cwd: localHost });
+		const found = await findLocalRepo(prSettings, "ghuser", "add", [localHost]);
+		check("findLocalRepo finds the matching local checkout", found === path.resolve(localHost), `${found} vs ${path.resolve(localHost)}`);
+		const notFound = await findLocalRepo(prSettings, "ghuser", "other", [localHost]);
+		check("findLocalRepo skips non-matching roots", notFound === undefined, String(notFound));
+
+		// Host ladder rung 2 — the bare mirror: pre-seed the deterministic
+		// mirror dir with a bare clone (what the network clone produces), then
+		// ensureMirror pins the refspec and refreshes from the fixture origin.
+		const mirror = mirrorDir(prSettings, "ghuser", "add");
+		fs.mkdirSync(path.dirname(mirror), { recursive: true });
+		await runGit(["clone", "-q", "--bare", prBare, mirror], { cwd: tmp });
+		await runGit(["--git-dir", prBare, "update-ref", "refs/heads/late-branch", baseSha], { cwd: tmp });
+		const mirrored = await ensureMirror(prSettings, "ghuser", "add");
+		check("ensureMirror reuses the pre-seeded mirror", mirrored === mirror);
+		const fetchCfg = (await runGit(["--git-dir", mirror, "config", "--get-all", "remote.origin.fetch"], { cwd: tmp })).stdout;
+		check("ensureMirror pins the heads refspec", fetchCfg.includes("+refs/heads/*:refs/heads/*"), fetchCfg);
+		const lateRef = await runGit(["--git-dir", mirror, "show-ref", "--verify", "--quiet", "refs/heads/late-branch"], { cwd: tmp });
+		check("ensureMirror refresh fetched the new branch", lateRef.code === 0, lateRef.stderr);
+
+		// Full host resolution (fake gh, offline): repo-less PR → mirror host;
+		// head fetch lands exactly on refs/pull/1/head.
+		const notes: string[] = [];
+		const host = await resolvePrSandboxHost(tmp, prSettings, { owner: "ghuser", repo: "add", number: 1 }, (m, t) => notes.push(`${t}: ${m}`));
+		check("host resolution → mirror repoRoot", host?.repoRoot === mirror, host?.repoRoot);
+		check("host carries gh base + head facts", host?.info.baseRefName === "main" && host?.info.headRefName === "feature", JSON.stringify(host?.info));
+		check("head fetch lands on the PR head commit", host?.headSha === headSha, `${host?.headSha} vs ${headSha}`);
+		check("mirroring announced once", notes.filter((n) => n.startsWith("info")).length === 1, notes.join(" | "));
+
+		// The PR baseline anchors at the PR's BASE branch, primed from the
+		// mirror (its local heads == remote tips) and reused when fresh.
+		const prBase = await ensureBaseline({ repoRoot: mirror, settings: prSettings, ref: host!.info.baseRefName, onLine, extraArgs });
+		check("PR base baseline primed from mirror", prBase.fresh && prBase.meta.baseCommit === baseSha, `${prBase.ref} @ ${prBase.meta.baseCommit.slice(0, 8)}`);
+		const prBase2 = await ensureBaseline({ repoRoot: mirror, settings: prSettings, ref: host!.info.baseRefName, onLine, extraArgs });
+		check("PR base baseline reused when fresh", prBase2.fresh === false, prBase2.reason);
+
+		// PR sandbox layout: identity pull/1 (folder + name), worktree INSIDE
+		// the sandbox dir, detached at the head commit.
+		const prSb = sandboxDirFor(mirror, "pull/1", prSettings);
+		const prWt = path.join(prSb, "pull-1");
+		check("PR sandbox named <repo>-pull-1-<hash>", path.basename(prSb).startsWith("add-pull-1-"), path.basename(prSb));
+		fs.mkdirSync(prSb, { recursive: true });
+		fs.mkdirSync(sandboxStateDir(prSb), { recursive: true });
+		await gitWorktreeAdd({ cwd: mirror, path: prWt, detach: true, commitIsh: headSha });
+		check(
+			"PR checkout detached at the head commit",
+			(await currentBranch(prWt)) === "" && (await runGit(["rev-parse", "HEAD"], { cwd: prWt })).stdout === headSha,
+			"",
+		);
+		check("PR checkout carries the PR content", fs.readFileSync(path.join(prWt, "a.ts"), "utf8").includes("= 2"), "");
+		const label = sandboxBranchLabel({ branch: "pull/1", headRef: "feature", headOid: headSha });
+		check("status label carries PR head context", label === `pull/1 · head feature @ ${headSha.slice(0, 8)}`, label);
+		await runGit(["worktree", "remove", "--force", prWt], { cwd: mirror });
+		} finally {
+			restorePath();
+		}
+	}
 
 	// ── 8. extension loads ────────────────────────────────────────────
 	section("extension entry loads");

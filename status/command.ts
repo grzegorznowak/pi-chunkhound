@@ -6,7 +6,7 @@ import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { baseRoot, sandboxRoot } from "../chhound/paths.js";
-import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches } from "../chhound/sandbox.js";
+import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches, sandboxBranchLabel } from "../chhound/sandbox.js";
 import { listMcpConnections } from "../mcp/manager.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -59,7 +59,7 @@ export function buildStatusLines(opts: {
 				];
 			}
 			lines.push(
-				`  ${alive}  ${repoName}/${s.meta.branch}`,
+				`  ${alive}  ${repoName}/${sandboxBranchLabel(s.meta)}`,
 				`      worktree:   ${s.meta.worktree}`,
 				`      base commit: ${s.meta.baseCommit.slice(0, 8)} · index: ${fmtSize(s.dbSizeBytes)} · created: ${s.meta.createdAt.slice(0, 10)}`,
 				`      index root: ${rootTxt[0]}`,

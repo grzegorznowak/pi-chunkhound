@@ -54,6 +54,8 @@ export interface ChhoundSettings {
 	sandboxRoot?: string;
 	/** Override baseline cache root. Default: $XDG_CACHE_HOME/pi-chhound/bases. */
 	baseRoot?: string;
+	/** Override the bare-repo mirror cache root (PRs of repos without a local checkout). Default: $XDG_CACHE_HOME/pi-chhound/repos. */
+	mirrorRoot?: string;
 	/**
 	 * Restore recorded (/ch-mcp connected) MCP connections when a session
 	 * starts. Records live in the session log; read-only and --no-daemon
@@ -79,6 +81,10 @@ export interface SandboxMeta {
 	copiedFrom: string;
 	/** Absolute duckdb dir path (database.path in the sandbox config). */
 	dbPath: string;
+	/** PR head branch name (PR sandboxes; display-only). */
+	headRef?: string;
+	/** PR head commit (PR sandboxes; display-only). */
+	headOid?: string;
 }
 
 export interface BaselineMeta {

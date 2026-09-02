@@ -48,6 +48,19 @@ export function baseRoot(settings: ChhoundSettings): string {
 	);
 }
 
+/**
+ * Bare-repo mirror cache root — one bare clone per remote repo (the worktree
+ * host for PR/remote sandboxes when no local checkout of the repo exists).
+ * Mirrors live at <root>/github.com/<owner>/<repo>.
+ */
+export function mirrorRoot(settings: ChhoundSettings): string {
+	return (
+		settings.mirrorRoot ||
+		process.env.CHHOUND_MIRROR_ROOT ||
+		path.join(xdgCacheHome(), PKG_DIR_NAME, "repos")
+	);
+}
+
 export function shortHash(input: string, len = 8): string {
 	return createHash("sha256").update(input).digest("hex").slice(0, len);
 }

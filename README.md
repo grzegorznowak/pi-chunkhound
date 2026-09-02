@@ -11,15 +11,19 @@ plus setup and status tooling.
 Wraps the `chunkhound` CLI/datastore. Every worktree gets its own index, built from a
 shared per-repo **baseline** (the mainline branch, regularly refreshed) plus an
 incremental **top-up** at the worktree's branch point — the same mechanics the CURe
-engine uses for PR sandboxes. Baselines anchor to the **local** branch the worktree
-branches from (`origin/<ref>` is only a fallback, best-effort fetched, when no local
-branch of that name exists) — so top-ups stay small even when local and remote drift.
+engine uses for PR sandboxes. PR sandboxes anchor the baseline at the PR's **base
+branch**, so the top-up only indexes the PR's own diff. Baselines anchor to the
+**local** branch the worktree branches from (`origin/<ref>` is only a fallback,
+best-effort fetched, when no local branch of that name exists) — so top-ups stay
+small even when local and remote drift.
 
 ## Requirements
 
 - Node.js >= 22.19
 - pi >= 0.84.1
 - the `chunkhound` CLI on `PATH` (5.x)
+- the GitHub CLI `gh` (authenticated) — only for PR sandboxes (base-branch
+  resolution); branch worktrees don't need it
 
 ## Install
 
@@ -43,23 +47,31 @@ Don't use both install paths at once — the commands would register twice. Conf
 
 | Command | Purpose |
 |---|---|
-| `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. |
+| `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. A PR URL (`https://github.com/<owner>/<repo>/pull/<n>`) in the repo slot creates a pull-request sandbox (wizard: pick "a pull request" and paste the URL). |
 | `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
 | `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
 
-### /chworktree — two ways to invoke
+### /chworktree — three ways to invoke
 
-- **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
-  name (Enter = new branch `<repo>-wt`) and the worktree library root (Enter = the
-  configured root). With no argument at all it also lets you pick the repo (current
-  repo, repos from the index library, or a typed path). Path prompts support TAB
-  completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
+- **Wizard** — `/chworktree` with no other arguments: lets you pick the repo
+  (current repo, repos from the index library, **a pull request**, or a typed
+  path), then asks for the branch name (Enter = new branch `<repo>-wt`) and the
+  worktree library root (Enter = the configured root). Picking the PR option
+  prompts for the **full PR URL** as in the browser
+  (`https://github.com/<owner>/<repo>/pull/<n>`) — it carries the repo identity,
+  so the branch prompt is skipped and the sandbox is created as `pull/<n>`.
+  With no argument at all it also lets you pick the repo. Path prompts support
+  TAB completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
 - **One-go (agents)** — everything on one line, fully non-interactive:
   `/chworktree [repo] -b <branch> [--dest <dir>]`. The first argument is always
-  the repo. `--dest` overrides the worktree library root for this invocation
-  (default: the configured root); the worktree and its index land in a storage
-  dir under `<root>`.
+  the repo. A **PR URL in the repo slot** (`/chworktree https://github.com/<owner>/<repo>/pull/<n>`)
+  creates a pull-request sandbox the same way the wizard's PR option does.
+- **Remote branches** — the branch slot also accepts `<remote>/<branch>`
+  (e.g. `origin/feature`): the remote branch is checked out **detached at its
+  tip** (a remote-tracking ref can't be checked out as a branch; a missing
+  tracking ref is best-effort fetched first). The baseline anchors at the
+  remote ref itself.
 
 In all modes the location must not overlap another chunkhound worktree or index —
 the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
@@ -74,6 +86,17 @@ Long index runs stream a live progress widget above the editor
 (`baseline index — embedding · db 5.1 MB +3.1 MB · 1:12`, with a 40-cell rail
 `██████░░░░ … 45% · 636/1,412 files` — the rail tracks chunk generation first,
 then embedding batches; a sweeping rail marks indeterminate stages).
+
+**PR sandboxes** need the GitHub CLI (`gh`, authenticated) for the base-branch
+resolution; the head commit comes from `refs/pull/<n>/head` (GitHub synthesizes it
+for fork and draft PRs too, and it persists after merge). A PR of a repo with a
+local checkout (the current repo or any library-known one) is cut from it and
+reuses its cached baselines; otherwise the repo is **mirrored** as a bare clone
+into the mirror cache root (`~/.cache/pi-chhound/repos/<owner>/<repo>`,
+`CHHOUND_MIRROR_ROOT` / `settings.mirrorRoot` to override) — that mirror then
+hosts the baseline for every later PR of the same repo. The only writes into the
+host repo are routine fetches (`FETCH_HEAD`, remote-tracking refs); nothing is
+pushed and no branch is created.
 
 ### /ch-mcp
 
@@ -107,7 +130,8 @@ explicit `--disconnect` does not.
 Shows chunkhound's version, worktree/baseline library roots, embedding and LLM
 config, API-key status, every worktree (alive?, repo/branch, base commit, index
 size, claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
-live MCP connections. `--prune` removes storage for gone worktrees and
+live MCP connections. PR sandboxes show as `add/pull/29 · head recovery/pr27-pr-b @ 0c645ce`.
+`--prune` removes storage for gone worktrees and
 garbage baselines (incomplete from a crashed prime, source repo deleted, or a
 superseded duplicate). The same baseline GC also runs automatically after each
 baseline prime — the cache is self-healing, no manual cleanup needed.
@@ -126,6 +150,7 @@ worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
 
 ```
 ~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/           # baselines (per repo + base ref)
+~/.cache/pi-chhound/repos/github.com/<owner>/<repo>/     # bare mirrors (PR host repos when no local checkout exists)
 ~/.local/state/pi-chhound/sandboxes/<repo>-<branch>-<hash>/  # sandbox dir (project dir =
                                                           #   indexed root): config +
                                                           #   worktree checkout + .chunkhound/
@@ -134,7 +159,7 @@ worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
                                                           #   sidecar/wal) + meta.json
 ```
 
-- Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` env or settings.
+- Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` / `CHHOUND_MIRROR_ROOT` env or settings.
 - Settings: global `~/.pi/agent/pi-chhound/settings.json`, project
   `<repo>/.pi/pi-chhound/settings.json` (project shadows global). Versioned JSON.
 

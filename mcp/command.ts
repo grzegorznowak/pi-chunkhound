@@ -4,7 +4,7 @@ import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { expandHome } from "../chhound/completions.js";
 import { MCP_VALUE_FLAGS } from "../chhound/args.js";
-import { listSandboxes, fmtSize } from "../chhound/sandbox.js";
+import { listSandboxes, fmtSize, sandboxBranchLabel } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -31,7 +31,7 @@ export function mcpTargetLines(
 			const conn = conns.find((c) => c.id === id);
 			lines.push(
 				`  ${conn ? "●" : "·"} ${s.meta.worktree}${conn ? "  (connected)" : ""}`,
-				`      ${id} · ${s.meta.branch} @ base commit ${s.meta.baseCommit.slice(0, 8)} · index ${fmtSize(s.dbSizeBytes)}${conn ? ` · prefix ${conn.prefix} · ${conn.toolNames.length} tools` : ""}`,
+				`      ${id} · ${sandboxBranchLabel(s.meta)} @ base commit ${s.meta.baseCommit.slice(0, 8)} · index ${fmtSize(s.dbSizeBytes)}${conn ? ` · prefix ${conn.prefix} · ${conn.toolNames.length} tools` : ""}`,
 			);
 		}
 	}

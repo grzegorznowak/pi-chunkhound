@@ -12,6 +12,7 @@ import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
+import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
 import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -22,9 +23,12 @@ const HELP = [
 	"required:",
 	"  [repo]              a git repository: a path inside one, the repo's own",
 	"                      directory, or nothing when the cwd is inside a repo.",
+	"                      A PR URL (https://github.com/<owner>/<repo>/pull/<n>) creates a",
+	"                      pull-request sandbox instead (no local checkout needed — the",
+	"                      repo is mirrored into the cache on first use).",
 	"optional:",
 	"  [branch]            existing branch to check out: a local branch or <remote>/<branch> — remote",
-	"                      branches are checked out detached at their tip. Picker leads with 'new branch'.",,
+	"                      branches are checked out detached at their tip. Picker leads with 'new branch'.",
 	"  -b <name>           create a new branch with an explicit name",
 	"  --from <ref>        base commit/branch/tag for the worktree",
 	"  --dest <dir>        worktree library root for this invocation — the worktree AND",
@@ -152,9 +156,10 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 	pi.registerCommand("chworktree", {
 		description:
 			"Create a git worktree with its own chunkhound index. Bare /chworktree [repo] " +
-			"runs an interactive wizard (branch, destination); one-go for agents: " +
+			"runs an interactive wizard (repo/PR, branch, destination); one-go for agents: " +
 			"/chworktree [repo] [-b <branch>] [--dest <dir>] [--from <ref>] [--config <file>] " +
-			"[--no-index] [--force-reindex] [--refresh-baseline] — /chworktree --help for details",
+			"[--no-index] [--force-reindex] [--refresh-baseline], or /chworktree <PR-URL> for a " +
+			"pull request sandbox — /chworktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
@@ -178,6 +183,17 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			}
 			let dest = typeof flags["dest"] === "string" ? path.resolve(ctx.cwd, expandHome(flags["dest"])) : undefined;
 			const wtArg = positionals[0];
+			// PR URL as the repo slot — the URL carries the repo identity:
+			// /chworktree https://github.com/<owner>/<repo>/pull/<n> [--dest …]
+			const prFromArg = wtArg ? parsePrUrl(wtArg) : undefined;
+			if (prFromArg) {
+				if (positionals[1]) {
+					notify("A PR URL takes no branch argument — the sandbox branch is pull/<n>.", "error");
+					return;
+				}
+				await runPrOneGo(ctx, state, prFromArg, flags, dest);
+				return;
+			}
 			const requestedPath = wtArg ? path.resolve(ctx.cwd, wtArg) : undefined;
 
 			let repoRoot = await gitRootOrNull(ctx.cwd);
@@ -256,35 +272,13 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			// ── Location: sandbox-anchored — the checkout lives INSIDE its
 			// sandbox dir at <library>/<sandbox>/<branch>. --dest overrides the
 			// sandbox library root for this invocation. ──
-			const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, branch ?? createBranch ?? remoteRef, settings, dest);
-
-			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
-			if (conflict) {
-				notify(
-					`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
-						"Pick a different destination (/ch-status lists indexed worktrees).",
-					"error",
-				);
-				return;
-			}
-			const sandboxConflict = findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
-			if (sandboxConflict) {
-				notify(
-					`Refusing: the storage dir ${sandboxDir} would overlap worktree ${sandboxConflict}. ` +
-						"Pick a different destination (/ch-status lists worktrees).",
-					"error",
-				);
-				return;
-			}
-			if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
-				notify(`Refusing: ${wtPath} exists and is not empty (leftover from a failed run?).`, "error");
-				return;
-			}
+			const loc = await oneGoLocation(repoRoot, branch ?? createBranch ?? remoteRef, settings, dest, notify);
+			if (!loc) return; // refused (notified)
 
 			await createIndexedWorktree(ctx, state, {
 				repoRoot,
-				sandboxDir,
-				wtPath,
+				sandboxDir: loc.sandboxDir,
+				wtPath: loc.wtPath,
 				settings,
 				createBranch,
 				branch,
@@ -537,15 +531,30 @@ type WizardUI = ProgressUICtx["ui"] & {
 	custom?: PathPromptUI["custom"];
 };
 
-async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, state: PluginState, positional?: string): Promise<void> {
+type RepoPick = { kind: "repo"; root: string } | { kind: "pr"; url: string };
+
+/** Sandbox branch-slot for a PR (identity + worktree folder + meta.branch). */
+function prSlot(number: number): string {
+	return `pull/${number}`;
+}
+
+/** Wizard ctx slice the prompt/flow helpers need. */
+type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI };
+
+async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string): Promise<void> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 
-	// 1) Repo: positional resolves one; otherwise the user picks (or types).
-	let repoRoot: string | undefined;
+	// 1) Repo / PR: a positional resolves one — a PR URL takes the PR path
+	//    (repo + PR identity come from the URL); otherwise the user picks
+	//    (the picker offers current repo, library repos, a PR, or a path).
 	if (positional) {
+		if (parsePrUrl(positional)) {
+			await runPrWizard(ctx, state, positional);
+			return;
+		}
 		const requestedPath = path.resolve(ctx.cwd, positional);
 		const probe = fs.existsSync(requestedPath) ? requestedPath : path.dirname(requestedPath);
-		repoRoot = (await gitRootOrNull(ctx.cwd)) ?? (await findRepoRoot(probe));
+		const repoRoot = (await gitRootOrNull(ctx.cwd)) ?? (await findRepoRoot(probe));
 		if (!repoRoot) {
 			notify(
 				`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own ` +
@@ -554,16 +563,27 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 			);
 			return;
 		}
-	} else {
-		repoRoot = await pickRepoInteractive(ctx);
-		if (!repoRoot) return; // cancelled
+		await runBranchWizard(ctx, state, path.resolve(repoRoot));
+		return;
 	}
-	repoRoot = path.resolve(repoRoot);
+	const choice = await pickRepoInteractive(ctx);
+	if (!choice) return; // cancelled
+	if (choice.kind === "pr") {
+		await runPrWizard(ctx, state, choice.url);
+		return;
+	}
+	await runBranchWizard(ctx, state, choice.root);
+}
+
+/** Branch-sandbox wizard: repo known → branch name → library root → create. */
+async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: string): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(repoRoot).settings;
 
-	// 2) Branch name — Enter accepts the suggested new branch (<repo>-wt);
-	//    a typed name that exists is checked out, anything else is created.
-	//    Prefilled (promptText); typing replaces the suggested name.
+	// Branch name — Enter accepts the suggested new branch (<repo>-wt); a
+	// typed name that exists is checked out (a <remote>/<branch> name checks
+	// out the remote branch detached), anything else is created.
+	// Prefilled (promptText); typing replaces the suggested name.
 	const defaultBranch = `${path.basename(repoRoot)}-wt`;
 	const branchRaw = await promptText(ctx.ui, {
 		title: "Branch name",
@@ -596,57 +616,14 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		commitIsh = sha;
 	}
 
-	// 3) Worktree library root — the worktree AND its index land in a storage
-	//    dir under <root>. Default: the configured worktree library root
-	//    (settings > env > XDG state). Roots that would overlap another
-	//    chunkhound worktree/index are blocked. Prefilled with the default;
-	//    TAB completes like the command-line picker.
-	const defaultRoot = sandboxRoot(settings);
-	const finalBranch = branch ?? createBranch ?? remoteRef;
-	const promptTitle = (): string =>
-		`Worktree library root (worktree + index land in a storage dir under <root>; default: ${defaultRoot}):`;
-	let destRaw = await promptPath(ctx.ui, {
-		title: promptTitle(),
-		cwd: ctx.cwd,
-		startValue: defaultRoot,
-		paramLabel: "worktree library root",
-	});
-	if (destRaw === undefined) {
-		notify("Cancelled.", "info");
-		return;
-	}
-	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
-	let { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, finalBranch, settings, dest);
-	let conflict =
-		findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
-		findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
-	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. Choose another root.`, "error");
-		destRaw = await promptPath(ctx.ui, {
-			title: promptTitle(),
-			cwd: ctx.cwd,
-			startValue: defaultRoot,
-			paramLabel: "worktree library root",
-		});
-		if (destRaw === undefined) {
-			notify("Cancelled.", "info");
-			return;
-		}
-		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
-		({ sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, finalBranch, settings, dest));
-		conflict =
-			findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
-			findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
-	}
-	if (conflict) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-status lists worktrees.`, "error");
-		return;
-	}
+	// Library root prompt (with conflict re-prompts).
+	const pick = await promptLibraryRoot(ctx, settings, repoRoot, branch ?? createBranch ?? remoteRef);
+	if (!pick) return; // cancelled / blocked (notified)
 
 	await createIndexedWorktree(ctx, state, {
 		repoRoot,
-		sandboxDir,
-		wtPath,
+		sandboxDir: pick.sandboxDir,
+		wtPath: pick.wtPath,
 		settings,
 		createBranch,
 		branch,
@@ -659,9 +636,11 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 }
 
 const OTHER_REPO = "type a path…";
+const PICK_PR = "a pull request — paste its GitHub URL";
 
-/** Repo picker for bare /chworktree: current repo + library repos, or a typed path. */
-async function pickRepoInteractive(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }): Promise<string | undefined> {
+/** Repo picker for bare /chworktree: current repo + library repos, a PR (URL
+ * prompt), or a typed path. */
+async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(ctx.cwd).settings;
 	const candidates = new Map<string, string>();
@@ -677,18 +656,30 @@ async function pickRepoInteractive(ctx: { cwd: string; hasUI: boolean; ui: Wizar
 			candidates.set(`${path.basename(s.meta.repoRoot)} (indexed) — ${s.meta.repoRoot}`, s.meta.repoRoot);
 		}
 	}
-	const options = [...candidates.keys(), OTHER_REPO];
-	let choice: string | undefined;
-	if (options.length === 1) {
-		choice = OTHER_REPO; // nothing known — straight to typed path
-	} else {
-		choice = await ctx.ui.select("Which repo? (new chunkhound-tracked branch)", options);
-		if (choice === undefined) {
-			notify("Cancelled.", "info");
-			return undefined;
-		}
+	const options = [...candidates.keys(), PICK_PR, OTHER_REPO];
+	const choice = await ctx.ui.select("Which repo? (new chunkhound-tracked branch)", options);
+	if (choice === undefined) {
+		notify("Cancelled.", "info");
+		return undefined;
 	}
-	if (choice !== OTHER_REPO && candidates.has(choice)) return candidates.get(choice)!;
+	if (choice === PICK_PR) {
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const raw = await promptText(ctx.ui, {
+				title: "PR URL",
+				hint: "Paste the full URL from the browser: https://github.com/<owner>/<repo>/pull/<n>",
+			});
+			if (raw === undefined) {
+				notify("Cancelled.", "info");
+				return undefined;
+			}
+			const url = raw.trim();
+			if (parsePrUrl(url)) return { kind: "pr", url };
+			notify(`Not a PR URL: ${url}. Expected https://github.com/<owner>/<repo>/pull/<n>`, "error");
+		}
+		notify("No valid PR URL — cancelling.", "error");
+		return undefined;
+	}
+	if (choice !== OTHER_REPO && candidates.has(choice)) return { kind: "repo", root: candidates.get(choice)! };
 
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const raw = await promptPath(ctx.ui, { title: "Repo path (a git repository) — TAB completes:", cwd: ctx.cwd, paramLabel: "repo directory" });
@@ -697,11 +688,223 @@ async function pickRepoInteractive(ctx: { cwd: string; hasUI: boolean; ui: Wizar
 			return undefined;
 		}
 		const p = path.resolve(ctx.cwd, expandHome(raw.trim()));
+		// A pasted PR URL works here too (it carries the repo identity).
+		if (parsePrUrl(p)) return { kind: "pr", url: p };
 		const probe = fs.existsSync(p) ? p : path.dirname(p);
 		const root = await findRepoRoot(probe);
-		if (root) return path.resolve(root);
+		if (root) return { kind: "repo", root: path.resolve(root) };
 		notify(`Not a git repo: ${raw}. Try the repo's own directory.`, "error");
 	}
 	notify("No valid repo selected — cancelling.", "error");
 	return undefined;
+}
+
+/**
+ * Library root prompt for the wizards: prefilled with the configured root,
+ * TAB-completed, and re-prompted (≤3) when the location would overlap another
+ * chunkhound worktree/index. Returns undefined when cancelled or blocked.
+ */
+async function promptLibraryRoot(
+	ctx: WizardCtx,
+	settings: ChhoundSettings,
+	repoRoot: string,
+	slot: string | undefined,
+): Promise<{ dest: string; sandboxDir: string; wtPath: string } | undefined> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const defaultRoot = sandboxRoot(settings);
+	const promptTitle = (): string =>
+		`Worktree library root (worktree + index land in a storage dir under <root>; default: ${defaultRoot}):`;
+	const compute = (dest: string) => {
+		const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, slot, settings, dest);
+		const conflict =
+			findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
+			findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
+		return { sandboxDir, wtPath, conflict };
+	};
+	let destRaw = await promptPath(ctx.ui, {
+		title: promptTitle(),
+		cwd: ctx.cwd,
+		startValue: defaultRoot,
+		paramLabel: "worktree library root",
+	});
+	if (destRaw === undefined) {
+		notify("Cancelled.", "info");
+		return undefined;
+	}
+	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
+	let { sandboxDir, wtPath, conflict } = compute(dest);
+	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. Choose another root.`, "error");
+		destRaw = await promptPath(ctx.ui, {
+			title: promptTitle(),
+			cwd: ctx.cwd,
+			startValue: defaultRoot,
+			paramLabel: "worktree library root",
+		});
+		if (destRaw === undefined) {
+			notify("Cancelled.", "info");
+			return undefined;
+		}
+		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
+		({ sandboxDir, wtPath, conflict } = compute(dest));
+	}
+	if (conflict) {
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-status lists worktrees.`, "error");
+		return undefined;
+	}
+	return { dest, sandboxDir, wtPath };
+}
+
+// ── PR sandboxes ─────────────────────────────────────────────────────────────
+
+/**
+ * PR facts + host repo: gh view (fail fast — no clone for a bad/missing PR),
+ * then the host for the worktree — a LOCAL checkout of <owner>/<repo> when
+ * one exists (cwd repo or library-known; its cached baseline is reused), else
+ * a BARE MIRROR under the mirror cache root (cloned on first use; it hosts
+ * the baseline for every later PR of the repo). Finally fetch the PR head
+ * (only FETCH_HEAD + objects enter the host repo) and verify it against gh.
+ * Exported for the smoke suite.
+ */
+export async function resolvePrSandboxHost(
+	ctxCwd: string,
+	discoverySettings: ChhoundSettings,
+	pr: PrRef,
+	notify: (msg: string, type: "info" | "warning" | "error") => void,
+): Promise<{ repoRoot: string; settings: ChhoundSettings; info: PrInfo; headSha: string } | undefined> {
+	let info: PrInfo;
+	try {
+		info = await ghPrView(pr.owner, pr.repo, pr.number);
+	} catch (err) {
+		notify(err instanceof Error ? err.message : String(err), "error");
+		return undefined;
+	}
+	const preferRoots: string[] = [];
+	const cwdRoot = await gitRootOrNull(ctxCwd);
+	if (cwdRoot) preferRoots.push(cwdRoot);
+	const local = await findLocalRepo(discoverySettings, pr.owner, pr.repo, preferRoots);
+	let repoRoot: string;
+	if (local) {
+		repoRoot = path.resolve(local);
+	} else {
+		const dir = mirrorDir(discoverySettings, pr.owner, pr.repo);
+		notify(`No local checkout of ${pr.owner}/${pr.repo} — mirroring it into the cache (${dir}); later PRs of this repo reuse it.`, "info");
+		try {
+			repoRoot = await ensureMirror(discoverySettings, pr.owner, pr.repo);
+		} catch (err) {
+			notify(err instanceof Error ? err.message : String(err), "error");
+			return undefined;
+		}
+	}
+	const settings = loadSettings(repoRoot).settings;
+	let headSha: string;
+	try {
+		headSha = await fetchPrHead(repoRoot, pr.number);
+	} catch (err) {
+		notify(err instanceof Error ? err.message : String(err), "error");
+		return undefined;
+	}
+	if (info.headRefOid && headSha !== info.headRefOid) {
+		notify(
+			`gh reports head ${info.headRefOid.slice(0, 12)} but refs/pull/${pr.number}/head fetched ${headSha.slice(0, 12)} — indexing the fetched commit.`,
+			"warning",
+		);
+	}
+	return { repoRoot, settings, info, headSha };
+}
+
+/** PR-wizard tail after the URL is validated: gh → host → root prompt → create. */
+async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const pr = parsePrUrl(url);
+	if (!pr) {
+		notify(`Not a PR URL: ${url} — paste the full URL from the browser (https://github.com/<owner>/<repo>/pull/<n>).`, "error");
+		return;
+	}
+	const cwdRoot = await gitRootOrNull(ctx.cwd);
+	const discovery = loadSettings(cwdRoot ?? ctx.cwd).settings;
+	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
+	if (!host) return;
+	const slot = prSlot(pr.number);
+	const pick = await promptLibraryRoot(ctx, host.settings, host.repoRoot, slot);
+	if (!pick) return; // cancelled / blocked (notified)
+	await createIndexedWorktree(ctx, state, {
+		repoRoot: host.repoRoot,
+		sandboxDir: pick.sandboxDir,
+		wtPath: pick.wtPath,
+		settings: host.settings,
+		// Detached at the PR head; baseline anchored at the PR's BASE branch so
+		// the top-up only indexes the PR delta.
+		commitIsh: host.headSha,
+		baseRef: host.info.baseRefName,
+		branchLabel: slot,
+		headRef: host.info.headRefName,
+		headOid: host.headSha,
+		flags: {},
+	});
+}
+
+/** One-go PR path (/chworktree <PR URL> [--dest …]): fully non-interactive. */
+async function runPrOneGo(
+	ctx: WizardCtx,
+	state: PluginState,
+	pr: PrRef,
+	flags: Record<string, string | true>,
+	dest?: string,
+): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const cwdRoot = await gitRootOrNull(ctx.cwd);
+	const discovery = loadSettings(cwdRoot ?? ctx.cwd).settings;
+	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
+	if (!host) return;
+	const slot = prSlot(pr.number);
+	const loc = await oneGoLocation(host.repoRoot, slot, host.settings, dest, notify);
+	if (!loc) return;
+	await createIndexedWorktree(ctx, state, {
+		repoRoot: host.repoRoot,
+		sandboxDir: loc.sandboxDir,
+		wtPath: loc.wtPath,
+		settings: host.settings,
+		commitIsh: host.headSha,
+		baseRef: host.info.baseRefName,
+		branchLabel: slot,
+		headRef: host.info.headRefName,
+		headOid: host.headSha,
+		flags,
+	});
+}
+
+/** One-go location guards — notify + undefined when the location is blocked
+ * (shared by the branch and PR one-go paths so their refusals never drift). */
+async function oneGoLocation(
+	repoRoot: string,
+	slot: string | undefined,
+	settings: ChhoundSettings,
+	dest: string | undefined,
+	notify: (msg: string, type: "info" | "warning" | "error") => void,
+): Promise<{ sandboxDir: string; wtPath: string } | undefined> {
+	const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, slot, settings, dest);
+	const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
+	if (conflict) {
+		notify(
+			`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
+				"Pick a different destination (/ch-status lists indexed worktrees).",
+			"error",
+		);
+		return undefined;
+	}
+	const sandboxConflict = findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
+	if (sandboxConflict) {
+		notify(
+			`Refusing: the storage dir ${sandboxDir} would overlap worktree ${sandboxConflict}. ` +
+				"Pick a different destination (/ch-status lists worktrees).",
+			"error",
+		);
+		return undefined;
+	}
+	if (fs.existsSync(wtPath) && fs.readdirSync(wtPath).length > 0) {
+		notify(`Refusing: ${wtPath} exists and is not empty (leftover from a failed run?).`, "error");
+		return undefined;
+	}
+	return { sandboxDir, wtPath };
 }
