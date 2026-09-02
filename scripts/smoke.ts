@@ -163,7 +163,7 @@ async function main(): Promise<void> {
 		const argDestFlag = await worktreeArgumentCompletions("wt --d", proj);
 		check("arg completions: --dest flag name", argDestFlag.some((c) => c.value === "wt --dest"), JSON.stringify(argDestFlag));
 		const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
-		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "sandbox library root (worktree + index land there)"), JSON.stringify(argDest));
+		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree library root (worktrees + indexes land there)"), JSON.stringify(argDest));
 		check("--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
 	}
 

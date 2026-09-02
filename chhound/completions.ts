@@ -219,7 +219,7 @@ export async function mcpArgumentCompletions(argumentPrefix: string, cwd: string
 			items.push({
 				value: quote(wt),
 				label: path.basename(wt),
-				description: `sandbox ${path.basename(e.dir)} · ${e.meta.branch}`,
+				description: `storage ID ${path.basename(e.dir)} · ${e.meta.branch}`,
 			});
 		}
 		const name = path.basename(e.dir);
@@ -286,7 +286,7 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 				);
 			case "dest":
 				return withBase(
-					dirCompletions(rawValuePart, cwd, { quote: true, paramLabel: "sandbox library root (worktree + index land there)" }).map((i) => ({
+					dirCompletions(rawValuePart, cwd, { quote: true, paramLabel: "worktree library root (worktrees + indexes land there)" }).map((i) => ({
 						...i,
 						value: prefix + i.value,
 					})),

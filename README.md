@@ -35,41 +35,41 @@ or `pi install git:github.com/grzegorznowak/pi-chunkhound@main` (try first with 
 ln -s /path/to/pi-chhound ~/.pi/agent/extensions/pi-chhound
 ```
 
-Don't use both install paths at once — the commands would register twice. Configure once with `/ch-setup` (embedding provider/model, LLM for research tools, baseline ref & max age, sandbox library root).
+Don't use both install paths at once — the commands would register twice. Configure once with `/ch-setup` (embedding provider/model, LLM for research tools, baseline ref & max age, worktree library root).
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. |
-| `/ch-mcp [<worktree\|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
-| `/ch-status [--prune]` | List sandboxes, baselines, and live MCP connections. |
+| `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
+| `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
 
 ### /chworktree — two ways to invoke
 
 - **Wizard** — `/chworktree [repo]` with no other arguments: asks for the branch
-  name (Enter = new branch `<repo>-wt`) and the sandbox library root (Enter = the
+  name (Enter = new branch `<repo>-wt`) and the worktree library root (Enter = the
   configured root). With no argument at all it also lets you pick the repo (current
   repo, repos from the index library, or a typed path). Path prompts support TAB
   completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
 - **One-go (agents)** — everything on one line, fully non-interactive:
   `/chworktree [repo] -b <branch> [--dest <dir>]`. The first argument is always
-  the repo. `--dest` overrides the sandbox library root for this invocation
-  (default: the configured root); the worktree and its index land at
-  `<root>/<sandbox>/<branch>`.
+  the repo. `--dest` overrides the worktree library root for this invocation
+  (default: the configured root); the worktree and its index land in a storage
+  dir under `<root>`.
 
-In all modes the location must not overlap another chunkhound sandbox or index —
-the wizard re-prompts, one-go aborts. **Sandbox-anchored layout**: the checkout
-lives inside its sandbox dir together with the config, index db and daemon state
+In all modes the location must not overlap another chunkhound worktree or index —
+the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
+lives inside its storage dir together with the config, index db and daemon state
 (the `/workspaces` pattern). Nothing is ever written into the checkout or the
 source repo — no `.chunkhound/`, no git-exclude edits.
 Long index runs stream live progress to the footer (`embedding · batch 3/12 · db 5.8 MB …`).
 
 ### /ch-mcp
 
-Dynamically connects pi to a sandbox's chunkhound index over MCP — no pre-registered
-servers needed. With no argument it opens an interactive picker of all sandboxes.
+Dynamically connects pi to a worktree's chunkhound index over MCP — no pre-registered
+servers needed. With no argument it opens an interactive picker of all worktrees.
 `--prefix` namespaces the exposed tools, `--read-only` restricts them,
 `--no-daemon` attaches to an already-running chunkhound daemon.
 
@@ -103,7 +103,7 @@ answered questions) or fully flag-driven: `--provider --model --rerank-model
 --baseline-max-age --sandbox-root --api-key --auto-reconnect --verify --project
 --reset`.
 `--config <file>` adopts an existing `chunkhound.json`; `--sandbox-root` sets the
-sandbox library root for `/chworktree` (`--worktree-base` is a legacy alias).
+worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
 
 ## Where things live
 

@@ -26,10 +26,10 @@ const HELP = [
 	"  [branch]            existing branch to check out (picker leads with 'new branch')",
 	"  -b <name>           create a new branch with an explicit name",
 	"  --from <ref>        base commit/branch/tag for the worktree",
-	"  --dest <dir>        sandbox library root for this invocation — the worktree AND",
-	"                      its index land at <dir>/<sandbox>/<branch> (default: the",
-	"                      configured sandbox root). Blocks when the location would",
-	"                      overlap another chunkhound sandbox/index.",
+	"  --dest <dir>        worktree library root for this invocation — the worktree AND",
+	"                      its index land in a storage dir under <dir> (default: the",
+	"                      configured worktree library root). Blocks when the location",
+	"                      would overlap another chunkhound worktree/index.",
 	"  --config <file>     adopt an existing chunkhound.json for this worktree",
 	"  --no-index          skip indexing (worktree only)",
 	"  --force-reindex    full re-index instead of baseline top-up",
@@ -37,7 +37,7 @@ const HELP = [
 	"",
 	"Two ways to invoke:",
 	"  wizard:  /chworktree [repo] with no other arguments — asks for the branch name",
-	"           and the sandbox library root interactively (with no argument at all",
+	"           and the worktree library root interactively (with no argument at all",
 	"           it also lets you pick the repo). Path prompts support TAB completion",
 	"           (dirs only, drill-down; TAB accepts, Enter confirms, Esc cancels).",
 	"  one-go:  /chworktree [repo] -b <branch> [--dest <dir>] [options] — everything",
@@ -45,7 +45,7 @@ const HELP = [
 	"           the repo.",
 	"",
 	"Each worktree gets its own chunkhound index (baseline copy + top-up at the",
-	"branch point). The checkout lives INSIDE its sandbox dir in the sandbox",
+	"branch point). The checkout lives INSIDE its storage dir in the worktree",
 	"library — config, index db, daemon state and checkout together, mirroring the",
 	"'/workspaces' pattern. Nothing is ever written into the worktree checkout or",
 	"the source repo (no .chunkhound/, no git-exclude edits).",
@@ -197,8 +197,8 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			const sandboxConflict = findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
 			if (sandboxConflict) {
 				notify(
-					`Refusing: the sandbox dir ${sandboxDir} would overlap the sandbox ${sandboxConflict}. ` +
-						"Pick a different destination (/ch-status lists sandboxes).",
+					`Refusing: the storage dir ${sandboxDir} would overlap worktree ${sandboxConflict}. ` +
+						"Pick a different destination (/ch-status lists worktrees).",
 					"error",
 				);
 				return;
@@ -260,7 +260,7 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 		`No git repo found: ${base}`,
 		"/chworktree creates a worktree OF an existing git repo.",
 		"Try: run it from inside the repo, or pass the repo's own directory as the first argument",
-		"(the worktree + its index land in the sandbox library). If the project should be a repo:",,
+		"(the worktree + its index land in the worktree library). If the project should be a repo:",,
 		`git init ${wtArg ?? cwd} && git -C ${wtArg ?? cwd} add -A && git -C ${wtArg ?? cwd} commit -m init, then retry.`,
 		"Bare /chworktree (no arguments) opens an interactive repo picker.",
 	].join("\n");
@@ -312,7 +312,7 @@ async function createIndexedWorktree(
 		if (flags["no-index"]) {
 			notify(
 				`Worktree created (no index): ${wtPath} @ ${branchNow}\n` +
-					`The sandbox dir has no index yet (nothing is written into the checkout). Re-indexing an\n` +
+					`The storage dir has no index yet (nothing is written into the checkout). Re-indexing an\n` +
 					`existing worktree is not wired up yet — /ch-status --reindex is the pending path for it.`,
 				"info",
 			);
@@ -395,7 +395,7 @@ async function createIndexedWorktree(
 		notify(
 			[
 				`✓ ${branchNote} @ ${wtPath} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
-				`worktree: ${wtPath} (inside the sandbox — the repo stays untouched)`,
+				`worktree: ${wtPath} (inside its storage dir — the repo stays untouched)`,
 				`db: ${dbDir}`,
 				`config: ${sandboxConfigPath(sandboxDir)}`,
 				`Next: chunkhound mcp ${sandboxDir} --config ${sandboxConfigPath(sandboxDir)}`,
@@ -465,20 +465,20 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		createBranch = choice.createBranch;
 	}
 
-	// 3) Sandbox library root — the worktree AND its index land at
-	//    <root>/<sandbox>/<branch>. Default: the configured sandbox root
+	// 3) Worktree library root — the worktree AND its index land in a storage
+	//    dir under <root>. Default: the configured worktree library root
 	//    (settings > env > XDG state). Roots that would overlap another
-	//    chunkhound sandbox/index are blocked. Prefilled with the default;
+	//    chunkhound worktree/index are blocked. Prefilled with the default;
 	//    TAB completes like the command-line picker.
 	const defaultRoot = sandboxRoot(settings);
 	const finalBranch = branch ?? createBranch;
 	const promptTitle = (): string =>
-		`Sandbox library root (worktree + index land at <root>/<sandbox>/${finalBranch ?? "<branch>"}; default: ${defaultRoot}):`;
+		`Worktree library root (worktree + index land in a storage dir under <root>; default: ${defaultRoot}):`;
 	let destRaw = await promptPath(ctx.ui, {
 		title: promptTitle(),
 		cwd: ctx.cwd,
 		startValue: defaultRoot,
-		paramLabel: "sandbox library root",
+		paramLabel: "worktree library root",
 	});
 	if (destRaw === undefined) {
 		notify("Cancelled.", "info");
@@ -490,12 +490,12 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		findConflictingIndexed(wtPath, indexedWorktreePaths(settings)) ??
 		findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
 	for (let attempt = 0; attempt < 3 && conflict; attempt++) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound sandbox ${conflict}. Choose another root.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. Choose another root.`, "error");
 		destRaw = await promptPath(ctx.ui, {
 			title: promptTitle(),
 			cwd: ctx.cwd,
 			startValue: defaultRoot,
-			paramLabel: "sandbox library root",
+			paramLabel: "worktree library root",
 		});
 		if (destRaw === undefined) {
 			notify("Cancelled.", "info");
@@ -508,7 +508,7 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 			findConflictingIndexed(sandboxDir, listSandboxes(settings).map((e) => e.dir));
 	}
 	if (conflict) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound sandbox ${conflict}. /ch-status lists sandboxes.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-status lists worktrees.`, "error");
 		return;
 	}
 

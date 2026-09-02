@@ -121,7 +121,7 @@ export function adoptConfigFile(file: string, cwd: string): AdoptResult {
 
 	if (obj.research && typeof obj.research === "object") adopted.research = obj.research as Record<string, unknown>;
 	if (obj.database && typeof obj.database === "object") {
-		warnings.push("database block ignored — pi-chhound pins the duckdb path per sandbox/baseline.");
+		warnings.push("database block ignored — pi-chhound pins the duckdb path per worktree/baseline.");
 	}
 	return { adopted, warnings };
 }

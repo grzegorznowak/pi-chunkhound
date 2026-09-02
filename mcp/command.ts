@@ -24,19 +24,19 @@ export function mcpTargetLines(
 	const sandboxes = listSandboxes(settings);
 	const lines = ["chhound MCP — available targets:"];
 	if (sandboxes.length === 0) {
-		lines.push("  (no sandboxes — run /chworktree <path> first)");
+		lines.push("  (no worktrees — run /chworktree <path> first)");
 	} else {
 		for (const s of sandboxes) {
 			const id = path.basename(s.dir);
 			const conn = conns.find((c) => c.id === id);
 			lines.push(
 				`  ${conn ? "●" : "·"} ${s.meta.worktree}${conn ? "  (connected)" : ""}`,
-				`      ${id} · ${s.meta.branch} @ ${s.meta.baseCommit.slice(0, 8)} · db ${fmtSize(s.dbSizeBytes)}${conn ? ` · prefix ${conn.prefix} · ${conn.toolNames.length} tools` : ""}`,
+				`      ${id} · ${s.meta.branch} @ base commit ${s.meta.baseCommit.slice(0, 8)} · index ${fmtSize(s.dbSizeBytes)}${conn ? ` · prefix ${conn.prefix} · ${conn.toolNames.length} tools` : ""}`,
 			);
 		}
 	}
-	lines.push("connect: /ch-mcp <worktree or sandbox name>");
-	if (conns.length > 0) lines.push("disconnect: /ch-mcp <sandbox name> --disconnect");
+	lines.push("connect: /ch-mcp <worktree path/name or storage ID>");
+	if (conns.length > 0) lines.push("disconnect: /ch-mcp <worktree or storage ID> --disconnect");
 	return lines;
 }
 
@@ -115,8 +115,8 @@ async function connectEntry(
 export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-mcp", {
 		description:
-			"Connect pi to a sandbox's chunkhound index over MCP. " +
-			"Usage: /ch-mcp [<worktree|sandbox> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]] — no argument opens the target picker",
+			"Connect pi to a worktree's chunkhound index over MCP. " +
+			"Usage: /ch-mcp [<worktree|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]] — no argument opens the target picker",
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, MCP_VALUE_FLAGS);
 			const repoRoot = await gitRootOrNull(ctx.cwd);
@@ -128,7 +128,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			if (positionals.length === 0) {
 				const sandboxes = listSandboxes(settings);
 				if (sandboxes.length === 0) {
-					ctx.ui.notify("chhound MCP — no sandboxes yet (run /chworktree <path> first).", "warning");
+					ctx.ui.notify("chhound MCP — no worktrees yet (run /chworktree <path> first).", "warning");
 					return;
 				}
 				if (typeof ctx.ui.select === "function") {
@@ -140,7 +140,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 					}
 					const entry = sandboxes[options.indexOf(choice)];
 					if (!entry) {
-						ctx.ui.notify("Selection did not match a sandbox — cancelling.", "error");
+						ctx.ui.notify("Selection did not match a worktree — cancelling.", "error");
 						return;
 					}
 					await connectEntry(pi, ctx, state, entry, {});
@@ -153,14 +153,14 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			const matches = resolveSandboxMatches(positionals[0]!, settings, ctx.cwd);
 			if (matches.length === 0) {
 				ctx.ui.notify(
-					`No sandbox matches '${positionals[0]}' — run /ch-status to list sandboxes.`,
+					`No worktree or storage ID matches '${positionals[0]}' — run /ch-status to list worktrees.`,
 					"error",
 				);
 				return;
 			}
 			if (matches.length > 1) {
 				ctx.ui.notify(
-					`'${positionals[0]}' matches ${matches.length} sandboxes:\n` +
+					`'${positionals[0]}' matches ${matches.length} worktrees:\n` +
 						matches.map((m) => `  ${path.basename(m.dir)} → ${m.meta.worktree}`).join("\n") +
 						"\nUse the full worktree path.",
 					"error",

@@ -9,7 +9,88 @@ import { baseRoot, sandboxRoot } from "../chhound/paths.js";
 import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches } from "../chhound/sandbox.js";
 import { listMcpConnections } from "../mcp/manager.js";
 import { loadSettings } from "../chhound/settings.js";
-import type { PluginState } from "../chhound/types.js";
+import type { ChhoundSettings, PluginState } from "../chhound/types.js";
+import type { BaselineMeta } from "../chhound/types.js";
+import type { SandboxEntry } from "../chhound/sandbox.js";
+
+/**
+ * Full /ch-status rendering (pure — the handler assembles the inputs and
+ * notifies the result). Kept headless so the exact output is verifiable.
+ */
+export function buildStatusLines(opts: {
+	version: string;
+	settings: ChhoundSettings;
+	sandboxes: SandboxEntry[];
+	baselines: Array<{ dir: string; meta?: BaselineMeta }>;
+	conns: readonly { worktree: string; prefix: string; toolNames: string[] }[];
+}): string[] {
+	const { version, settings, sandboxes, baselines, conns } = opts;
+	const lines: string[] = [
+		`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
+		`worktree library root: ${sandboxRoot(settings)}${settings.worktreeBase && !settings.sandboxRoot ? ` (legacy worktreeBase)` : ""}`,
+		`baseline library root: ${baseRoot(settings)}`,
+		`embedding: ${settings.embedding?.provider && settings.embedding?.model
+			? `${settings.embedding.provider}/${settings.embedding.model}${settings.embedding.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`
+			: "not configured — run /ch-setup"}`,
+		`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "not configured — research tools need it (/ch-setup)"}`,
+		`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
+		"",
+		`worktrees (${sandboxes.length}):`,
+	];
+	if (sandboxes.length === 0) {
+		lines.push("  (none — run /chworktree <path>)");
+	} else {
+		for (const s of sandboxes) {
+			const alive = fs.existsSync(s.meta.worktree) ? "✓ live" : "✗ gone";
+			const repoName = s.meta.repoRoot ? path.basename(s.meta.repoRoot) : path.basename(s.dir);
+			// Design 1: the claimed root is the SANDBOX dir (the daemon's
+			// project dir — the checkout lives inside it), not the worktree.
+			let rootTxt: string[];
+			if (!s.claimedRoot) {
+				rootTxt = [`⚠ unclaimed — run chunkhound index/mcp from ${s.dir}`];
+			} else if (claimedRootMatches(s.claimedRoot, s.dir)) {
+				rootTxt = [`✓ ${s.claimedRoot}`];
+			} else {
+				rootTxt = [
+					"⚠ mismatch",
+					`claimed:  ${s.claimedRoot}`,
+					`expected: ${s.dir}`,
+					"fix: run chunkhound index/mcp from the expected root",
+				];
+			}
+			lines.push(
+				`  ${alive}  ${repoName}/${s.meta.branch}`,
+				`      worktree:   ${s.meta.worktree}`,
+				`      base commit: ${s.meta.baseCommit.slice(0, 8)} · index: ${fmtSize(s.dbSizeBytes)} · created: ${s.meta.createdAt.slice(0, 10)}`,
+				`      index root: ${rootTxt[0]}`,
+				...rootTxt.slice(1).map((l) => `          ${l}`),
+			);
+		}
+	}
+	lines.push("", `baselines (${baselines.length}):`);
+	if (baselines.length === 0) {
+		lines.push("  (none — created on first /chworktree)");
+	} else {
+		for (const b of baselines) {
+			const meta = b.meta;
+			// Dir layout is <baseRoot>/<repo-slug>-<hash8>/<ref> — show the
+			// repo (slug part) so multi-repo libraries are readable.
+			const repoDirName = path.basename(path.dirname(b.dir));
+			const repoName = repoDirName.length > 9 ? repoDirName.slice(0, -9) : repoDirName;
+			lines.push(
+				meta
+					? `  ${repoName}/${path.basename(b.dir)} @ ${meta.baseCommit.slice(0, 8)} · ${meta.chhoundVersion} · updated ${meta.updatedAt.slice(0, 10)}`
+					: `  ${repoName}/${path.basename(b.dir)} (no meta — incomplete)`,
+			);
+		}
+	}
+	lines.push(...mcpStatusLines(conns));
+	lines.push(
+		`cleanup: /ch-status --prune removes storage for gone worktrees and unused or incomplete baselines` +
+			(conns.length === 0 ? " · connect: /ch-mcp <worktree>" : ""),
+	);
+	return lines;
+}
 
 /** MCP connection section for /ch-status (pure — smoke-tested headless). */
 export function mcpStatusLines(conns: readonly { worktree: string; prefix: string; toolNames: string[] }[]): string[] {
@@ -18,7 +99,10 @@ export function mcpStatusLines(conns: readonly { worktree: string; prefix: strin
 		lines.push("  (none — run /ch-mcp to connect)");
 	} else {
 		for (const c of conns) {
-			lines.push(`  ● ${c.worktree} · prefix ${c.prefix} · ${c.toolNames.length} tools`);
+			lines.push(
+				`  ● ${path.basename(c.worktree)} · prefix ${c.prefix} · ${c.toolNames.length} tools`,
+				`      ${c.worktree}`,
+			);
 		}
 	}
 	return lines;
@@ -27,8 +111,8 @@ export function mcpStatusLines(conns: readonly { worktree: string; prefix: strin
 export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-status", {
 		description:
-			"List pi-chhound sandboxes and baselines (index library). " +
-			"Usage: /ch-status [--prune] (--prune removes orphan sandboxes and garbage baselines: " +
+			"List pi-chhound worktrees and baselines (index library). " +
+			"Usage: /ch-status [--prune] (--prune removes storage for gone worktrees and garbage baselines: " +
 			"incomplete, dead repo, superseded)",
 		handler: async (args, ctx) => {
 			const { flags } = parseArgs(args);
@@ -43,13 +127,13 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 				if (removed.length > 0 || removedBases.length > 0) {
 					ctx.ui.notify(
 						[
-							removed.length > 0 ? `Pruned ${removed.length} sandbox(es):\n${removed.join("\n")}` : "",
+							removed.length > 0 ? `Pruned storage for ${removed.length} gone worktree(s):\n${removed.join("\n")}` : "",
 							removedBases.length > 0 ? `Pruned ${removedBases.length} baseline(s):\n${removedBases.join("\n")}` : "",
 						].filter(Boolean).join("\n"),
 						"info",
 					);
 				} else {
-					ctx.ui.notify("Nothing to prune — all sandboxes have a live worktree and all baselines are valid.", "info");
+					ctx.ui.notify("Nothing to prune — all worktrees are live and all baselines are valid.", "info");
 				}
 			}
 
@@ -57,58 +141,10 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			const sandboxes = listSandboxes(settings);
 			const baselines = listBaselines(settings);
 
-			const lines: string[] = [
-				`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
-				`sandbox root: ${sandboxRoot(settings)}${settings.worktreeBase && !settings.sandboxRoot ? ` (legacy worktreeBase)` : ""}`,
-				`baseline root: ${baseRoot(settings)}`,
-				`embedding: ${settings.embedding?.provider && settings.embedding?.model
-					? `${settings.embedding.provider}/${settings.embedding.model}${settings.embedding.outputDims ? ` · dims ${settings.embedding.outputDims}` : ""}`
-					: "not configured — run /ch-setup"}`,
-				`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "not configured — research tools need it (/ch-setup)"}`,
-				`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
-				"",
-				`sandboxes (${sandboxes.length}):`,
-			];
-			if (sandboxes.length === 0) {
-				lines.push("  (none — run /chworktree <path>)");
-			} else {
-				for (const s of sandboxes) {
-					const alive = fs.existsSync(s.meta.worktree) ? "✓" : "✗ gone";
-					// Design 1: the claimed root is the SANDBOX dir (the daemon's
-					// project dir — the checkout lives inside it), not the worktree.
-					let rootTxt: string;
-					if (!s.claimedRoot) {
-						rootTxt = "root unclaimed — run chunkhound index/mcp from the sandbox dir";
-					} else if (claimedRootMatches(s.claimedRoot, s.dir)) {
-						rootTxt = `root ${s.claimedRoot}`;
-					} else {
-						rootTxt = `⚠ root ${s.claimedRoot} ≠ sandbox — run chunkhound index/mcp from ${s.dir}`;
-					}
-					lines.push(
-						`  ${alive} ${path.basename(s.dir)} → ${s.meta.worktree}`,
-						`      ${s.meta.branch} @ base ${s.meta.baseCommit.slice(0, 8)} · db ${fmtSize(s.dbSizeBytes)} · ${s.meta.createdAt.slice(0, 10)} · ${rootTxt}`,
-					);
-				}
-			}
-			lines.push("", `baselines (${baselines.length}):`);
-			if (baselines.length === 0) {
-				lines.push("  (none — created on first /chworktree)");
-			} else {
-				for (const b of baselines) {
-					const meta = b.meta;
-					// Dir layout is <baseRoot>/<repo-slug>-<hash8>/<ref> — show the
-					// repo (slug part) so multi-repo libraries are readable.
-					const repoDirName = path.basename(path.dirname(b.dir));
-					const repoName = repoDirName.length > 9 ? repoDirName.slice(0, -9) : repoDirName;
-					lines.push(
-						meta
-							? `  ${repoName}/${path.basename(b.dir)} @ ${meta.baseCommit.slice(0, 8)} · ${meta.chhoundVersion} · updated ${meta.updatedAt.slice(0, 10)}`
-							: `  ${repoName}/${path.basename(b.dir)} (no meta — incomplete)`,
-					);
-				}
-			}
-			lines.push(...mcpStatusLines(listMcpConnections()));
-			ctx.ui.notify(lines.join("\n"), "info");
+			ctx.ui.notify(
+				buildStatusLines({ version, settings, sandboxes, baselines, conns: listMcpConnections() }).join("\n"),
+				"info",
+			);
 		},
 	});
 }

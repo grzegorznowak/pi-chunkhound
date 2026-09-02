@@ -85,7 +85,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					const emb = settings.embedding;
 					summary.push(
 						`adopted ${flags["config"]}: ${emb?.provider ?? "?"}/${emb?.model ?? "?"}`,
-						`database block ignored (pi-chhound pins duckdb per sandbox)`,
+						`database block ignored (pi-chhound pins duckdb per worktree)`,
 					);
 				} catch (err) {
 					ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
@@ -319,10 +319,10 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				let basePicked: string | undefined;
 				for (let attempt = 0; attempt < 3 && basePicked === undefined; attempt++) {
 					const raw = await promptPath(ctx.ui, {
-						title: `Sandbox library root (worktrees + their indexes land at <root>/<sandbox>/<branch>; default: ${suggested ?? "none — must be outside any chunkhound index"}):`,
+						title: `Worktree library root (worktrees + their indexes land in storage dirs under <root>; default: ${suggested ?? "none — must be outside any chunkhound index"}):`,
 						cwd: ctx.cwd,
 						startValue: suggested ?? "",
-						paramLabel: "sandbox library root",
+						paramLabel: "worktree library root",
 					});
 					if (raw === undefined) {
 						ctx.ui.notify("/ch-setup cancelled.", "info");
@@ -336,7 +336,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					const base = path.resolve(ctx.cwd, expandHome(trimmed));
 					if (insideChunkhoundRoot(base)) {
 						ctx.ui.notify(
-							`${base} or a parent already contains a .chunkhound.json (an indexed root) — sandboxes must live outside it.`,
+							`${base} or a parent already contains a .chunkhound.json (an indexed root) — worktrees must live outside it.`,
 						"warning",
 					);
 						continue;
@@ -344,13 +344,13 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					basePicked = base;
 				}
 				if (basePicked === undefined) {
-					ctx.ui.notify("No valid sandbox library root — cancelling.", "error");
+					ctx.ui.notify("No valid worktree library root — cancelling.", "error");
 					return;
 				}
 				if (basePicked) {
 					settings.sandboxRoot = basePicked;
 					if (settings.worktreeBase) delete settings.worktreeBase;
-					summary.push(`sandbox root: ${basePicked}`);
+					summary.push(`worktree library root: ${basePicked}`);
 				} else {
 					delete settings.sandboxRoot;
 				}
@@ -363,7 +363,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				const p = saveSettings(settings, scope, projectRoot);
 				summary.unshift(`saved settings → ${p}`);
 				const refreshed = refreshMaterializedConfigs(settings);
-				if (refreshed.length > 0) summary.push(`refreshed ${refreshed.length} sandbox/baseline config(s)`);
+				if (refreshed.length > 0) summary.push(`refreshed ${refreshed.length} worktree/baseline config(s)`);
 			} else if (!flags["verify"]) {
 				// Nothing to do: report current state + usage.
 				const lines = [
