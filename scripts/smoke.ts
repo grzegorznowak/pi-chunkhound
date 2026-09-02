@@ -33,7 +33,7 @@ import {
 } from "../chhound/sandbox.js";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { loadSettings, saveSettings } from "../chhound/settings.js";
-import { connectMcp, disconnectMcp, listMcpConnections, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
+import { connectMcp, disconnectMcp, listMcpConnections, mcpFooterStatusText, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
 import { CONNECTION_ENTRY_TYPE, recordConnection, rehydrateConnections, restoreConnections } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
@@ -764,6 +764,22 @@ async function main(): Promise<void> {
 		reRegisterBridgeTools(capturePi(afterDisconnect));
 		check("bridge: no live connections → replay is a no-op", afterDisconnect.size === 0, `registered ${afterDisconnect.size}`);
 
+		// Unexpected daemon death (SIGKILL): the registry entry must drop on its
+		// own — transport close → Protocol._onclose → client.onclose cleanup.
+		// Tools, /ch-status and the footer would otherwise report a corpse, and
+		// the next session's auto-restore would skip it as "already live".
+		process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = daemonRuntime;
+		const connKilled = await connectMcp(capturePi(firstApi), entry, { extraArgs: ["--no-embeddings"] });
+		check("death: reconnect registers a fresh entry", listMcpConnections().some((c) => c.id === connKilled.id));
+		const pid3 = connKilled.transport.pid;
+		if (pid3 !== null) process.kill(pid3, "SIGKILL");
+		check(
+			"death: SIGKILLed daemon drops from the registry",
+			await waitFor(() => !listMcpConnections().some((c) => c.id === connKilled.id), 10_000),
+			listMcpConnections().map((c) => c.id).join(",") || "(registry empty)",
+		);
+		delete process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR;
+
 		// No-argument target list (pure helper — same view the command shows).
 		const targetLines = mcpTargetLines(settings, []);
 		check("mcp: no-arg lists sandbox targets", targetLines.some((l) => l.includes(wt)), targetLines.join("\n"));
@@ -797,6 +813,14 @@ async function main(): Promise<void> {
 			"status: mcp section live",
 			liveStatus.includes("mcp connections (1)") && liveStatus.includes("●") && liveStatus.includes("2 tools"),
 			liveStatus,
+		);
+
+		// Footer indicator text (pure helper — mirrors the mcp section above).
+		check("footer: hidden when nothing connected", mcpFooterStatusText([]) === undefined);
+		check("footer: single connection", mcpFooterStatusText([{ id: "sb-1" }]) === "🔌 ch-mcp: 1 connected");
+		check(
+			"footer: multiple connections",
+			mcpFooterStatusText([{ id: "sb-1" }, { id: "sb-2" }]) === "🔌 ch-mcp: 2 connected",
 		);
 
 		// /ch-setup refresh: existing sandbox + baseline configs get the llm

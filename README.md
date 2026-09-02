@@ -85,12 +85,20 @@ connections are never recorded (single-process stdio — two of them on one
 database would clash on the file lock); API keys never enter the log. Toggle the
 auto-restore via `/ch-setup --auto-reconnect on|off` (default on).
 
+**Footer indicator.** Live dynamic connections show in pi's footer as
+`🔌 ch-mcp: N connected` (the separate `🔌 MCP: …` segment is pi-mcp-adapter's,
+for `mcp.json` servers) and disappear when nothing is connected. If a worktree's
+daemon dies (crash/kill), the connection drops out of the footer and `/ch-status`
+immediately; the session log still records it as connected, so the next
+session's auto-restore retries it — a crash recovers automatically, while an
+explicit `--disconnect` does not.
+
 ### /ch-status
 
-Shows chunkhound's version, sandbox/baseline roots, embedding and LLM config,
-API-key status, every sandbox (worktree alive?, branch, base commit, db size,
-claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
-live MCP connections. `--prune` removes orphan sandboxes (worktree gone) and
+Shows chunkhound's version, worktree/baseline library roots, embedding and LLM
+config, API-key status, every worktree (alive?, repo/branch, base commit, index
+size, claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
+live MCP connections. `--prune` removes storage for gone worktrees and
 garbage baselines (incomplete from a crashed prime, source repo deleted, or a
 superseded duplicate). The same baseline GC also runs automatically after each
 baseline prime — the cache is self-healing, no manual cleanup needed.

@@ -1,5 +1,15 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { closeAllMcp, reRegisterBridgeTools } from "./mcp/manager.js";
+import {
+	MCP_FOOTER_RESTORING,
+	MCP_STATUS_KEY,
+	closeAllMcp,
+	getMcpConnection,
+	listMcpConnections,
+	mcpFooterStatusText,
+	reRegisterBridgeTools,
+	refreshMcpStatus,
+	setMcpStatusListener,
+} from "./mcp/manager.js";
 import { registerMcpCommand } from "./mcp/command.js";
 import { rehydrateConnections, restoreConnections } from "./mcp/persist.js";
 import { loadSettings } from "./chhound/settings.js";
@@ -29,6 +39,9 @@ export default function (pi: ExtensionAPI): void {
 	// (chunkhound daemons shut themselves down when their client disconnects).
 	// session_start then restores the session's recorded connections.
 	pi.on("session_shutdown", () => {
+		// Unbind first: the teardown disconnects below would otherwise refresh
+		// a dying session's footer (pi clears extension statuses on its own).
+		setMcpStatusListener(undefined);
 		void closeAllMcp();
 	});
 
@@ -40,7 +53,44 @@ export default function (pi: ExtensionAPI): void {
 	// fire session_start — they only inherit live connections via the factory
 	// replay above, so no child ever triggers a daemon spawn here.
 	pi.on("session_start", (_event, ctx) => {
-		void restoreConnections(pi, loadSettings(ctx.cwd).settings, rehydrateConnections(ctx.sessionManager.getBranch()), {
+		const settings = loadSettings(ctx.cwd).settings;
+		const records = rehydrateConnections(ctx.sessionManager.getBranch());
+
+		// Footer segment for the live dynamic connections ("🔌 ch-mcp: N
+		// connected"), mirroring pi-mcp-adapter's "🔌 MCP: …" segment. pi
+		// clears every extension status on session end, so re-bind and
+		// re-render on every session_start; the listener fires on connect,
+		// disconnect, daemon death (transport close) and restore settle.
+		if (ctx.hasUI) {
+			const ui = ctx.ui;
+			const styleStatus = (text: string): string => {
+				const theme = ui.theme;
+				return theme && typeof theme.fg === "function" ? theme.fg("accent", text) : text;
+			};
+			setMcpStatusListener(() => {
+				const text = mcpFooterStatusText(listMcpConnections());
+				if (text === undefined) {
+					ui.setStatus(MCP_STATUS_KEY, undefined);
+				} else {
+					ui.setStatus(MCP_STATUS_KEY, styleStatus(text));
+				}
+			});
+			refreshMcpStatus();
+			// Session-start auto-restore takes a moment per daemon — show a
+			// transient instead of a silently empty footer. Only when records
+			// will actually attempt a connect (connected record, not already
+			// live in-process, auto-reconnect on).
+			const pendingRestore = [...records.values()].some(
+				(r) => r.state === "connected" && !getMcpConnection(r.sandboxId) && settings.autoReconnect !== false,
+			);
+			if (pendingRestore) {
+				ui.setStatus(MCP_STATUS_KEY, styleStatus(MCP_FOOTER_RESTORING));
+			}
+		} else {
+			setMcpStatusListener(undefined);
+		}
+
+		void restoreConnections(pi, settings, records, {
 			apiKey: state.apiKey,
 		});
 

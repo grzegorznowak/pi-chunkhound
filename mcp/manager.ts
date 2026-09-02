@@ -63,6 +63,39 @@ export interface ConnectMcpOptions {
 
 const connections = new Map<string, McpConnection>();
 
+/** Footer status key (distinct from the index-progress "chhound" line). */
+export const MCP_STATUS_KEY = "chhound-mcp";
+
+/**
+ * Footer text for the live dynamic connections (pure — smoke-tested
+ * headless). Mirrors pi-mcp-adapter's "🔌 MCP: …" segment; undefined =
+ * nothing connected = hide the segment.
+ */
+export function mcpFooterStatusText(conns: readonly Pick<McpConnection, "id">[]): string | undefined {
+	if (conns.length === 0) return undefined;
+	return `🔌 ch-mcp: ${conns.length} connected`;
+}
+
+/** Transient shown while session-start auto-restore is still in flight. */
+export const MCP_FOOTER_RESTORING = "🔌 ch-mcp: restoring…";
+
+let statusListener: (() => void) | undefined;
+
+/**
+ * Bind/unbind the footer refresh. index.ts re-binds it to the session's
+ * ctx.ui on every session_start (pi clears extension statuses on session
+ * end, so each session starts from a clean footer) and unbinds on
+ * session_shutdown before the teardown disconnects.
+ */
+export function setMcpStatusListener(listener: (() => void) | undefined): void {
+	statusListener = listener;
+}
+
+/** Refresh the footer after any connection-state change (no-op unbound). */
+export function refreshMcpStatus(): void {
+	statusListener?.();
+}
+
 /** Default tool prefix: `chh_<worktree basename slug>` (overrideable). */
 export function mcpToolPrefix(worktree: string, override?: string): string {
 	return override || `chh_${slugify(path.basename(worktree))}`;
@@ -98,6 +131,30 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	});
 
 	const client = new Client({ name: "pi-chhound", version: "0.1.0" }, { capabilities: {} });
+
+	// Unexpected-daemon-death detection. Hook the SDK Client's OWN close/error
+	// callbacks — NOT transport.onclose after connect: Protocol.connect()
+	// installs chained wrappers on the transport, and overwriting them would
+	// bypass Protocol._onclose()'s cleanup (in-flight request rejection,
+	// timers, _transport reset). _onclose() runs first and ends by calling
+	// client.onclose, so by the time ours fires the SDK state is already
+	// consistent. The identity guard (conn assigned below, map entry set at
+	// the end) makes the handler a no-op for explicit disconnects (they delete
+	// the entry before closing) and connect failures (conn still undefined).
+	// The session-log record intentionally stays `connected`: crash semantics
+	// are "retry next session", while an explicit --disconnect writes a
+	// tombstone.
+	let conn: McpConnection | undefined;
+	client.onclose = () => {
+		if (conn !== undefined && connections.get(id) === conn) {
+			connections.delete(id);
+			refreshMcpStatus();
+		}
+	};
+	client.onerror = (error) => {
+		console.error(`[chhound-mcp:${id}] connection error: ${error instanceof Error ? error.message : String(error)}`);
+	};
+
 	try {
 		await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
 	} catch (e) {
@@ -106,8 +163,24 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	}
 
 	const prefix = mcpToolPrefix(entry.meta.worktree, opts.prefix);
-	const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
-	const mcpTools: McpToolMeta[] = listed.tools ?? [];
+	let mcpTools: McpToolMeta[];
+	try {
+		const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
+		mcpTools = listed.tools ?? [];
+	} catch (e) {
+		// Daemon died between connect and list, or refused to list: close the
+		// client so the child/daemon exits, then surface the failure — no map
+		// entry, no orphaned daemon.
+		await client.close().catch(() => undefined);
+		throw new Error(`could not list tools from 'chunkhound mcp' for ${id}: ${(e as Error).message}`);
+	}
+	// Connect race (session-start restore vs a manual /ch-mcp for the same
+	// id): both spawned; the loser closes its own daemon. Registered only
+	// after the check, so a failed race leaves no tool registrations.
+	if (connections.has(id)) {
+		await client.close().catch(() => undefined);
+		throw new Error(`already connected (${id}) — run /ch-mcp ${id} --disconnect first`);
+	}
 	const toolNames: string[] = [];
 	for (const tool of mcpTools) {
 		const piName = `${prefix}_${tool.name}`;
@@ -115,7 +188,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 		toolNames.push(piName);
 	}
 
-	const conn: McpConnection = {
+	conn = {
 		id,
 		worktree: entry.meta.worktree,
 		prefix,
@@ -126,6 +199,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 		connectedAt: new Date().toISOString(),
 	};
 	connections.set(id, conn);
+	refreshMcpStatus();
 	return conn;
 }
 
@@ -133,6 +207,7 @@ export async function disconnectMcp(id: string): Promise<void> {
 	const conn = connections.get(id);
 	if (!conn) throw new Error(`not connected: ${id}`);
 	connections.delete(id);
+	refreshMcpStatus();
 	await conn.client.close().catch(() => undefined);
 	// stdio EOF makes the proxy exit; the chunkhound daemon then shuts itself
 	// down (delay 0). Belt-and-braces: SIGTERM a child that lingers.
@@ -152,7 +227,14 @@ export async function disconnectMcp(id: string): Promise<void> {
 
 /** Disconnect everything (session_shutdown / /reload). */
 export async function closeAllMcp(): Promise<void> {
-	await Promise.allSettled([...connections.keys()].map((id) => disconnectMcp(id)));
+	// Sweep: a connect started by a session-start restore that races a session
+	// switch can land in the registry AFTER the first snapshot (closeAllMcp
+	// runs while that connect is still in flight). Repeat until the registry
+	// stays empty — normally one pass.
+	for (let i = 0; i < 5 && connections.size > 0; i++) {
+		const ids = [...connections.keys()];
+		await Promise.allSettled(ids.map((id) => disconnectMcp(id)));
+	}
 }
 
 /**

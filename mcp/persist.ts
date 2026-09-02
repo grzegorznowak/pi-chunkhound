@@ -26,7 +26,7 @@ import type { CustomEntry, ExtensionAPI, SessionEntry } from "@earendil-works/pi
 import { listSandboxes } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 import type { ChhoundSettings } from "../chhound/types.js";
-import { connectMcp, getMcpConnection } from "./manager.js";
+import { connectMcp, getMcpConnection, refreshMcpStatus } from "./manager.js";
 
 export const CONNECTION_ENTRY_TYPE = "chhound-mcp-connection";
 
@@ -97,31 +97,43 @@ export async function restoreConnections(
 	records: Map<string, ConnectionRecord>,
 	opts: { apiKey?: string; extraArgs?: string[] } = {},
 ): Promise<void> {
-	if (settings.autoReconnect === false) return;
-	const tasks: Promise<void>[] = [];
-	for (const record of records.values()) {
-		if (record.state !== "connected") continue;
-		if (getMcpConnection(record.sandboxId)) continue; // already live (same-process switch)
-		const entry = sandboxById(settings, record.sandboxId);
-		if (!entry) {
-			console.error(`[chhound-mcp] connection record for '${record.sandboxId}' — sandbox no longer exists; forgetting it.`);
-			recordConnection(pi, { sandboxId: record.sandboxId, state: "disconnected" });
-			continue;
+	try {
+		if (settings.autoReconnect === false) return;
+		const tasks: Promise<void>[] = [];
+		for (const record of records.values()) {
+			if (record.state !== "connected") continue;
+			if (getMcpConnection(record.sandboxId)) continue; // already live (same-process switch)
+			const entry = sandboxById(settings, record.sandboxId);
+			if (!entry) {
+				console.error(`[chhound-mcp] connection record for '${record.sandboxId}' — sandbox no longer exists; forgetting it.`);
+				recordConnection(pi, { sandboxId: record.sandboxId, state: "disconnected" });
+				continue;
+			}
+			tasks.push(
+				(async () => {
+					try {
+						await connectMcp(pi, entry, {
+							...(typeof record.prefix === "string" ? { prefix: record.prefix } : {}),
+							apiKey: opts.apiKey,
+							...(opts.extraArgs !== undefined ? { extraArgs: opts.extraArgs } : {}),
+						});
+						// No success log on purpose: raw extension console writes land
+						// in the TUI's terminal output ("flash" above the prompt), and
+						// restore state is already visible via the "🔌 ch-mcp" footer
+						// segment and /ch-status.
+					} catch (e) {
+						// Failures stay logged: a silent restore failure would mean
+						// missing chh_* tools with no trace.
+						console.error(`[chhound-mcp] auto-restore failed for '${record.sandboxId}': ${(e as Error).message}`);
+					}
+				})(),
+			);
 		}
-		tasks.push(
-			(async () => {
-				try {
-					const conn = await connectMcp(pi, entry, {
-						...(typeof record.prefix === "string" ? { prefix: record.prefix } : {}),
-						apiKey: opts.apiKey,
-						...(opts.extraArgs !== undefined ? { extraArgs: opts.extraArgs } : {}),
-					});
-					console.error(`[chhound-mcp] auto-restored '${conn.id}' → ${conn.worktree} (${conn.toolNames.length} tools)`);
-				} catch (e) {
-					console.error(`[chhound-mcp] auto-restore failed for '${record.sandboxId}': ${(e as Error).message}`);
-				}
-			})(),
-		);
+		await Promise.allSettled(tasks);
+	} finally {
+		// Footer: settle the transient "restoring…" state (set by index.ts when
+		// records were pending) to the final live count — per-connect refreshes
+		// already ran inside connectMcp; this covers failures and no-ops.
+		refreshMcpStatus();
 	}
-	await Promise.allSettled(tasks);
 }
