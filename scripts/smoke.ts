@@ -652,23 +652,72 @@ async function main(): Promise<void> {
 	check("worktree branch", branch === "fix/smoke", branch);
 	check("worktree inside sandbox dir", wt.startsWith(sandboxDir + path.sep), wt);
 
-	// Branch-in-use handling: fix/smoke is checked out at wt — the wizard must
-	// derive a fresh name instead of trying to check it out again.
+	// Remote-branch resolution needs a remote: a bare clone of `repo` becomes
+	// its origin, carrying branches that exist only remotely (never local).
+	const branchBare = path.join(tmp, "branch-origin.git");
+	const branchClone = await runGit(["clone", "-q", "--bare", repo, branchBare], { cwd: tmp });
+	check("setup: branch-origin bare cloned", branchClone.code === 0, branchClone.stderr);
+	const mainSha = (await runGit(["rev-parse", "main"], { cwd: repo })).stdout;
+	const addRemoteOnly = await runGit(["--git-dir", branchBare, "update-ref", "refs/heads/remote-only", mainSha], { cwd: tmp });
+	const addOrigin = await runGit(["remote", "add", "origin", branchBare], { cwd: repo });
+	const fetched = await runGit(["fetch", "-q", "origin"], { cwd: repo });
+	check(
+		"setup: origin with a remote-only branch",
+		addRemoteOnly.code === 0 && addOrigin.code === 0 && fetched.code === 0 &&
+			(await runGit(["show-ref", "--verify", "--quiet", "refs/remotes/origin/remote-only"], { cwd: repo })).code === 0,
+		`${addRemoteOnly.stderr || addOrigin.stderr || fetched.stderr}`,
+	);
+	// A branch added to the origin AFTER the last fetch — the resolver's own
+	// best-effort fetch must pick it up.
+	const addLater = await runGit(["--git-dir", branchBare, "update-ref", "refs/heads/remote-later", mainSha], { cwd: tmp });
+	check("setup: remote-later added after fetch", addLater.code === 0, addLater.stderr);
+
 	const branchWarnings: string[] = [];
 	const inUseChoice = await resolveBranchChoice(repo, "fix/smoke", (m, t) => branchWarnings.push(`${t}: ${m}`));
-	check("in-use branch → fresh create name", inUseChoice.createBranch === "fix/smoke-2" && inUseChoice.branch === undefined, JSON.stringify(inUseChoice));
+	check("in-use branch → fresh create name", inUseChoice?.createBranch === "fix/smoke-2" && inUseChoice?.branch === undefined, JSON.stringify(inUseChoice));
 	check("in-use branch warns", branchWarnings.some((w) => w.includes("fix/smoke-2")), branchWarnings.join("\n"));
 	const mainChoice = await resolveBranchChoice(repo, "main", () => {});
-	check("main-tree branch also in-use → fresh name", mainChoice.createBranch === "main-2", JSON.stringify(mainChoice));
+	check("main-tree branch also in-use → fresh name", mainChoice?.createBranch === "main-2", JSON.stringify(mainChoice));
 	await runGit(["branch", "free/smoke", "main"], { cwd: repo });
 	const freeChoice = await resolveBranchChoice(repo, "free/smoke", () => {});
-	check("existing unattached branch → checkout", freeChoice.branch === "free/smoke" && freeChoice.createBranch === undefined, JSON.stringify(freeChoice));
+	check("existing unattached branch → checkout", freeChoice?.branch === "free/smoke" && freeChoice?.createBranch === undefined, JSON.stringify(freeChoice));
 	const freshChoice = await resolveBranchChoice(repo, "brand-new", () => {});
-	check("unknown name → create", freshChoice.createBranch === "brand-new", JSON.stringify(freshChoice));
+	check("unknown name → create", freshChoice?.createBranch === "brand-new", JSON.stringify(freshChoice));
 	// Occupy fix/smoke-2 as an unattached ref → the in-use fix/smoke must skip to -3.
 	await runGit(["branch", "fix/smoke-2", "main"], { cwd: repo });
 	const suffixed = await resolveBranchChoice(repo, "fix/smoke", () => {});
-	check("occupied suffix skips to next free", suffixed.createBranch === "fix/smoke-3", JSON.stringify(suffixed));
+	check("occupied suffix skips to next free", suffixed?.createBranch === "fix/smoke-3", JSON.stringify(suffixed));
+
+	// Remote-branch intent: <remote>/<branch> resolves to a detached checkout
+	// at the remote tip — never to a (bogus) local branch creation.
+	const remoteChoice = await resolveBranchChoice(repo, "origin/remote-only", () => {});
+	check("remote branch → detached checkout choice", remoteChoice?.remoteRef === "origin/remote-only", JSON.stringify(remoteChoice));
+	const laterChoice = await resolveBranchChoice(repo, "origin/remote-later", () => {});
+	check("remote branch fetched on demand by resolver", laterChoice?.remoteRef === "origin/remote-later", JSON.stringify(laterChoice));
+	const remoteWarnings: string[] = [];
+	const missingRemote = await resolveBranchChoice(repo, "origin/no-such-branch", (m, t) => remoteWarnings.push(`${t}: ${m}`));
+	check("remote branch missing on remote → error, no create", missingRemote === undefined && remoteWarnings.some((w) => w.startsWith("error")), remoteWarnings.join("\n"));
+	const oneGoWarnings: string[] = [];
+	const oneGoUnknown = await resolveBranchChoice(repo, "never-heard", (m, t) => oneGoWarnings.push(`${t}: ${m}`), { createUnknown: false });
+	check("one-go: unknown plain name → error (no silent create)", oneGoUnknown === undefined && oneGoWarnings.some((w) => w.startsWith("error")), oneGoWarnings.join("\n"));
+	const oneGoInUse = await resolveBranchChoice(repo, "fix/smoke", (m) => oneGoWarnings.push(m), { createUnknown: false });
+	check("one-go: in-use branch → error (no suffix renaming)", oneGoInUse === undefined && oneGoWarnings.some((w) => w.includes("already checked out")), oneGoWarnings.join("\n"));
+
+	// Detached remote checkout mechanics: worktree add at the remote tip stays
+	// detached and lands on the remote branch's commit.
+	const remoteSandbox = path.join(tmp, "remote-sandbox");
+	fs.mkdirSync(remoteSandbox, { recursive: true });
+	const remoteTipSha = (await runGit(["rev-parse", "--verify", "origin/remote-only^{commit}"], { cwd: repo })).stdout;
+	await gitWorktreeAdd({ cwd: repo, path: path.join(remoteSandbox, "remote-only"), detach: true, commitIsh: remoteTipSha });
+	check(
+		"detached remote-branch checkout lands at remote tip",
+		// `branch --show-current` on a detached HEAD exits 0 with empty output.
+		(await currentBranch(path.join(remoteSandbox, "remote-only"))) === "" &&
+			(await runGit(["rev-parse", "HEAD"], { cwd: path.join(remoteSandbox, "remote-only") })).stdout === remoteTipSha,
+		remoteTipSha,
+	);
+	await runGit(["worktree", "remove", "--force", path.join(remoteSandbox, "remote-only")], { cwd: repo });
+
 
 	const branches = await branchCompletions(repo);
 	check("branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));

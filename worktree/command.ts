@@ -7,7 +7,7 @@ import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, checkedOutBranches, defaultRemoteBranch, findRepoRoot, gitRootOrNull, gitWorktreeAdd, runGit } from "../chhound/git.js";
+import { currentBranch, checkedOutBranches, defaultRemoteBranch, fetchRef, findRepoRoot, gitRootOrNull, gitWorktreeAdd, remoteNames, revParse, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
@@ -23,7 +23,8 @@ const HELP = [
 	"  [repo]              a git repository: a path inside one, the repo's own",
 	"                      directory, or nothing when the cwd is inside a repo.",
 	"optional:",
-	"  [branch]            existing branch to check out (picker leads with 'new branch')",
+	"  [branch]            existing branch to check out: a local branch or <remote>/<branch> — remote",
+	"                      branches are checked out detached at their tip. Picker leads with 'new branch'.",,
 	"  -b <name>           create a new branch with an explicit name",
 	"  --from <ref>        base commit/branch/tag for the worktree",
 	"  --dest <dir>        worktree library root for this invocation — the worktree AND",
@@ -52,24 +53,88 @@ const HELP = [
 ].join("\n");
 
 /**
- * Decide what `git worktree add` should do with the chosen branch name:
- * - existing branch NOT checked out anywhere → check it out ({branch})
- * - existing branch in use by another worktree → derive a fresh name
- *   ({createBranch}, base-2, base-3, …) and warn — git won't check it out twice
- * - unknown name → create it ({createBranch})
+ * Resolved intent for one branch name (shared by the wizard and the one-go
+ * path so their semantics never drift):
+ * - existing LOCAL branch not checked out anywhere → {branch} — git checks
+ *   it out (the ref is passed explicitly, never inferred from the path
+ *   basename — slash names like `feature/x` stay correct).
+ * - existing local branch in use by another worktree → fresh name
+ *   ({createBranch}, base-2, base-3, …) and a warning — git won't check a
+ *   branch out twice. With createUnknown:false that is an error instead
+ *   (one-go positionals name EXISTING branches only — -b creates).
+ * - `<remote>/<branch>` where <remote> is a configured remote → {remoteRef}:
+ *   a remote-tracking ref can't be "checked out" as a branch; the checkout
+ *   detaches at its tip. Best-effort fetch when no local tracking ref exists
+ *   yet (the branch may live on the remote only).
+ * - unknown name → create it ({createBranch}) when createUnknown (wizard
+ *   typed names); otherwise an error.
+ * Returns undefined after notifying when the name can't be honored.
  */
+export interface BranchChoice {
+	/** Existing unattached LOCAL branch to check out. */
+	branch?: string;
+	/** New local branch to create (-b <name>). */
+	createBranch?: string;
+	/** Remote-tracking ref ("origin/x") — checkout detaches at its tip. */
+	remoteRef?: string;
+}
+
 export async function resolveBranchChoice(
 	repoRoot: string,
 	branchName: string,
 	notify: (msg: string, type: "info" | "warning" | "error") => void,
-): Promise<{ branch?: string; createBranch?: string }> {
+	opts: { createUnknown?: boolean } = {},
+): Promise<BranchChoice | undefined> {
+	const { createUnknown = true } = opts;
 	const exists = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd: repoRoot });
-	if (exists.code !== 0) return { createBranch: branchName };
-	const inUseAt = (await checkedOutBranches(repoRoot)).get(branchName);
-	if (!inUseAt) return { branch: branchName };
-	const fresh = await freeBranchName(repoRoot, branchName);
-	notify(`Branch '${branchName}' is already checked out at ${inUseAt} — creating '${fresh}' instead.`, "warning");
-	return { createBranch: fresh };
+	if (exists.code === 0) {
+		const inUseAt = (await checkedOutBranches(repoRoot)).get(branchName);
+		if (!inUseAt) return { branch: branchName };
+		if (!createUnknown) {
+			notify(
+				`Branch '${branchName}' is already checked out at ${inUseAt} — pick another branch or create a new one with -b.`,
+				"error",
+			);
+			return undefined;
+		}
+		const fresh = await freeBranchName(repoRoot, branchName);
+		notify(`Branch '${branchName}' is already checked out at ${inUseAt} — creating '${fresh}' instead.`, "warning");
+		return { createBranch: fresh };
+	}
+	// A "/"-containing name whose first segment is a configured remote is a
+	// REMOTE branch intent (remote names cannot contain "/", so the split is
+	// unambiguous). Local branches with the same full name already won above.
+	const slash = branchName.indexOf("/");
+	if (slash > 0) {
+		const remote = branchName.slice(0, slash);
+		if ((await remoteNames(repoRoot)).includes(remote)) {
+			const ref = `refs/remotes/${branchName}`;
+			const present = await runGit(["show-ref", "--verify", "--quiet", ref], { cwd: repoRoot });
+			if (present.code !== 0) {
+				// Best-effort fetch — the branch may exist on the remote without a
+				// local tracking ref yet (never fetched).
+				try {
+					await fetchRef(repoRoot, branchName.slice(slash + 1), remote);
+				} catch {
+					// fall through to the check below (offline / no such branch)
+				}
+				const retry = await runGit(["show-ref", "--verify", "--quiet", ref], { cwd: repoRoot });
+				if (retry.code !== 0) {
+					notify(
+						`No branch '${branchName.slice(slash + 1)}' on remote '${remote}' — check the name or fetch the remote first.`,
+						"error",
+					);
+					return undefined;
+				}
+			}
+			return { remoteRef: branchName };
+		}
+	}
+	if (!createUnknown) {
+		notify(`Branch '${branchName}' does not exist locally — use -b <name> to create a new branch (remote branches: <remote>/<name>).`, "error");
+		return undefined;
+	}
+	return { createBranch: branchName };
 }
 
 /** First free name base-2, base-3, … (no ref and not checked out anywhere). */
@@ -134,33 +199,40 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			// sandbox (and thus the worktree folder) is named after the branch. ──
 			let createBranch: string | undefined;
 			let branch: string | undefined;
+			let remoteRef: string | undefined;
 			let commitIsh: string | undefined;
 			if (flags["b"] === true && positionals[1]) {
 				createBranch = positionals[1];
 			} else if (typeof flags["b"] === "string") {
 				createBranch = flags["b"];
 			} else if (positionals[1]) {
-				branch = positionals[1];
+				// Positional = an EXISTING branch (local, or <remote>/<branch>).
+				// Unknown names are an error here — -b is the create path.
+				const choice = await resolveBranchChoice(repoRoot, positionals[1], notify, { createUnknown: false });
+				if (!choice) return; // notified
+				if (choice.branch) branch = choice.branch;
+				else if (choice.remoteRef) remoteRef = choice.remoteRef;
 			}
 			if (flags["b"] === true && !positionals[1]) {
 				notify("-b requires a branch name: /chworktree <path> -b <new-branch>", "error");
 				return;
 			}
-			if (typeof flags["from"] === "string") commitIsh = flags["from"];
-
-			// Explicit one-go choices get hard guards (no silent renaming): a
-			// branch already checked out somewhere can't be checked out again,
-			// and -b requires a name that doesn't exist as a ref yet.
-			if (branch) {
-				const inUseAt = (await checkedOutBranches(repoRoot)).get(branch);
-				if (inUseAt) {
-					notify(
-						`Branch '${branch}' is already checked out at ${inUseAt} — pick another branch or create a new one with -b.`,
-						"error",
-					);
+			// Remote-branch checkout = detached at the remote tip: resolve the ref
+			// to its commit so the checkout + summary are exact (and stable even
+			// if the tracking ref later moves).
+			if (remoteRef) {
+				const sha = await revParse(repoRoot, remoteRef);
+				if (!sha) {
+					notify(`Cannot resolve ${remoteRef} to a commit.`, "error");
 					return;
 				}
+				commitIsh = sha;
 			}
+			if (typeof flags["from"] === "string") commitIsh = flags["from"];
+
+			// Explicit one-go choices get hard guards (no silent renaming): -b
+			// requires a name that doesn't exist as a ref yet. (In-use / unknown
+			// branch guards live inside resolveBranchChoice above.)
 			if (createBranch) {
 				const r = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${createBranch}`], { cwd: repoRoot });
 				if (r.code === 0) {
@@ -176,6 +248,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			// resolution so it can't collide).
 			if (!branch && !createBranch && !commitIsh) {
 				const choice = await resolveBranchChoice(repoRoot, `${path.basename(repoRoot)}-wt`, notify);
+				if (!choice) return; // notified
 				branch = choice.branch;
 				createBranch = choice.createBranch;
 			}
@@ -183,7 +256,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			// ── Location: sandbox-anchored — the checkout lives INSIDE its
 			// sandbox dir at <library>/<sandbox>/<branch>. --dest overrides the
 			// sandbox library root for this invocation. ──
-			const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, branch ?? createBranch, settings, dest);
+			const { sandboxDir, wtPath } = resolveSandboxLocation(repoRoot, branch ?? createBranch ?? remoteRef, settings, dest);
 
 			const conflict = findConflictingIndexed(wtPath, indexedWorktreePaths(settings));
 			if (conflict) {
@@ -216,6 +289,9 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				createBranch,
 				branch,
 				commitIsh,
+				// Remote-branch checkouts: baseline anchored at the remote ref
+				// itself; the sandbox carries the remote name as its identity.
+				...(remoteRef ? { baseRef: remoteRef, branchLabel: remoteRef } : {}),
 				flags,
 			});
 		},
@@ -279,6 +355,14 @@ async function createIndexedWorktree(
 		createBranch?: string;
 		branch?: string;
 		commitIsh?: string;
+		/** Baseline anchor ref override (PRs: the PR's base branch; remote-branch checkouts: the remote ref). */
+		baseRef?: string;
+		/** Logical branch recorded in meta + summary when the checkout is detached (remote refs, PRs) — otherwise the checkout's branch. */
+		branchLabel?: string;
+		/** PR head branch name — recorded in sandbox meta for /ch-status display. */
+		headRef?: string;
+		/** PR head commit — recorded in sandbox meta for /ch-status display. */
+		headOid?: string;
 		flags: Record<string, string | true>;
 	},
 ): Promise<void> {
@@ -302,13 +386,15 @@ async function createIndexedWorktree(
 		const branchNow = await currentBranch(wtPath);
 		// Describe what the branch position did: new branch (explicit -b, typed
 		// new name via the picker, or git's path-derived default) vs existing
-		// branch vs detached checkout.
+		// branch vs detached checkout (remote refs, --from, PRs).
 		const branchNote = createBranch
 			? `new branch ${createBranch}`
 			: branch
 				? `branch ${branch}`
 				: commitIsh
-					? `detached @ ${commitIsh}`
+					? opts.branchLabel
+						? `${opts.branchLabel} @ ${commitIsh.slice(0, 12)}`
+						: `detached @ ${commitIsh}`
 					: `new branch ${branchNow}`;
 
 		if (flags["no-index"]) {
@@ -327,9 +413,11 @@ async function createIndexedWorktree(
 		// this invocation (-b, wizard, path-derived, no --from) → the source
 		// repo's checked-out branch: git bases `worktree add -b` on the source
 		// HEAD. Detached / --from checkouts → no override (default resolution;
-		// the top-up cost then tracks divergence from the default ref).
-		let baseRef: string | undefined;
-		if (!commitIsh) {
+		// the top-up cost then tracks divergence from the default ref). PRs and
+		// remote-branch checkouts pass an explicit anchor (opts.baseRef) — the
+		// PR's base branch / the remote ref.
+		let baseRef = opts.baseRef;
+		if (!baseRef && !commitIsh) {
 			if (branch) baseRef = branch;
 			else {
 				const headBranch = await currentBranch(repoRoot);
@@ -412,13 +500,15 @@ async function createIndexedWorktree(
 			version: 1,
 			worktree: wtPath,
 			repoRoot,
-			branch: branchNow,
+			branch: opts.branchLabel ?? branchNow,
 			baseRef: baseline.ref,
 			baseCommit: baseline.meta.baseCommit,
 			chhoundVersion: baseline.meta.chhoundVersion,
 			createdAt: new Date().toISOString(),
 			copiedFrom: baseline.dbDir,
 			dbPath: dbDir,
+			...(opts.headRef ? { headRef: opts.headRef } : {}),
+			...(opts.headOid ? { headOid: opts.headOid } : {}),
 		});
 		notify(
 			[
@@ -487,10 +577,23 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 	const branchName = branchRaw.trim();
 	let createBranch: string | undefined;
 	let branch: string | undefined;
+	let remoteRef: string | undefined;
+	let commitIsh: string | undefined;
 	if (branchName) {
 		const choice = await resolveBranchChoice(repoRoot, branchName, notify);
+		if (!choice) return; // notified (unknown remote branch / bad name)
 		branch = choice.branch;
 		createBranch = choice.createBranch;
+		remoteRef = choice.remoteRef;
+	}
+	if (remoteRef) {
+		// Remote-branch checkout = detached at the remote tip (see one-go path).
+		const sha = await revParse(repoRoot, remoteRef);
+		if (!sha) {
+			notify(`Cannot resolve ${remoteRef} to a commit.`, "error");
+			return;
+		}
+		commitIsh = sha;
 	}
 
 	// 3) Worktree library root — the worktree AND its index land in a storage
@@ -499,7 +602,7 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 	//    chunkhound worktree/index are blocked. Prefilled with the default;
 	//    TAB completes like the command-line picker.
 	const defaultRoot = sandboxRoot(settings);
-	const finalBranch = branch ?? createBranch;
+	const finalBranch = branch ?? createBranch ?? remoteRef;
 	const promptTitle = (): string =>
 		`Worktree library root (worktree + index land in a storage dir under <root>; default: ${defaultRoot}):`;
 	let destRaw = await promptPath(ctx.ui, {
@@ -540,7 +643,19 @@ async function runWizard(ctx: { cwd: string; hasUI: boolean; ui: WizardUI }, sta
 		return;
 	}
 
-	await createIndexedWorktree(ctx, state, { repoRoot, sandboxDir, wtPath, settings, createBranch, branch, flags: {} });
+	await createIndexedWorktree(ctx, state, {
+		repoRoot,
+		sandboxDir,
+		wtPath,
+		settings,
+		createBranch,
+		branch,
+		commitIsh,
+		// Remote-branch checkouts: baseline anchored at the remote ref itself;
+		// the sandbox carries the remote name as its identity.
+		...(remoteRef ? { baseRef: remoteRef, branchLabel: remoteRef } : {}),
+		flags: {},
+	});
 }
 
 const OTHER_REPO = "type a path…";

@@ -55,8 +55,14 @@ export interface WorktreeAddOptions {
 	path: string;
 	/** Branch to create (-b <name>). */
 	createBranch?: string;
-	/** Existing branch to check out. */
+	/** Existing LOCAL branch to check out — passed as an explicit commit-ish
+	 * (never inferred from the path basename, so slash names like
+	 * `feature/x` and names that differ from the folder stay correct). */
 	branch?: string;
+	/** Commit-ish for the checkout: with createBranch = the new branch's start
+	 * point; with detach = the detached commit; for a remote-tracking ref or
+	 * full ref (origin/x, refs/pull/N/head) git detaches at its tip. Takes
+	 * precedence over `branch` when both are given. */
 	commitIsh?: string;
 	detach?: boolean;
 }
@@ -67,6 +73,7 @@ export async function gitWorktreeAdd(opts: WorktreeAddOptions): Promise<void> {
 	else if (opts.detach) args.push("--detach");
 	args.push(opts.path);
 	if (opts.commitIsh) args.push(opts.commitIsh);
+	else if (opts.branch) args.push(opts.branch);
 	const r = await runGit(args, { cwd: opts.cwd });
 	if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
 }
@@ -110,9 +117,15 @@ export async function remoteOrigin(cwd: string): Promise<string | undefined> {
 	return r.code === 0 ? r.stdout : undefined;
 }
 
-export async function fetchRef(cwd: string, ref: string): Promise<void> {
-	const r = await runGit(["fetch", "--quiet", "origin", ref], { cwd });
-	if (r.code !== 0) throw new Error(r.stderr || r.stdout || `git fetch origin ${ref} failed`);
+export async function fetchRef(cwd: string, ref: string, remote = "origin"): Promise<void> {
+	const r = await runGit(["fetch", "--quiet", remote, ref], { cwd });
+	if (r.code !== 0) throw new Error(r.stderr || r.stdout || `git fetch ${remote} ${ref} failed`);
+}
+
+/** Configured remote names (e.g. ["origin", "upstream"]). */
+export async function remoteNames(cwd: string): Promise<string[]> {
+	const r = await runGit(["remote"], { cwd });
+	return r.code === 0 ? r.stdout.split("\n").filter(Boolean) : [];
 }
 
 export async function currentBranch(cwd: string): Promise<string> {
