@@ -66,7 +66,7 @@ try {
 
 	const dbDir = sandboxDbDir(sandboxDir);
 	const configPath = materializeConfig(sandboxDir, { settings, dbDir });
-	const r = await hotStartIndex({ sourceDbDir: baseline.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, extraArgs });
+	const r = await hotStartIndex({ sourceDbDir: baseline.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, extraArgs, pathPrefix: "settle-check" });
 	if (r.code !== 0) throw new Error(`hotstart failed: ${r.stderrTail}`);
 	writeSandboxMeta(sandboxDir, {
 		version: 1,

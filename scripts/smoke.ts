@@ -41,7 +41,7 @@ import { mcpStatusLines } from "../status/command.js";
 import { refreshMaterializedConfigs, registerSetupCommand } from "../setup/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
-import { buildStatusText, formatBytes, parseChhoundLine, surfaceChhoundLine } from "../chhound/progress.js";
+import { buildWidgetLines, classifyChhoundLine, filledCells, formatBytes, groupDigits } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
 import { isWizardInvocation, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
@@ -94,32 +94,55 @@ async function main(): Promise<void> {
 		check("unterminated quote is one positional", JSON.stringify(p8.positionals) === JSON.stringify(["my project/"]), JSON.stringify(p8));
 	}
 
-	// ── 1b. progress extraction (parseChhoundLine / surfaceChhoundLine / buildStatusText) ──
+	// ── 1b. progress extraction (classifyChhoundLine / buildStatusText / buildWidgetLines) ──
 	section("progress extraction");
 	{
-		const b1 = parseChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Processing batch 2/3 with 300 chunks");
-		check("batch line parsed (loguru prefix)", b1?.batchCurrent === 2 && b1?.batchTotal === 3 && b1?.batchChunks === 300, JSON.stringify(b1));
-		const b2 = parseChhoundLine("Processing batch 1/12 with 24 chunks");
-		check("batch line parsed (bare)", b2?.batchCurrent === 1 && b2?.batchTotal === 12, JSON.stringify(b2));
-		const b2b = parseChhoundLine("2026-08-30 13:31:08 | DEBUG    | chunkhound.services.embedding_service:process_batch:564 - Batch 2 completed: 300 embeddings stored");
-		check("batch-done line parsed", b2b?.batchDone === 2, JSON.stringify(b2b));
-		const b3 = parseChhoundLine("Initial stats: 64 files, 624 chunks, 0 embeddings");
-		check("non-batch line → null", b3 === null, JSON.stringify(b3));
+		const D = "2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - ";
+		const W = "2026-08-30 13:31:02 | WARNING  | chunkhound.services.embedding_service:process_batch:516 - ";
+		const I = "2026-08-30 13:31:02 | INFO     | chunkhound.providers.database.duckdb_provider:_executor_create_schema:1577 - Creating DuckDB schema";
 
-		check("loguru debug noise dropped", surfaceChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Preparing data") === null);
-		const surf = surfaceChhoundLine("2026-08-30 13:31:02 | DEBUG    | chunkhound.services.embedding_service:process_batch:516 - Processing batch 2/3 with 300 chunks");
-		check("batch line surfaced", surf === "Processing batch 2/3 with 300 chunks", JSON.stringify(surf));
-		check("stdout line passes through", surfaceChhoundLine("Processing Complete") === "Processing Complete");
-		const warn = surfaceChhoundLine("2026-08-30 13:31:02 | WARNING  | chunkhound.services.embedding_service:process_batch:516 - Embedding generation failed");
-		check("warning surfaced with level", warn === "WARNING: Embedding generation failed", JSON.stringify(warn));
+		const b1 = classifyChhoundLine(D + "Processing batch 2/3 with 300 chunks");
+		check("batch line classified (loguru prefix)", b1.kind === "batch" && b1.current === 2 && b1.total === 3 && b1.chunks === 300, JSON.stringify(b1));
+		const d1 = classifyChhoundLine("2026-08-30 13:31:08 | DEBUG    | chunkhound.services.embedding_service:process_batch:564 - Batch 2 completed: 300 embeddings stored");
+		check("batch-done classified", d1.kind === "batchDone" && d1.n === 2, JSON.stringify(d1));
+		const p1 = classifyChhoundLine("2026-09-02 09:07:57 | DEBUG    | chunkhound.services.indexing_coordinator:_process_files_in_batches:724 - Parsing 400 files with 8 workers (timeout=3.0s, max_concurrent=auto)");
+		check("parse-total classified", p1.kind === "parseTotal" && p1.files === 400, JSON.stringify(p1));
+		const s1 = classifyChhoundLine("2026-09-02 09:07:57 | DEBUG    | chunkhound.services.indexing_coordinator:_store_parsed_results:1145 - Batch inserted 40 chunks for file_id 2");
+		check("file-stored classified", s1.kind === "fileStored", JSON.stringify(s1));
+		const s2 = classifyChhoundLine("2026-09-02 09:07:57 | DEBUG    | chunkhound.services.indexing_coordinator:process_file_batch:1568 - Skipped file: /x/a.ts (reason: unsupported)");
+		check("file-skipped classified", s2.kind === "fileSkipped", JSON.stringify(s2));
+		const w1 = classifyChhoundLine(W + "Embedding generation failed");
+		check("warning classified as event, prefix stripped", w1.kind === "event" && w1.level === "WARNING" && w1.message === "Embedding generation failed", JSON.stringify(w1));
+		check("loguru DEBUG chatter is noise", classifyChhoundLine(D + "Preparing data").kind === "noise");
+		check("loguru INFO is noise", classifyChhoundLine(I).kind === "noise");
+		check("stdout banner is noise", classifyChhoundLine("ChunkHound Indexing").kind === "noise");
+		check("stdout db path is noise", classifyChhoundLine("Database: /x/.cache/pi-chhound/bases/x/main/db/.chhound.db").kind === "noise");
+		check("stdout success tag is noise", classifyChhoundLine("[SUCCESS] Service layer initialized: /x/db/.chhound.db").kind === "noise");
+		check("stdout initial stats is noise", classifyChhoundLine("Initial stats: 4 files, 122 chunks, 0 embeddings").kind === "noise");
+		check("stdout summary is noise", classifyChhoundLine("Processing Complete").kind === "noise");
+		check("stage marker recognized", classifyChhoundLine("[DEBUG] Discovering files...").kind === "marker");
+		check("embedding-check marker recognized", classifyChhoundLine("[DEBUG] Checking for missing embeddings...").kind === "marker");
 
-		const st = (state: Partial<ProgressState>) => buildStatusText({ phase: "worktree index (top-up)", lastLine: "", elapsedMs: 125_000, ...state });
-		check("status: batch progress", st({ batchCurrent: 3, batchTotal: 12, batchChunks: 300 }) === "embedding · batch 3/12 (300 chunks) · 2:05", st({ batchCurrent: 3, batchTotal: 12, batchChunks: 300 }));
-		check("status: completed batches win", st({ batchCurrent: 7, batchTotal: 7, batchDone: 5 }) === "embedding · 5/7 · 2:05", st({ batchCurrent: 7, batchTotal: 7, batchDone: 5 }));
-		check("status: db growth", st({ dbBytes: 5_300_000, dbStartBytes: 2_000_000 }) === "worktree index (top-up) · db 5.1 MB +3.1 MB · 2:05", st({ dbBytes: 5_300_000, dbStartBytes: 2_000_000 }));
-		check("status: fallback phase+elapsed", st({}) === "worktree index (top-up) · 2:05", st({}));
+		check("filledCells rounding", filledCells(0.62, 10) === 6 && filledCells(1, 10) === 10 && filledCells(0, 40) === 0, `${filledCells(0.62, 10)}`);
+		check("groupDigits", groupDigits(1412) === "1,412" && groupDigits(12) === "12", groupDigits(1412));
 		check("formatBytes", formatBytes(1024 * 1024 * 5.3) === "5.3 MB", formatBytes(1024 * 1024 * 5.3));
+
+		const wl = (state: Partial<ProgressState>) => buildWidgetLines({ phase: "baseline index", events: [], tick: 0, elapsedMs: 72_000, ...state });
+		const wlChunk = wl({ filesTotal: 1412, filesDone: 636 });
+		check("widget: chunking header", wlChunk[0] === "baseline index — chunking · 1:12", JSON.stringify(wlChunk[0]));
+		check("widget: chunking rail + pct", wlChunk[1] === "██████████████████" + "░".repeat(22) + " 45% · 636/1,412 files", JSON.stringify(wlChunk[1]));
+		const wlEmbed = wl({ batchesTotal: 12, batchesDone: 5 });
+		check("widget: embedding header", wlEmbed[0] === "baseline index — embedding · 1:12", JSON.stringify(wlEmbed[0]));
+		check("widget: embedding rail + pct", wlEmbed[1] === "█".repeat(17) + "░".repeat(23) + " 42% · 5/12 batches", JSON.stringify(wlEmbed[1]));
+		const wlDone = wl({ filesTotal: 1412, filesDone: 1412 });
+		check("widget: pass done → finalizing + done text", wlDone[0] === "baseline index — finalizing · 1:12" && wlDone[1] === "█".repeat(40) + " done · 1,412/1,412 files", JSON.stringify(wlDone));
+		const wlNote = wl({ note: "baseline fresh (main @ 623e5c6)" });
+		check("widget: note stage", wlNote[0] === "baseline index — baseline fresh (main @ 623e5c6) · 1:12", JSON.stringify(wlNote[0]));
+		check("widget: indeterminate sweep at tick 0", wlNote[1] === "█".repeat(4) + "░".repeat(36), JSON.stringify(wlNote[1]));
+		const wlEv = wl({ batchesTotal: 12, batchesDone: 5, events: ["Embedding generation failed", "Batch 7: Expected 300 embeddings, got 0"] });
+		check("widget: event lines", wlEv[2] === "⚠ Embedding generation failed" && wlEv[3] === "⚠ Batch 7: Expected 300 embeddings, got 0", JSON.stringify(wlEv));
 	}
+
 
 	// ── 2. completions ─────────────────────────────────────────────────
 	section("completions");
@@ -541,6 +564,77 @@ async function main(): Promise<void> {
 		check("defaultRemoteBranch undefined without origin/HEAD", (await defaultRemoteBranch(repo5)) === undefined, String(await defaultRemoteBranch(repo5)));
 	}
 
+	// ── 4c. baseline anchor: LOCAL branch first, origin/<ref> only as fallback ──
+	section("baseline anchor: local first");
+	{
+		// Isolated cache root — the main suite's baseline listings stay intact.
+		const anchorSettings: ChhoundSettings = { version: 1, sandboxRoot: settings.sandboxRoot, baseRoot: path.join(tmp, "anchor-bases") };
+
+		// Repo A: local main @ c1 while a local bare origin carries a DIFFERENT
+		// main tip c2 (fetched → origin/main = c2). Worktrees are cut from local
+		// state, so the baseline must anchor c1 — not the origin tip.
+		const repoA = path.join(tmp, "anchor-a");
+		fs.mkdirSync(repoA);
+		await runGit(["init", "-b", "main"], { cwd: repoA });
+		await runGit(["config", "user.email", "smoke@test"], { cwd: repoA });
+		await runGit(["config", "user.name", "Smoke"], { cwd: repoA });
+		fs.writeFileSync(path.join(repoA, "a.ts"), "export const a = 1;\n");
+		await runGit(["add", "-A"], { cwd: repoA });
+		await runGit(["commit", "-qm", "local c1"], { cwd: repoA });
+		const c1 = (await runGit(["rev-parse", "HEAD"], { cwd: repoA })).stdout;
+
+		const bare = path.join(tmp, "anchor-origin.git");
+		fs.mkdirSync(bare);
+		await runGit(["init", "--bare", bare], { cwd: tmp });
+		const feeder = path.join(tmp, "anchor-feeder");
+		await runGit(["clone", "-q", repoA, feeder], { cwd: tmp });
+		await runGit(["config", "user.email", "smoke@test"], { cwd: feeder });
+		await runGit(["config", "user.name", "Smoke"], { cwd: feeder });
+		fs.writeFileSync(path.join(feeder, "b.ts"), "export const b = 2;\n");
+		await runGit(["add", "-A"], { cwd: feeder });
+		await runGit(["commit", "-qm", "remote c2"], { cwd: feeder });
+		const c2 = (await runGit(["rev-parse", "HEAD"], { cwd: feeder })).stdout;
+		// Feeder already has an origin (the clone source) — re-point it at the
+		// bare repo, then advance the bare origin's main to c2.
+		await runGit(["remote", "set-url", "origin", bare], { cwd: feeder });
+		const pushed = await runGit(["push", "-q", "origin", "main"], { cwd: feeder });
+		check("setup: bare origin advanced to c2", pushed.code === 0 && (await runGit(["rev-parse", "main"], { cwd: bare })).stdout === c2, pushed.stderr || "bare main not at c2");
+		check("setup: origin tip differs from local tip", c2 !== c1, "same commit — test can't discriminate");
+		await runGit(["remote", "add", "origin", bare], { cwd: repoA });
+		const fetchedA = await runGit(["fetch", "-q", "origin", "main"], { cwd: repoA });
+		const originTip = (await runGit(["rev-parse", "--verify", "origin/main^{commit}"], { cwd: repoA })).stdout;
+		check("setup: origin/main fetched and ahead of local main", fetchedA.code === 0 && originTip === c2, `${fetchedA.stderr || originTip.slice(0, 8)} vs ${c1.slice(0, 8)}`);
+
+		const a1 = await ensureBaseline({ repoRoot: repoA, settings: anchorSettings, onLine, extraArgs });
+		check("anchor: LOCAL tip preferred over fetched origin/main", a1.fresh && a1.meta.baseCommit === c1, `${a1.meta.baseCommit.slice(0, 8)} (origin/main=${originTip.slice(0, 8)})`);
+		check("anchor: baseline ref name kept", a1.ref === "main", a1.ref);
+		const a2 = await ensureBaseline({ repoRoot: repoA, settings: anchorSettings, onLine, extraArgs });
+		check("anchor: re-run stays fresh against local tip (origin ignored)", a2.fresh === false, a2.reason);
+		const anchorStatus = (await runGit(["status", "--porcelain"], { cwd: repoA })).stdout;
+		check("anchor: repo clean after prime", anchorStatus === "", anchorStatus);
+
+		// Repo B: local main renamed away (revParse('main') = null) while
+		// origin/main exists → resolution must fall back to origin/main.
+		const repoB = path.join(tmp, "anchor-b");
+		await runGit(["clone", "-q", repoA, repoB], { cwd: tmp });
+		await runGit(["remote", "set-url", "origin", bare], { cwd: repoB });
+		const fetchedB = await runGit(["fetch", "-q", "origin", "main"], { cwd: repoB });
+		await runGit(["branch", "-m", "main", "dev"], { cwd: repoB });
+		const originB = (await runGit(["rev-parse", "--verify", "origin/main^{commit}"], { cwd: repoB })).stdout;
+		const mainGone = (await runGit(["rev-parse", "--verify", "--quiet", "main^{commit}"], { cwd: repoB })).code !== 0;
+		check("setup: local main gone, origin/main present", fetchedB.code === 0 && originB === c2 && mainGone, `fetch=${fetchedB.stderr || "ok"} origin/main=${originB.slice(0, 8)} mainGone=${mainGone}`);
+		const b1 = await ensureBaseline({ repoRoot: repoB, settings: anchorSettings, onLine, extraArgs });
+		check("anchor: falls back to origin/main when local ref missing", b1.fresh && b1.meta.baseCommit === c2, `${b1.meta.baseCommit.slice(0, 8)} vs ${c2.slice(0, 8)}`);
+
+		// opts.ref override: naming the actual base branch (local dev) must be
+		// honored and land in its own (repo, ref) baseline slot.
+		const dev1 = await ensureBaseline({ repoRoot: repoB, settings: anchorSettings, ref: "dev", onLine, extraArgs });
+		check("anchor: ref override honored (local dev tip)", dev1.fresh && dev1.ref === "dev" && dev1.meta.baseCommit === c1, `${dev1.ref} @ ${dev1.meta.baseCommit.slice(0, 8)}`);
+		check("anchor: override lands in its own slot", dev1.dir !== b1.dir, `${dev1.dir} vs ${b1.dir}`);
+		const dev2 = await ensureBaseline({ repoRoot: repoB, settings: anchorSettings, ref: "dev", onLine, extraArgs });
+		check("anchor: override re-run stays fresh", dev2.fresh === false, dev2.reason);
+	}
+
 	// ── 5. worktree spin-up: sandbox-anchored — copy + top-up ────────
 	section("worktree spin-up");
 	const sandboxDir = sandboxDirFor(repo, "fix/smoke", settings);
@@ -599,10 +693,15 @@ async function main(): Promise<void> {
 
 	const dbDir = sandboxDbDir(sandboxDir);
 	const configPath = materializeConfig(sandboxDir, { settings, dbDir });
-	const r = await hotStartIndex({ sourceDbDir: b2.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, onLine, extraArgs });
+	// Baseline rows are relative to the bare checkout; the sandbox index root
+	// wraps it in fix-smoke/ — pathPrefix re-keys the copy so unchanged files
+	// (a.ts, b.md, b2.md) skip and only the worktree's own change (c.ts) parses.
+	const topupLines: string[] = [];
+	const r = await hotStartIndex({ sourceDbDir: b2.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, onLine: (l) => { topupLines.push(l); onLine(l); }, extraArgs, pathPrefix: "fix-smoke" });
 	check("index ok", r.code === 0, `code=${r.code}`);
 	check("db copied from baseline", r.copied === true && fs.existsSync(dbDir));
 	check("db bigger than baseline copy (top-up added c.ts)", dirSize(dbDir) > 0);
+	check("top-up skips unchanged files (path re-key)", topupLines.some((l) => /^Processed: 2 files$/.test(l)), topupLines.filter((l) => /^(Processed|Skipped)/.test(l)).join(" | "));
 
 	// Design 1: ZERO operational files in the worktree or the repo — no
 	// git-exclude writes, no .chhound/, no config inside the checkout.

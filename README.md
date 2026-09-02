@@ -11,7 +11,9 @@ plus setup and status tooling.
 Wraps the `chunkhound` CLI/datastore. Every worktree gets its own index, built from a
 shared per-repo **baseline** (the mainline branch, regularly refreshed) plus an
 incremental **top-up** at the worktree's branch point — the same mechanics the CURe
-engine uses for PR sandboxes.
+engine uses for PR sandboxes. Baselines anchor to the **local** branch the worktree
+branches from (`origin/<ref>` is only a fallback, best-effort fetched, when no local
+branch of that name exists) — so top-ups stay small even when local and remote drift.
 
 ## Requirements
 
@@ -64,7 +66,10 @@ the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
 lives inside its storage dir together with the config, index db and daemon state
 (the `/workspaces` pattern). Nothing is ever written into the checkout or the
 source repo — no `.chunkhound/`, no git-exclude edits.
-Long index runs stream live progress to the footer (`embedding · batch 3/12 · db 5.8 MB …`).
+Long index runs stream a live progress widget above the editor
+(`baseline index — embedding · db 5.1 MB +3.1 MB · 1:12`, with a 40-cell rail
+`██████░░░░ … 45% · 636/1,412 files` — the rail tracks chunk generation first,
+then embedding batches; a sweeping rail marks indeterminate stages).
 
 ### /ch-mcp
 

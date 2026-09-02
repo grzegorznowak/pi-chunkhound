@@ -71,8 +71,11 @@ export async function gitWorktreeAdd(opts: WorktreeAddOptions): Promise<void> {
 	if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
 }
 
-export async function gitWorktreeRemove(wtPath: string): Promise<void> {
-	const r = await runGit(["worktree", "remove", "--force", wtPath]);
+export async function gitWorktreeRemove(wtPath: string, cwd?: string): Promise<void> {
+	// cwd must be the repo the worktree was added to — `worktree remove` only
+	// accepts worktrees of the CURRENT repo (runGit would default to
+	// process.cwd(), which for pi sessions is rarely the source repo).
+	const r = await runGit(["worktree", "remove", "--force", wtPath], { cwd });
 	if (r.code !== 0) throw new Error(`git worktree remove failed: ${r.stderr || r.stdout}`);
 }
 

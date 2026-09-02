@@ -319,12 +319,28 @@ async function createIndexedWorktree(
 			return;
 		}
 
-		// 1) Baseline (primed/refreshed from origin/<ref> when stale)
+		// Anchor the baseline to the LOCAL ref the worktree's tree comes from, so
+		// the top-up stays small. An existing-branch checkout (positional branch,
+		// no --from) → that branch's own local tip. A branch created/derived by
+		// this invocation (-b, wizard, path-derived, no --from) → the source
+		// repo's checked-out branch: git bases `worktree add -b` on the source
+		// HEAD. Detached / --from checkouts → no override (default resolution;
+		// the top-up cost then tracks divergence from the default ref).
+		let baseRef: string | undefined;
+		if (!commitIsh) {
+			if (branch) baseRef = branch;
+			else {
+				const headBranch = await currentBranch(repoRoot);
+				if (headBranch !== "(detached)") baseRef = headBranch;
+			}
+		}
+
+		// 1) Baseline (primed/refreshed from the local anchor ref when stale)
 		progress.setPhase("baseline index");
 		// Watch the baseline db dir so the footer shows live growth (and
 		// embedding batch progress) during the prime — resolved the same
 		// way ensureBaseline computes it internally.
-		const baselineRef = settings.baseline?.ref || (await defaultRemoteBranch(repoRoot)) || "main";
+		const baselineRef = baseRef ?? (settings.baseline?.ref || (await defaultRemoteBranch(repoRoot)) || "main");
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
@@ -334,7 +350,9 @@ async function createIndexedWorktree(
 		const baseline = await ensureBaseline({
 			repoRoot,
 			settings,
+			ref: baseRef,
 			onLine: progress.setLine,
+			onNote: (note) => progress.setNote(note),
 			force: flags["refresh-baseline"] === true,
 			apiKey: state.apiKey,
 		});
@@ -360,6 +378,9 @@ async function createIndexedWorktree(
 		// and .chhound/ are excluded, meta.json is a tiny json).
 		progress.setPhase("worktree index (top-up)");
 		progress.setWatchDir(dbDir);
+		// The baseline db copy happens before the engine starts — label the gap
+		// (any engine output clears the note once the index process is live).
+		if (flags["force-reindex"] !== true) progress.setNote("copying baseline index…");
 		notify(
 			`Indexing ${wtPath} (top-up from baseline ${baseline.ref} @ ${baseline.meta.baseCommit.slice(0, 12)})…`,
 			"info",
@@ -370,6 +391,9 @@ async function createIndexedWorktree(
 			indexDir: sandboxDir,
 			configPath,
 			forceReindex: flags["force-reindex"] === true,
+			// Baseline rows are relative to the bare checkout; the sandbox index
+			// root wraps it in <branch>/ — re-key the copy so top-ups skip.
+			pathPrefix: path.relative(sandboxDir, wtPath).split(path.sep).join("/"),
 			env: chhoundApiKeyEnv(state.apiKey),
 			onLine: progress.setLine,
 		});

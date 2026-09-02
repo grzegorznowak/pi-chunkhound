@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 export interface RunChhoundOptions {
 	cwd?: string;
@@ -19,6 +21,35 @@ export interface RunResult {
 /** Binary name/location — overridable via CHHOUND_BINARY. */
 export function chhoundBinary(): string {
 	return process.env.CHHOUND_BINARY || "chunkhound";
+}
+
+/**
+ * Python interpreter of the engine install, resolved via the engine binary's
+ * shebang (uv/pipx shims embed the venv python). Used for db-level patches
+ * that need duckdb. Undefined when unresolvable — callers degrade.
+ */
+export function enginePython(): string | undefined {
+	try {
+		const bin = chhoundBinary();
+		const candidates: string[] = [];
+		if (bin.includes("/")) candidates.push(bin);
+		else for (const dir of (process.env.PATH ?? "").split(path.delimiter)) if (dir) candidates.push(path.join(dir, bin));
+		for (const c of candidates) {
+			let first: string;
+			try {
+				first = readFileSync(c, "utf8").split("\n")[0]!.trim();
+			} catch {
+				continue;
+			}
+			if (first.startsWith("#!")) {
+				const py = first.slice(2).trim().split(/\s+/)[0]!;
+				if (py) return py;
+			}
+		}
+	} catch {
+		/* degraded */
+	}
+	return undefined;
 }
 
 /** Env injection for the embedding key — held in memory only, never on disk. */

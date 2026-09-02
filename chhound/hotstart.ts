@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
-import { runChhound } from "./cli.js";
+import { enginePython, runChhound } from "./cli.js";
 
 export interface HotStartOptions {
 	/** Baseline duckdb dir to low-level copy; null/undefined → fresh index. */
@@ -19,6 +20,15 @@ export interface HotStartOptions {
 	verbose?: boolean;
 	/** Extra chunkhound index args (e.g. --no-embeddings in smoke tests). */
 	extraArgs?: string[];
+	/**
+	 * Relative POSIX path (no slashes at the ends) of the checkout subtree under
+	 * indexDir (e.g. "fix-smoke"). When set AND the db is copied from a source
+	 * whose `files.path` rows are relative to the SUBTREE root (a baseline built
+	 * from a bare checkout), the copied rows are re-keyed with this prefix so
+	 * the engine's unchanged-detection (keyed by relative path) matches — chunks
+	 * and embeddings survive the top-up instead of a full re-parse + re-embed.
+	 */
+	pathPrefix?: string;
 }
 
 export interface HotStartResult {
@@ -31,10 +41,59 @@ export interface HotStartResult {
 }
 
 /**
- * CURe-style spin-up: low-level copy of the baseline duckdb (a DIRECTORY —
- * copy everything incl. .wal), then `chhound index` as an incremental top-up.
- * No source → plain (or forced) full index.
+ * Best-effort re-key of a freshly copied db: prefix `files.path` rows so the
+ * engine's unchanged-detection (keyed by relative path) matches files that the
+ * top-up discovers under indexDir/<prefix>. Silent no-op when the engine's
+ * python is unresolvable or the patch fails — the top-up then degrades to a
+ * full re-parse (correct, just slower/more spend).
  */
+async function rekeyCopiedDbPaths(dbPath: string, prefix: string): Promise<void> {
+	const py = enginePython();
+	if (!py) return;
+	// duckdb cannot UPDATE files.path (UNIQUE) on rows with child chunks (its
+	// UPDATE is delete+insert and FKs are eager, non-disableable) and cannot
+	// DELETE a referenced row in the same transaction as the repoint. So:
+	// insert a copy of each row with the prefixed path, repoint referencing
+	// FKs (chunks.file_id) to the copy, and leave the old rows orphaned — the
+	// engine's own cleanup deletes rows whose path is absent from the new
+	// index at the end of the top-up.
+	const script = [
+		"import duckdb, sys, re",
+		"db, prefix = sys.argv[1], sys.argv[2] + '/'",
+		"con = duckdb.connect(db)",
+		"try:",
+		"    con.execute('BEGIN')",
+		"    refs = []",
+		"    for t, txt in con.execute(\"select table_name, constraint_text from duckdb_constraints() where constraint_type = 'FOREIGN KEY'\").fetchall():",
+		"        m = re.match(r'FOREIGN KEY \\((\\w+)\\) REFERENCES files\\((\\w+)\\)', txt or '')",
+		"        if m and m.group(2) == 'id':",
+		"            refs.append((t, m.group(1)))",
+		"    rows = con.execute('select id from files where not starts_with(path, ?)', [prefix]).fetchall()",
+		"    for (old_id,) in rows:",
+		"        new_id = con.execute(",
+		"            'INSERT INTO files (path,name,extension,size,modified_time,content_hash,language,skip_reason,created_at,updated_at) '",
+		"            + 'SELECT concat(?, path), name, extension, size, modified_time, content_hash, language, skip_reason, created_at, updated_at FROM files WHERE id = ? RETURNING id',",
+		"            [prefix, old_id]).fetchone()[0]",
+		"        for tbl, col in refs:",
+		"            con.execute(f'UPDATE \"{tbl}\" SET \"{col}\" = ? WHERE \"{col}\" = ?', [new_id, old_id])",
+		"    con.execute('COMMIT')",
+		"    con.close()",
+		"except Exception as e:",
+		"    print('path re-key failed: %s' % e, file=sys.stderr)",
+		"    sys.exit(2)",
+	].join("\n");
+	await new Promise<void>((resolve) => {
+		const child = spawn(py, ["-c", script, dbPath, prefix], { stdio: ["ignore", "ignore", "pipe"] });
+		let err = "";
+		child.stderr.on("data", (d: Buffer) => (err += d.toString()));
+		child.on("error", () => resolve());
+		child.on("close", (code) => {
+			if (code !== 0 && err) console.error(`pi-chhound: baseline path re-key failed — top-up will re-parse: ${err.trim().slice(0, 300)}`);
+			resolve();
+		});
+	});
+}
+
 /**
  * ChunkHound claims a duckdb dir for an indexed root via a sibling sidecar
  * (`<db>.root.json`). Our dbs are copied/moved between roots by design, so we
@@ -55,6 +114,8 @@ export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResu
 		fs.mkdirSync(path.dirname(opts.targetDbDir), { recursive: true });
 		fs.cpSync(opts.sourceDbDir, opts.targetDbDir, { recursive: true, force: true });
 		copied = true;
+		// Re-key copied rows to the checkout subtree (see pathPrefix above).
+		if (opts.pathPrefix) await rekeyCopiedDbPaths(opts.targetDbDir, opts.pathPrefix);
 	}
 	// No source: plain index — incremental top-up in place when the db exists, fresh otherwise.
 
