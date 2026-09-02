@@ -63,9 +63,13 @@ Don't use both install paths at once — the commands would register twice. Conf
 
 In all modes the location must not overlap another chunkhound worktree or index —
 the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
-lives inside its storage dir together with the config, index db and daemon state
-(the `/workspaces` pattern). Nothing is ever written into the checkout or the
-source repo — no `.chunkhound/`, no git-exclude edits.
+lives inside its sandbox dir together with the materialized config (the
+`/workspaces` pattern); the index db, its claim sidecar and the sandbox meta
+live in a hidden sibling `.state/<name>` dir — OUTSIDE the indexed root, so no
+engine/plugin artifact is ever indexed. The engine-pinned `.chunkhound/` daemon
+dir sits inside the sandbox dir but is excluded from indexing. Nothing is ever
+written into the checkout or the source repo — no `.chunkhound/`, no git-exclude
+edits.
 Long index runs stream a live progress widget above the editor
 (`baseline index — embedding · db 5.1 MB +3.1 MB · 1:12`, with a 40-cell rail
 `██████░░░░ … 45% · 636/1,412 files` — the rail tracks chunk generation first,
@@ -122,9 +126,12 @@ worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
 
 ```
 ~/.cache/pi-chhound/bases/<repo>-<hash>/<ref>/           # baselines (per repo + base ref)
-~/.local/state/pi-chhound/sandboxes/<repo>-<branch>-<hash>/  # one sandbox per (repo, branch):
-                                                          #   config + index db + daemon state
-                                                          #   + the worktree checkout itself
+~/.local/state/pi-chhound/sandboxes/<repo>-<branch>-<hash>/  # sandbox dir (project dir =
+                                                          #   indexed root): config +
+                                                          #   worktree checkout + .chunkhound/
+~/.local/state/pi-chhound/sandboxes/.state/<name>/        # operational state, OUTSIDE the
+                                                          #   indexed root: index db (+ claim
+                                                          #   sidecar/wal) + meta.json
 ```
 
 - Both roots overridable via `CHHOUND_BASE_ROOT` / `CHHOUND_SANDBOX_ROOT` env or settings.

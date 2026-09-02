@@ -24,7 +24,9 @@ export function xdgCacheHome(): string {
 	return process.env.XDG_CACHE_HOME || path.join(homedir(), ".cache");
 }
 
-/** Managed sandbox library root — one dir per (repo, branch): config + duckdb + meta + worktree checkout. */
+/** Managed sandbox library root — one dir PAIR per (repo, branch): the sandbox
+ * dir (worktree checkout + config) and its hidden `.state/<name>` sibling
+ * (index db + meta, outside the indexed root). */
 export function sandboxRoot(settings: ChhoundSettings): string {
 	return (
 		settings.sandboxRoot ||

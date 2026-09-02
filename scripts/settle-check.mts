@@ -15,7 +15,7 @@ import { chhoundVersion } from "../chhound/cli.js";
 import { materializeConfig } from "../chhound/config.js";
 import { currentBranch, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
-import { sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
+import { sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../chhound/sandbox.js";
 import { connectMcp, disconnectMcp } from "../mcp/manager.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
@@ -54,10 +54,13 @@ try {
 	const baseline = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
 	log(`baseline @ ${baseline.ref}`);
 
-	// Sandbox-anchored worktree (Design 1)
+	// Sandbox-anchored worktree (Design 1): checkout inside the sandbox dir,
+	// operational state (db + meta) in the hidden `.state` sibling — OUTSIDE
+	// the indexed root.
 	const sandboxDir = sandboxDirFor(repo, "settle-check", settings);
 	const wt = path.join(sandboxDir, "settle-check");
 	fs.mkdirSync(sandboxDir, { recursive: true });
+	fs.mkdirSync(sandboxStateDir(sandboxDir), { recursive: true });
 	await gitWorktreeAdd({ cwd: repo, path: wt, createBranch: "settle-check", commitIsh: "main" });
 	fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
 	await runGit(["add", "-A"], { cwd: wt });
@@ -68,7 +71,7 @@ try {
 	const configPath = materializeConfig(sandboxDir, { settings, dbDir });
 	const r = await hotStartIndex({ sourceDbDir: baseline.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, extraArgs, pathPrefix: "settle-check" });
 	if (r.code !== 0) throw new Error(`hotstart failed: ${r.stderrTail}`);
-	writeSandboxMeta(sandboxDir, {
+	writeSandboxMeta(sandboxStateDir(sandboxDir), {
 		version: 1,
 		worktree: wt,
 		repoRoot: repo,
@@ -132,6 +135,11 @@ try {
 	console.log(`.chunkhound in checkout:  ${fs.existsSync(path.join(wt, ".chunkhound")) ? "YES ✗" : "no ✓"}`);
 	const wtStatus = (await runGit(["status", "--porcelain"], { cwd: wt })).stdout;
 	console.log(`worktree git status:      ${wtStatus === "" ? "clean ✓" : JSON.stringify(wtStatus)}`);
+	// O2 layout claims: nothing operational inside the indexed root.
+	const sandboxLitter = fs.readdirSync(sandboxDir).filter((n) => n !== ".chunkhound.json" && n !== ".chunkhound" && n !== "settle-check");
+	console.log(`sandbox root litter:      ${sandboxLitter.length === 0 ? "none ✓" : JSON.stringify(sandboxLitter) + " ✗"}`);
+	console.log(`db outside index root:   ${fs.existsSync(dbDir) && dbDir.includes(path.join(".state", path.basename(sandboxDir))) ? "YES ✓" : "NO ✗"} (${dbDir})`);
+	console.log(`state dir contents:      ${fs.readdirSync(sandboxStateDir(sandboxDir)).join(", ")}`);
 	const tail = fs.readFileSync(path.join(sandboxDir, ".chunkhound", "daemon.log"), "utf8").split("\n").slice(-5).join("\n");
 	console.log(`--- daemon.log tail ---\n${tail}\n-----------------------`);
 

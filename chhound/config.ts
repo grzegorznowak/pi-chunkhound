@@ -38,6 +38,16 @@ export const DEFAULT_EXCLUDES = [
  */
 export const CHHOUND_DIR_EXCLUDES = ["**/.chhound/**", "**/.chunkhound/**"];
 
+/**
+ * Realtime backend for sandbox daemons. "watchman" is enforced by default:
+ * the engine auto-acquires its packaged watchman runtime on first use, and the
+ * watchdog fallback backend wedges (live indexing stuck busy) when the duckdb
+ * lives OUTSIDE the watched project dir — which is exactly the O2 layout
+ * (operational state in the `.state` sibling). Overridable via settings
+ * (`indexing.realtimeBackend`).
+ */
+export const REALTIME_BACKEND_DEFAULT = "watchman";
+
 export interface AdoptedConfig {
 	embedding?: EmbeddingSettings;
 	llm?: LlmSettings;
@@ -207,6 +217,7 @@ export function materializeConfig(dir: string, opts: MaterializeOptions): string
 
 	const indexing: Record<string, unknown> = {
 		exclude: excludes,
+		realtime_backend: idx.realtimeBackend ?? REALTIME_BACKEND_DEFAULT,
 		...(idx.include ? { include: idx.include } : {}),
 		...(opts.adopted?.indexing?.include ? { include: [...(idx.include ?? []), ...opts.adopted.indexing.include] } : {}),
 		...(idx.perFileTimeoutSeconds !== undefined ? { per_file_timeout_seconds: idx.perFileTimeoutSeconds } : {}),

@@ -5,24 +5,44 @@ import { CONFIG_FILE_NAME } from "./config.js";
 import type { ChhoundSettings, SandboxMeta } from "./types.js";
 
 /**
- * One managed dir per (repo, branch): config + duckdb + meta + the worktree
- * checkout itself (Design 1: sandbox-anchored). The name is derived from
- * repoRoot + branch ONLY — it must never depend on the worktree path, which
- * lives INSIDE the sandbox dir (circular otherwise). The branch slug keeps
- * the name readable; the hash over (repoRoot, branch) makes it collision-free
- * (e.g. `feature/foo` vs `feature-foo` both slug to `feature-foo`).
+ * One managed pair of dirs per (repo, branch) under the sandbox library root:
+ *
+ *   <root>/<name>/           — sandbox dir = the daemon's project dir and the
+ *                              INDEX ROOT (claimed by chunkhound). Holds ONLY
+ *                              the worktree checkout <branch>/ + the material-
+ *                              ized .chunkhound.json (name-excluded from
+ *                              indexing) + the engine-pinned .chunkhound/ dir.
+ *   <root>/.state/<name>/    — operational state OUTSIDE the indexed root:
+ *                              .chhound.db (+ .root.json claim sidecar, .wal,
+ *                              .compact_* followers) and meta.json. Nothing
+ *                              in here is ever a scan candidate.
+ *
+ * The name is derived from repoRoot + branch ONLY — it must never depend on
+ * the worktree path, which lives INSIDE the sandbox dir (circular other-
+ * wise). The branch slug keeps the name readable; the hash over (repoRoot,
+ * branch) makes it collision-free (e.g. `feature/foo` vs `feature-foo` both
+ * slug to `feature-foo`). State dirs are derived from the RESOLVED sandbox
+ * dir (never recomputed from settings) so --dest / env / XDG all hold.
  */
 export function sandboxDirFor(repoRoot: string, branch: string, settings: ChhoundSettings): string {
 	const name = `${slugify(path.basename(repoRoot))}-${slugify(branch)}-${shortHash(`${path.resolve(repoRoot)}\u0000${branch}`)}`;
 	return path.join(sandboxRoot(settings), name);
 }
 
+/** Hidden sibling dir (`.state/<name>`) holding a sandbox's operational state — outside the index root. */
+export const STATE_DIR_NAME = ".state";
+
+export function sandboxStateDir(sandboxDir: string): string {
+	return path.join(path.dirname(sandboxDir), STATE_DIR_NAME, path.basename(sandboxDir));
+}
+
 export function sandboxConfigPath(sandboxDir: string): string {
 	return path.join(sandboxDir, CONFIG_FILE_NAME);
 }
 
+/** The engine duckdb lives in the state dir — NOT under the indexed root. */
 export function sandboxDbDir(sandboxDir: string): string {
-	return path.join(sandboxDir, ".chhound.db");
+	return path.join(sandboxStateDir(sandboxDir), ".chhound.db");
 }
 
 function metaPath(dir: string): string {
@@ -49,7 +69,10 @@ export function readSandboxMeta(dir: string): SandboxMeta | undefined {
 }
 
 export interface SandboxEntry {
+	/** Sandbox dir (project dir = index root; holds checkout + config). */
 	dir: string;
+	/** Hidden sibling dir with the operational state (db, meta) — outside the index root. */
+	stateDir: string;
 	meta: SandboxMeta;
 	dbSizeBytes: number;
 	/** chunkhound's claimed indexed root from the `<db>.root.json` sidecar (absent = not yet claimed). */
@@ -90,16 +113,24 @@ export function dirSize(p: string): number {
 	}
 }
 
+/** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
 export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
 	const root = sandboxRoot(settings);
-	if (!fs.existsSync(root)) return [];
+	const stateRoot = path.join(root, STATE_DIR_NAME);
+	if (!fs.existsSync(stateRoot)) return [];
 	const out: SandboxEntry[] = [];
-	for (const name of fs.readdirSync(root)) {
-		const dir = path.join(root, name);
-		if (!fs.statSync(dir).isDirectory()) continue;
-		const meta = readSandboxMeta(dir);
+	for (const name of fs.readdirSync(stateRoot)) {
+		const stateDir = path.join(stateRoot, name);
+		if (!fs.statSync(stateDir).isDirectory()) continue;
+		const meta = readSandboxMeta(stateDir);
 		if (meta) {
-			out.push({ dir, meta, dbSizeBytes: dirSize(meta.dbPath), claimedRoot: readClaimedRoot(meta.dbPath) });
+			out.push({
+				dir: path.join(root, name),
+				stateDir,
+				meta,
+				dbSizeBytes: dirSize(meta.dbPath),
+				claimedRoot: readClaimedRoot(meta.dbPath),
+			});
 		}
 	}
 	return out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt));
@@ -124,12 +155,15 @@ export function findConflictingIndexed(location: string, indexedWorktrees: strin
 	return undefined;
 }
 
+/** Remove both halves (sandbox dir + hidden state dir) of sandboxes whose worktree no longer exists.
+ * Returns the removed state dirs (one per sandbox — the sandbox dir is removed too when present). */
 export function pruneSandboxes(settings: ChhoundSettings): string[] {
 	const removed: string[] = [];
 	for (const entry of listSandboxes(settings)) {
 		if (!fs.existsSync(entry.meta.worktree)) {
+			fs.rmSync(entry.stateDir, { recursive: true, force: true });
+			removed.push(entry.stateDir);
 			fs.rmSync(entry.dir, { recursive: true, force: true });
-			removed.push(entry.dir);
 		}
 	}
 	return removed;

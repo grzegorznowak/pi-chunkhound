@@ -12,7 +12,7 @@ import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
-import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, writeSandboxMeta } from "../chhound/sandbox.js";
+import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 
@@ -272,7 +272,7 @@ async function createIndexedWorktree(
 	state: PluginState,
 	opts: {
 		repoRoot: string;
-		/** Sandbox dir — the daemon's project dir (config + db + meta + checkout inside). */
+		/** Sandbox dir — the daemon's project dir (checkout + config inside; index state in the sibling `.state/<name>` dir). */
 		sandboxDir: string;
 		wtPath: string;
 		settings: ChhoundSettings;
@@ -289,8 +289,10 @@ async function createIndexedWorktree(
 	try {
 		notify(`Creating worktree ${wtPath}…`, "info");
 		// The checkout lands INSIDE the sandbox dir — make sure the sandbox
-		// (config + db + meta live there too) exists before `git worktree add`.
+		// (config lives there) and its hidden state sibling (db + meta — OUTSIDE
+		// the indexed root) exist before `git worktree add`.
 		fs.mkdirSync(sandboxDir, { recursive: true });
+		fs.mkdirSync(sandboxStateDir(sandboxDir), { recursive: true });
 		try {
 			await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
 		} catch (err) {
@@ -358,7 +360,9 @@ async function createIndexedWorktree(
 		});
 
 		// 2) Sandbox config (no secrets, pinned duckdb) + db copy target — the
-		// daemon's project dir is the sandbox dir itself (Design 1).
+		// daemon's project dir is the sandbox dir itself; the duckdb + sidecar
+		// live in the hidden `.state` sibling, OUTSIDE the indexed root, so no
+		// engine/plugin artifact is ever a scan candidate (no self-vectors).
 		const dbDir = sandboxDbDir(sandboxDir);
 		let adopted;
 		if (typeof flags["config"] === "string") {
@@ -372,10 +376,10 @@ async function createIndexedWorktree(
 		const configPath = materializeConfig(sandboxDir, { settings, dbDir, adopted });
 
 		// 3) Sync index: baseline db copy + top-up at the worktree's branch point.
-		// indexDir = the SANDBOX DIR: the db paths, the daemon log and the root
-		// claim sidecar must all anchor on the daemon's project dir. State files
-		// inside it are inert (.chhound.db is the engine's own duckdb, .chunkhound.json
-		// and .chhound/ are excluded, meta.json is a tiny json).
+		// indexDir = the SANDBOX DIR (the daemon's project dir). The db, the root
+		// claim sidecar and the wal all anchor on database.path, which points at
+		// the `.state` sibling — outside the indexed root — so the engine's own
+		// artifacts are never scan candidates.
 		progress.setPhase("worktree index (top-up)");
 		progress.setWatchDir(dbDir);
 		// The baseline db copy happens before the engine starts — label the gap
@@ -403,8 +407,8 @@ async function createIndexedWorktree(
 			return;
 		}
 
-		// 4) Meta + summary
-		writeSandboxMeta(sandboxDir, {
+		// 4) Meta + summary — meta.json lives in the state dir, not the index root.
+		writeSandboxMeta(sandboxStateDir(sandboxDir), {
 			version: 1,
 			worktree: wtPath,
 			repoRoot,
@@ -420,7 +424,7 @@ async function createIndexedWorktree(
 			[
 				`✓ ${branchNote} @ ${wtPath} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
 				`worktree: ${wtPath} (inside its storage dir — the repo stays untouched)`,
-				`db: ${dbDir}`,
+				`db: ${dbDir} (index state lives in the .state sibling — outside the indexed root)`,
 				`config: ${sandboxConfigPath(sandboxDir)}`,
 				`Next: chunkhound mcp ${sandboxDir} --config ${sandboxConfigPath(sandboxDir)}`,
 				`Tip: .chunkhound.json sits in the sandbox dir, so 'chunkhound mcp ${sandboxDir}' auto-discovers it — no --config needed.`,

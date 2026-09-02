@@ -38,7 +38,8 @@ await runGit(["add", "-A"], { cwd: repo });
 await runGit(["commit", "-qm", "init"], { cwd: repo });
 
 // Fixture sandbox library for /ch-mcp completions: project settings point
-// sandboxRoot at a temp dir (project shadows global), meta.json names a wt.
+// sandboxRoot at a temp dir (project shadows global). Sandbox identity lives
+// with meta.json in the hidden .state sibling dir (outside the index root).
 const sandboxRoot = path.join(tmp, "sandboxes");
 fs.mkdirSync(path.join(cwd, ".pi", "pi-chhound"), { recursive: true });
 fs.writeFileSync(
@@ -48,8 +49,10 @@ fs.writeFileSync(
 const fakeWt = path.join(tmp, "wt-fix");
 const sandboxDir = path.join(sandboxRoot, "repo-wt-fix-abcdef01");
 fs.mkdirSync(sandboxDir, { recursive: true });
+const stateDir = path.join(sandboxRoot, ".state", path.basename(sandboxDir));
+fs.mkdirSync(stateDir, { recursive: true });
 fs.writeFileSync(
-	path.join(sandboxDir, "meta.json"),
+	path.join(stateDir, "meta.json"),
 	JSON.stringify({
 		version: 1,
 		worktree: fakeWt,

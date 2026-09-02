@@ -29,6 +29,7 @@ import {
 	sandboxConfigPath,
 	sandboxDbDir,
 	sandboxDirFor,
+	sandboxStateDir,
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -640,6 +641,7 @@ async function main(): Promise<void> {
 	const sandboxDir = sandboxDirFor(repo, "fix/smoke", settings);
 	const wt = path.join(sandboxDir, "fix-smoke");
 	fs.mkdirSync(sandboxDir, { recursive: true });
+	fs.mkdirSync(sandboxStateDir(sandboxDir), { recursive: true });
 	await gitWorktreeAdd({ cwd: repo, path: wt, createBranch: "fix/smoke", commitIsh: "main" });
 	fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
 	// Commit the branch change (mirrors a real dev edit) so the final status
@@ -701,7 +703,10 @@ async function main(): Promise<void> {
 	check("index ok", r.code === 0, `code=${r.code}`);
 	check("db copied from baseline", r.copied === true && fs.existsSync(dbDir));
 	check("db bigger than baseline copy (top-up added c.ts)", dirSize(dbDir) > 0);
-	check("top-up skips unchanged files (path re-key)", topupLines.some((l) => /^Processed: 2 files$/.test(l)), topupLines.filter((l) => /^(Processed|Skipped)/.test(l)).join(" | "));
+	check("top-up skips unchanged files (path re-key)", topupLines.some((l) => /^Processed: 1 files$/.test(l)), topupLines.filter((l) => /^(Processed|Skipped)/.test(l)).join(" | "));
+	// Under O2 exactly ONE file parses: c.ts. The db claim sidecar used to
+	// self-index into the root (+1 file/+2 chunks per sandbox); it now lives
+	// in the .state sibling, outside the indexed root — nothing else parses.
 
 	// Design 1: ZERO operational files in the worktree or the repo — no
 	// git-exclude writes, no .chhound/, no config inside the checkout.
@@ -714,7 +719,13 @@ async function main(): Promise<void> {
 	const repoStatus = (await runGit(["status", "--porcelain"], { cwd: repo })).stdout;
 	check("repo clean after worktree+index", repoStatus === "", repoStatus);
 
-	writeSandboxMeta(sandboxDir, {
+	// O2: operational state lives OUTSIDE the indexed root — the sandbox dir
+	// holds only checkout + config; db/sidecar/meta sit in the .state sibling.
+	check("no db in sandbox root", !fs.existsSync(path.join(sandboxDir, ".chhound.db")));
+	check("no sidecar in sandbox root", !fs.existsSync(path.join(sandboxDir, ".chhound.db.root.json")));
+	check("db lives in .state sibling", dbDir.startsWith(sandboxStateDir(sandboxDir) + path.sep) && fs.existsSync(dbDir), dbDir);
+
+	writeSandboxMeta(sandboxStateDir(sandboxDir), {
 		version: 1,
 		worktree: wt,
 		repoRoot: repo,
@@ -726,6 +737,7 @@ async function main(): Promise<void> {
 		copiedFrom: b2.dbDir,
 		dbPath: dbDir,
 	});
+	check("meta lives in state dir (not the index root)", fs.existsSync(path.join(sandboxStateDir(sandboxDir), "meta.json")) && !fs.existsSync(path.join(sandboxDir, "meta.json")));
 
 	// ── 5b. MCP bridge: real chunkhound mcp over stdio (SDK client) ────
 	section("mcp bridge integration");

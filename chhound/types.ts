@@ -30,6 +30,8 @@ export interface IndexingSettings {
 	exclude?: string[];
 	perFileTimeoutSeconds?: number;
 	perFileTimeoutMinSizeKb?: number;
+	/** Realtime backend for daemons; defaults to "watchman" (engine auto-acquires its runtime). */
+	realtimeBackend?: "watchman" | "watchdog" | "polling";
 }
 
 export interface BaselineSettings {
