@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { enginePython, runChhound } from "./cli.js";
 
@@ -146,6 +146,113 @@ export function writeIndexedRootClaim(dbDir: string, indexDir: string): void {
 	}
 }
 
+/**
+ * Copy a directory tree `src` → `dst`, preferring a copy-on-write (reflink)
+ * clone: Linux `cp -R --reflink=always` (btrfs/XFS/OpenZFS ≥2.2 — exit 0 ⇔
+ * every file was cloned; nonzero on unsupported fs / cross-device), macOS
+ * `cp -c -R` (APFS clonefile — silently degrades to a full copy per file by
+ * design, always exit 0, best-effort). Windows / other platforms, plus
+ * CHHOUND_COPY_FORCE=1, skip the attempt entirely — the env var doubles as
+ * the deterministic smoke seam for the plain-copy path.
+ *
+ * Failure semantics: the clone lands in a SIBLING tmp dir (same fs → the
+ * promotion rename is atomic). A refused clone (unsupported fs — the routine
+ * case on ext4 and overlayfs — cross-device, missing cp, killed child)
+ * removes the tmp and falls back to the plain fs.cpSync recursive copy, the
+ * exact previous behavior including its own failure profile. A real I/O
+ * failure removes the tmp and rethrows.
+ *
+ * A pre-existing dst (retry after a failed run) is replaced rather than
+ * merged: a previous FILE is overwritten atomically by the promotion rename
+ * (rename(2) replaces files without a gap); a previous DIRECTORY is first
+ * renamed aside to a `.cow-bak` sibling and only deleted after the new tree
+ * is promoted, so a crash mid-swap leaves the prior db recoverable in the
+ * bak (and the next run heals dst from scratch). Crash residue (tmp/bak
+ * siblings, or a missing dst between the two renames) is swept at the start
+ * of the next run — this function is the single writer for a given dst, so
+ * stale siblings are always ours.
+ */
+export function copyTreeCoW(src: string, dst: string): void {
+	// Overlap would corrupt or self-copy (this function is the single writer
+	// for a given dst, so refuse rather than guess). A SHAPE mismatch is also
+	// refused: the old plain copy (and cp(1)) refuse dir→file, and file→dir
+	// would silently copy INTO the dir — neither is ever legit here (src and
+	// dst derive from the same engine layout: a duckdb file, possibly a tree).
+	const s = path.resolve(src);
+	const d = path.resolve(dst);
+	if (s === d || d.startsWith(s + path.sep) || s.startsWith(d + path.sep)) {
+		throw new Error(`copyTreeCoW: source and destination overlap (${src} vs ${dst})`);
+	}
+	let srcIsDir: boolean;
+	let dstIsDir: boolean;
+	try {
+		srcIsDir = fs.statSync(src).isDirectory();
+	} catch {
+		throw new Error(`copyTreeCoW: source does not exist: ${src}`);
+	}
+	try {
+		dstIsDir = fs.statSync(dst).isDirectory();
+	} catch {
+		dstIsDir = false; // absent — will be created by the copy
+	}
+	if (dstIsDir !== srcIsDir && fs.existsSync(dst)) {
+		throw new Error(`copyTreeCoW: source/destination shape mismatch (${src} is ${srcIsDir ? "a directory" : "a file"}, ${dst} is ${dstIsDir ? "a directory" : "not a directory"})`);
+	}
+	fs.mkdirSync(path.dirname(dst), { recursive: true });
+	// Sweep crash residue from a previous run for this dst (single-writer).
+	const base = path.basename(dst);
+	for (const name of fs.readdirSync(path.dirname(dst))) {
+		if (name.startsWith(`${base}.`) && (name.endsWith(".cow-tmp") || name.endsWith(".cow-bak"))) {
+			fs.rmSync(path.join(path.dirname(dst), name), { recursive: true, force: true });
+		}
+	}
+	const plainCopy = () => fs.cpSync(src, dst, { recursive: true, force: true });
+	if (process.env.CHHOUND_COPY_FORCE === "1" || (process.platform !== "linux" && process.platform !== "darwin")) {
+		plainCopy();
+		return;
+	}
+	const stamp = `${process.pid}.${Date.now()}`;
+	const tmp = `${dst}.${stamp}.cow-tmp`;
+	const bak = `${dst}.${stamp}.cow-bak`;
+	try {
+		const args = process.platform === "darwin" ? ["-c", "-R"] : ["-R", "--reflink=always"];
+		const r = spawnSync("cp", [...args, src, tmp], { stdio: ["ignore", "ignore", "pipe"] });
+		if (r.error || r.status !== 0) {
+			// Clone refused — silent by design (routine on non-reflink fs): the
+			// plain copy below is today's behavior.
+			fs.rmSync(tmp, { recursive: true, force: true });
+			plainCopy();
+			return;
+		}
+		if (!fs.existsSync(dst)) {
+			fs.renameSync(tmp, dst);
+			return;
+		}
+		if (!srcIsDir) {
+			// File over file: the rename atomically replaces the previous db —
+			// no backup dance needed (rename(2) never leaves dst missing).
+			fs.renameSync(tmp, dst);
+			return;
+		}
+		// Whole-dir replace via bak: dst stays recoverable until promotion wins.
+		fs.renameSync(dst, bak);
+		try {
+			fs.renameSync(tmp, dst);
+		} catch (e) {
+			try {
+				fs.renameSync(bak, dst);
+			} catch {
+				/* dst missing until the next run re-copies — heal, don't half-restore */
+			}
+			throw e;
+		}
+		fs.rmSync(bak, { recursive: true, force: true });
+	} catch (e) {
+		fs.rmSync(tmp, { recursive: true, force: true });
+		throw e;
+	}
+}
+
 export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResult> {
 	let copied = false;
 	if (opts.forceReindex) {
@@ -153,8 +260,9 @@ export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResu
 		if (fs.existsSync(opts.targetDbDir)) fs.rmSync(opts.targetDbDir, { recursive: true, force: true });
 	} else if (opts.sourceDbDir && fs.existsSync(opts.sourceDbDir)) {
 		// CURe-style spin-up: low-level copy of the baseline db, then top-up index.
-		fs.mkdirSync(path.dirname(opts.targetDbDir), { recursive: true });
-		fs.cpSync(opts.sourceDbDir, opts.targetDbDir, { recursive: true, force: true });
+		// CoW/reflink clone when the fs supports it (tmp + atomic rename — a
+		// failed clone falls back to the plain recursive copy); see copyTreeCoW.
+		copyTreeCoW(opts.sourceDbDir, opts.targetDbDir);
 		copied = true;
 		// Re-key copied rows to the checkout subtree (see pathPrefix above).
 		if (opts.pathPrefix) await rekeyCopiedDbPaths(opts.targetDbDir, opts.pathPrefix);
