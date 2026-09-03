@@ -759,6 +759,19 @@ async function main(): Promise<void> {
 	// self-index into the root (+1 file/+2 chunks per sandbox); it now lives
 	// in the .state sibling, outside the indexed root — nothing else parses.
 
+	// Claim sidecar pre-write: hotstart re-points (or keeps) the claim BEFORE
+	// the engine runs, so the engine's legacy-migration warning never fires.
+	check("top-up emits no engine claim warning", !topupLines.some((l) => l.includes("sidecar was missing")), topupLines.find((l) => l.includes("sidecar was missing")) ?? "");
+	const claimedRoot = readClaimedRoot(dbDir);
+	check("claim sidecar claims the sandbox dir", claimedRoot === path.resolve(sandboxDir), `${claimedRoot ?? "unclaimed"} vs ${path.resolve(sandboxDir)}`);
+
+	// Re-running hotstart against the same db must stay silent as well (the
+	// matching claim is kept, not rewritten).
+	const rerunLines: string[] = [];
+	const r2 = await hotStartIndex({ sourceDbDir: b2.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, onLine: (l) => { rerunLines.push(l); onLine(l); }, extraArgs, pathPrefix: "fix-smoke" });
+	check("re-run index ok", r2.code === 0, `code=${r2.code}`);
+	check("re-run emits no engine claim warning", !rerunLines.some((l) => l.includes("sidecar was missing")), rerunLines.find((l) => l.includes("sidecar was missing")) ?? "");
+
 	// Design 1: ZERO operational files in the worktree or the repo — no
 	// git-exclude writes, no .chhound/, no config inside the checkout.
 	const excl = fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8");

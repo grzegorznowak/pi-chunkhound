@@ -96,16 +96,58 @@ async function rekeyCopiedDbPaths(dbPath: string, prefix: string): Promise<void>
 
 /**
  * ChunkHound claims a duckdb dir for an indexed root via a sibling sidecar
- * (`<db>.root.json`). Our dbs are copied/moved between roots by design, so we
- * always clear the stale claim before indexing — chunkhound re-claims fresh.
+ * (`<db>.root.json`) holding `{"version": 1, "indexed_root_path": <root>}`.
+ * Our dbs are copied/moved between roots by design, so before every engine
+ * run we re-point the claim at the root we are about to index — see
+ * writeIndexedRootClaim. Pre-writing the claim (instead of deleting it and
+ * letting chunkhound re-claim) keeps the engine out of its legacy-DB
+ * migration path, which would log a warning on every run.
  */
 export function indexedRootSidecarPath(dbDir: string): string {
 	return `${dbDir}.root.json`;
 }
 
+/** Claim value chunkhound would compute for `indexDir` (resolve + posix). */
+function engineClaimValue(indexDir: string): string {
+	return path.resolve(indexDir).split(path.sep).join("/");
+}
+
+/**
+ * Re-point (or confirm) the claim sidecar of `dbDir` to `indexDir`, in the
+ * engine's exact format and normalization. No-op when the sidecar already
+ * claims the same root; otherwise rewritten atomically (tmp + rename). The
+ * engine then sees a present + matching sidecar on open and stays silent —
+ * while its fail-closed mismatch guard keeps protecting genuinely foreign
+ * dbs (a sidecar claiming a DIFFERENT root still refuses the open).
+ */
+export function writeIndexedRootClaim(dbDir: string, indexDir: string): void {
+	const sidecar = indexedRootSidecarPath(dbDir);
+	const want = engineClaimValue(indexDir);
+	try {
+		const raw = fs.readFileSync(sidecar, "utf8");
+		const data: unknown = JSON.parse(raw);
+		if (
+			typeof data === "object" &&
+			data !== null &&
+			(data as { indexed_root_path?: unknown }).indexed_root_path === want
+		) {
+			return;
+		}
+	} catch {
+		// missing or unreadable — (re)write below
+	}
+	fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+	const tmp = `${sidecar}.${process.pid}.${Date.now()}.tmp`;
+	try {
+		fs.writeFileSync(tmp, JSON.stringify({ version: 1, indexed_root_path: want }), "utf8");
+		fs.renameSync(tmp, sidecar);
+	} finally {
+		fs.rmSync(tmp, { force: true });
+	}
+}
+
 export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResult> {
 	let copied = false;
-	fs.rmSync(indexedRootSidecarPath(opts.targetDbDir), { force: true });
 	if (opts.forceReindex) {
 		// Explicit full rebuild: drop the target and index with --force-reindex.
 		if (fs.existsSync(opts.targetDbDir)) fs.rmSync(opts.targetDbDir, { recursive: true, force: true });
@@ -117,6 +159,12 @@ export async function hotStartIndex(opts: HotStartOptions): Promise<HotStartResu
 		// Re-key copied rows to the checkout subtree (see pathPrefix above).
 		if (opts.pathPrefix) await rekeyCopiedDbPaths(opts.targetDbDir, opts.pathPrefix);
 	}
+	// Claim the target db for THIS root before the engine ever opens it:
+	// pre-writing the sidecar (re-point when stale) keeps chunkhound out of
+	// its legacy-DB migration path — which would warn on every run — while
+	// the engine's own mismatch guard stays fully active.
+	writeIndexedRootClaim(opts.targetDbDir, opts.indexDir);
+
 	// No source: plain index — incremental top-up in place when the db exists, fresh otherwise.
 
 	const args = ["index", opts.indexDir, "--config", opts.configPath];
