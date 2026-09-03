@@ -71,7 +71,16 @@ type McpCmdCtx = {
 	};
 };
 
-async function connectEntry(
+/**
+ * Connect one sandbox entry over MCP and report the outcome — the single
+ * shared connect path for /ch-mcp (picker + argument forms) and the
+ * post-/chworktree "connect now?" prompt. Idempotent: an already-connected
+ * sandbox is reported and skipped. Daemon-mode connections are recorded in
+ * the session log (session-start auto-restore); API keys never enter the
+ * log. Never throws — failures surface through ui.notify, so a failed
+ * connect never fails the surrounding flow (the sandbox stays created).
+ */
+export async function connectEntry(
 	pi: ExtensionAPI,
 	ctx: McpCmdCtx,
 	state: PluginState,

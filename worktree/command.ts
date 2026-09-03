@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
 import { baselineDbDirFor, ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
@@ -13,9 +13,10 @@ import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
-import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../chhound/sandbox.js";
+import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, readClaimedRoot } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
-import type { ChhoundSettings, PluginState } from "../chhound/types.js";
+import type { ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
+import { connectEntry } from "../mcp/command.js";
 
 const HELP = [
 	"/chworktree [repo] [branch] [options]",
@@ -164,6 +165,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
 			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+			const wctx: WizardCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, ui: ctx.ui, pi };
 
 			if (flags["help"] || flags["h"]) {
 				notify(HELP, "info");
@@ -172,7 +174,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 			// ── Wizard mode: /chworktree [repo] with no branch and no flags ──
 			if (isWizardInvocation(positionals, flags)) {
-				await runWizard(ctx, state, positionals[0]);
+				await runWizard(wctx, state, positionals[0]);
 				return;
 			}
 
@@ -191,7 +193,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 					notify("A PR URL takes no branch argument — the sandbox branch is pull/<n>.", "error");
 					return;
 				}
-				await runPrOneGo(ctx, state, prFromArg, flags, dest);
+				await runPrOneGo(wctx, state, prFromArg, flags, dest);
 				return;
 			}
 			const requestedPath = wtArg ? path.resolve(ctx.cwd, wtArg) : undefined;
@@ -275,7 +277,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			const loc = await oneGoLocation(repoRoot, branch ?? createBranch ?? remoteRef, settings, dest, notify);
 			if (!loc) return; // refused (notified)
 
-			await createIndexedWorktree(ctx, state, {
+			await createIndexedWorktree(wctx, state, {
 				repoRoot,
 				sandboxDir: loc.sandboxDir,
 				wtPath: loc.wtPath,
@@ -338,7 +340,7 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 
 /** Shared worktree creation: sandbox dir → git add → baseline → config → top-up → meta. */
 async function createIndexedWorktree(
-	ctx: { cwd: string; hasUI: boolean; ui: WizardUI },
+	ctx: WizardCtx,
 	state: PluginState,
 	opts: {
 		repoRoot: string;
@@ -490,7 +492,7 @@ async function createIndexedWorktree(
 		}
 
 		// 4) Meta + summary — meta.json lives in the state dir, not the index root.
-		writeSandboxMeta(sandboxStateDir(sandboxDir), {
+		const meta: SandboxMeta = {
 			version: 1,
 			worktree: wtPath,
 			repoRoot,
@@ -503,7 +505,8 @@ async function createIndexedWorktree(
 			dbPath: dbDir,
 			...(opts.headRef ? { headRef: opts.headRef } : {}),
 			...(opts.headOid ? { headOid: opts.headOid } : {}),
-		});
+		};
+		writeSandboxMeta(sandboxStateDir(sandboxDir), meta);
 		notify(
 			[
 				`✓ ${branchNote} @ ${wtPath} indexed (${result.copied ? "baseline copy + top-up" : "full index"}) in ${formatElapsed(progress.elapsed())}.`,
@@ -515,6 +518,37 @@ async function createIndexedWorktree(
 			].join("\n"),
 			"info",
 		);
+		// Single chokepoint for all four entry paths: offer the MCP connect (the
+		// /ch-mcp equivalent, daemon mode + session-log record) right after a
+		// successful index. Headless runs (no UI) skip silently — the "Next:
+		// chunkhound mcp …" tip above stays for them. connectEntry is the SAME
+		// shared helper /ch-mcp uses — dedup, connect, record, notify — so the
+		// prompt path can never drift from the command's behavior. A failed
+		// connect is notified but never fails the worktree creation.
+		if (ctx.hasUI) {
+			const id = path.basename(sandboxDir);
+			const connect = await ctx.ui.confirm(
+				"Connect to this worktree via MCP now?",
+				`${id} → ${wtPath}\n` +
+					"Registers the chh_* MCP tools (as /ch-mcp does) and reconnects automatically on the next session start.\n" +
+					`Stop it anytime with /ch-mcp ${id} --disconnect.`,
+			);
+			if (connect) {
+				await connectEntry(
+					ctx.pi,
+					ctx,
+					state,
+					{
+						dir: sandboxDir,
+						stateDir: sandboxStateDir(sandboxDir),
+						meta,
+						dbSizeBytes: dirSize(dbDir),
+						claimedRoot: readClaimedRoot(dbDir),
+					},
+					{},
+				);
+			}
+		}
 	} catch (err) {
 		notify(`/chworktree failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 	} finally {
@@ -528,6 +562,7 @@ type WizardUI = ProgressUICtx["ui"] & {
 	notify(msg: string, type: "info" | "warning" | "error"): void;
 	input(title: string, placeholder?: string): Promise<string | undefined>;
 	select(title: string, options: string[]): Promise<string | undefined>;
+	confirm(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean>;
 	custom?: PathPromptUI["custom"];
 };
 
@@ -538,8 +573,8 @@ function prSlot(number: number): string {
 	return `pull/${number}`;
 }
 
-/** Wizard ctx slice the prompt/flow helpers need. */
-type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI };
+/** Wizard ctx slice the prompt/flow helpers need (+ pi for the MCP connect). */
+type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI; pi: ExtensionAPI };
 
 async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string): Promise<void> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
