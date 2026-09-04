@@ -46,7 +46,7 @@ import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } f
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildWidgetLines, classifyChhoundLine, filledCells, formatBytes, groupDigits } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
-import { isWizardInvocation, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
+import { isWizardInvocation, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -206,6 +206,7 @@ async function main(): Promise<void> {
 		check("one-go: -b given", isWizardInvocation([], { b: "x" }) === false);
 		check("wizard: --help is not wizard", isWizardInvocation(["repo"], { help: true }) === false);
 		check("wizard: -h is not wizard", isWizardInvocation(["repo"], { h: true }) === false);
+		check("repo picker title wording", REPO_PICKER_TITLE === "Select a repository", REPO_PICKER_TITLE);
 
 		// Design 1: the checkout lives INSIDE its sandbox dir — name derived
 		// from repo + branch, folder = branch (slashes → "-").
@@ -240,9 +241,9 @@ async function main(): Promise<void> {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 		const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
 		const themeStub = { fg: (_c: string, t: string) => t };
-		const makeComp = (startValue?: string) => {
+		const makeComp = (startValue?: string, includeFiles?: boolean) => {
 			let out: string | undefined = "unset";
-			const c = new PathInputComponent(tuiStub, themeStub, getKeybindings(), { title: "p", cwd: pathProj, ...(startValue ? { startValue } : {}) }, (v) => {
+			const c = new PathInputComponent(tuiStub, themeStub, getKeybindings(), { title: "p", cwd: pathProj, ...(startValue ? { startValue } : {}), ...(includeFiles ? { includeFiles } : {}) }, (v) => {
 				out = v;
 			});
 			return { c, out: () => out };
@@ -267,8 +268,9 @@ async function main(): Promise<void> {
 		comp4.handleInput("/");
 		check("~ expansion in dialog completions", comp4.currentCompletions().length > 0 && comp4.currentCompletions().every((c) => c.value.startsWith("~/")));
 
-		// List navigation: ↑/↓ move the selection (wrapping), TAB/Enter-after-↑↓
-		// accept the SELECTED item, typing resets to the first item. Fixture dirs
+		// List navigation: ↑/↓ move the ▸ row (clamped, no wrap) and MIRROR it
+		// into the field, so Enter always confirms the highlighted entry once
+		// the list was used; TAB drills into the selected row. Fixture dirs
 		// sort as docs/, src/.
 		const { c: comp5, out: comp5Out } = makeComp();
 		comp5.handleInput("\x1b[B"); // ↓ → src/
@@ -278,27 +280,102 @@ async function main(): Promise<void> {
 		check("enter after accept submits the value", comp5Out() === "src/", String(comp5Out()));
 		const { c: comp6, out: comp6Out } = makeComp();
 		comp6.handleInput("\x1b[B"); // ↓ → src/
+		check("arrow down mirrors the row into the field", comp6.getValue() === "src/", comp6.getValue());
 		comp6.handleInput("\n");
 		check("enter accepts selected item after navigation", comp6Out() === "src/", String(comp6Out()));
 		const { c: comp7 } = makeComp();
-		comp7.handleInput("\x1b[A"); // ↑ at top wraps to last (src/)
-		comp7.handleInput("\t");
-		check("arrow up at top wraps to last item", comp7.getValue() === "src/", comp7.getValue());
+		comp7.handleInput("\x1b[A"); // ↑ at top: clamped on first row (docs/)
+		check("arrow up at top stays on first row, field follows", comp7.getValue() === "docs/", comp7.getValue());
 		const { c: comp8 } = makeComp();
 		comp8.handleInput("\x1b[B");
-		comp8.handleInput("\x1b[B"); // ↓ at bottom wraps to first (docs/)
-		comp8.handleInput("\t");
-		check("arrow down at bottom wraps to first item", comp8.getValue() === "docs/", comp8.getValue());
+		comp8.handleInput("\x1b[B"); // ↓ at bottom: clamped on last row (src/)
+		check("arrow down at bottom stays on last row", comp8.getValue() === "src/", comp8.getValue());
 		const { c: comp9 } = makeComp();
-		comp9.handleInput("\x1b[B"); // selection on src/
-		comp9.handleInput("d"); // typing resets selection
-		comp9.handleInput("\t");
-		check("typing resets selection to first item", comp9.getValue() === "docs/", comp9.getValue());
+		comp9.handleInput("\x1b[B"); // field mirrors src/
+		comp9.handleInput("d"); // typing APPENDS at the caret (end of mirrored path)
+		check("typing after ↓ edits the mirrored path at its end", comp9.getValue() === "src/d", comp9.getValue());
+		check("typing refilters from the edited path", comp9.currentCompletions().length === 0, JSON.stringify(comp9.currentCompletions()));
 		const { c: comp10 } = makeComp();
 		comp10.handleInput("zz"); // no completions
 		comp10.handleInput("\x1b[B");
 		comp10.handleInput("\x1b[A");
 		check("arrows with empty list are inert", comp10.getValue() === "zz", comp10.getValue());
+
+		// Caret-only moves (←/→) must NOT tear down the navigation snapshot.
+		// (Runs before big/ is added to the fixture: root lists docs/, src/.)
+		const { c: leftComp } = makeComp();
+		leftComp.handleInput("\x1b[B"); // mirror src/ into the field
+		leftComp.handleInput("\x1b[D"); // ←: caret move, value unchanged
+		check("caret moves keep the snapshot and selection", leftComp.getValue() === "src/" && leftComp.currentCompletions().length === 2 && leftComp.currentCompletions()[0]!.value === "docs/", `${leftComp.getValue()} ${JSON.stringify(leftComp.currentCompletions())}`);
+		const { c: leftTyping } = makeComp();
+		leftTyping.handleInput("\x1b[B");
+		leftTyping.handleInput("\x1b[D");
+		leftTyping.handleInput("x"); // now the value changes → refilter from the caret
+		check("a real edit after caret move refilters from the caret", leftTyping.getValue() === "srcx/", leftTyping.getValue());
+
+		// Browsing long directories: the model holds the FULL list; the 12-row
+		// window scrolls with the ▸ row; PgUp/PgDn page. Fixture: big/ with
+		// d00..d19 (created after the assertions above, which only saw src/,
+		// docs/).
+		const big = path.join(pathProj, "big");
+		fs.mkdirSync(big);
+		for (let i = 0; i < 20; i++) fs.mkdirSync(path.join(big, `d${String(i).padStart(2, "0")}`));
+		// A file at the root — invisible to dir-only listings above; includeFiles
+		// mode (e.g. --config) lists it after the directories.
+		fs.writeFileSync(path.join(pathProj, "a.txt"), "x");
+		const { c: bigComp, out: bigOut } = makeComp();
+		bigComp.handleInput("b");
+		bigComp.handleInput("i");
+		bigComp.handleInput("g");
+		bigComp.handleInput("/");
+		check("browser model holds the FULL list (no 12-cap)", bigComp.currentCompletions().length === 20, `model=${bigComp.currentCompletions().length}`);
+		check("viewport renders 12 rows + chrome", bigComp.children.length === 6 + 12 + 1, `children=${bigComp.children.length}`);
+		for (let i = 0; i < 13; i++) bigComp.handleInput("\x1b[B");
+		check("↓×13 reaches row 13 (window slides)", bigComp.getValue() === "big/d13/", bigComp.getValue());
+		check("viewport stays 12 rows while scrolling", bigComp.children.length === 6 + 12 + 1, `children=${bigComp.children.length}`);
+		const rendered = bigComp.render(80).join("\n");
+		check("viewport shows the window rows (scrolled-off rows hidden)", !rendered.includes("d00/") && !rendered.includes("d01/") && rendered.includes("d02/"), rendered.split("\n").slice(6, 6 + 12).join(" | "));
+		check("▸ marker follows the selected row through the window", rendered.includes("▸ d13/"), rendered.split("\n").slice(6, 6 + 12).join(" | "));
+		bigComp.handleInput("\n");
+		check("enter commits the scrolled-to entry", bigOut() === "big/d13/", String(bigOut()));
+		const { c: pageComp } = makeComp();
+		pageComp.handleInput("b");
+		pageComp.handleInput("i");
+		pageComp.handleInput("g");
+		pageComp.handleInput("/");
+		pageComp.handleInput("\x1b[6~"); // PgDn → row 12
+		check("PgDn pages one window down", pageComp.getValue() === "big/d12/", pageComp.getValue());
+		pageComp.handleInput("\x1b[6~"); // PgDn again → clamped at last (d19)
+		check("PgDn clamps at the last row", pageComp.getValue() === "big/d19/", pageComp.getValue());
+		pageComp.handleInput("\x1b[5~"); // PgUp → row 7
+		check("PgUp pages one window up", pageComp.getValue() === "big/d07/", pageComp.getValue());
+
+		// Caret-after-prefill: typing must APPEND (caret at end), not insert at 0.
+		const { c: caretComp, out: caretOut } = makeComp(pathProj + "/");
+		caretComp.handleInput("s");
+		check("prefill caret sits at end: typing appends", caretComp.getValue() === pathProj + "/s", caretComp.getValue());
+		caretComp.handleInput("\n");
+		check("enter commits the appended path", caretOut() === pathProj + "/s", String(caretOut()));
+
+		// Single-row list: ↓ mirror fires even when the index cannot move.
+		const { c: singleComp, out: singleOut } = makeComp();
+		singleComp.handleInput("s");
+		singleComp.handleInput("r"); // list = [src/] only (prefix filter)
+		singleComp.handleInput("\x1b[B");
+		check("↓ on a single-row list mirrors the row into the field", singleComp.getValue() === "src/", singleComp.getValue());
+		singleComp.handleInput("\n");
+		check("enter after ↓ commits the single row", singleOut() === "src/", String(singleOut()));
+
+		// includeFiles mode: the TAB hint follows the SELECTED row (dir = drills
+		// in, file = fills). Root rows sort as big/, docs/, src/, a.txt.
+		const { c: fileComp } = makeComp(undefined, true);
+		const fileRender = () => fileComp.render(80).join("\n");
+		const tabLine = () => fileRender().split("\n").find((l) => l.includes("TAB")) ?? "";
+		check("includeFiles lists files after dirs", fileComp.currentCompletions().length === 4 && fileComp.currentCompletions().every((c, i) => (i < 3 ? c.value.endsWith("/") : c.value === "a.txt")), JSON.stringify(fileComp.currentCompletions()));
+		check("hint on a selected dir says TAB drills in", fileRender().includes("TAB drills in"), tabLine());
+		for (let i = 0; i < 6 && fileComp.getValue() !== "a.txt"; i++) fileComp.handleInput("\x1b[B");
+		check("navigation reaches the file row", fileComp.getValue() === "a.txt", fileComp.getValue());
+		check("hint on the selected file says TAB fills", fileRender().includes("TAB fills"), tabLine());
 
 		// Generic prefilled text prompt (wizard defaults): prefill, confirm, cancel.
 		const { TextPromptComponent } = await import("../chhound/path-input.js");

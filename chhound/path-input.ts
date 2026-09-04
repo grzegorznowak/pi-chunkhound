@@ -5,10 +5,14 @@ import { dirCompletions, type CompletionItem } from "./completions.js";
 /**
  * Plugin-owned text input with the command-line dir-picker completion
  * mechanism: same dirCompletions rules — dirs only, trailing "/", ~
- * expansion, drill-down — ↑/↓ move the selection (wrapping, like pi's own
- * select lists), TAB accepts the selected item (whole-value replace, like
- * pi's applyCompletion), Enter confirms (the selected item once ↑/↓ was
- * used, otherwise the typed value), Esc cancels.
+ * expansion, drill-down. ↑/↓ (and PgUp/PgDn to page long listings) move the
+ * ▸ row and MIRROR the highlighted entry into the field, so Enter always
+ * confirms what the field shows — the highlighted row after navigating, the
+ * typed/prefilled value otherwise (no silent "Enter ignores the ▸ row").
+ * TAB accepts the selected item (whole-value replace, like pi's
+ * applyCompletion) and drills into it, Esc cancels. The completion model
+ * holds the FULL filtered list rendered through a 12-row scroll window:
+ * no truncation, no wrap, every entry reachable.
  *
  * pi's own ctx.ui.input has NO completion support (plain
  * ExtensionInputComponent), so this component is the only plugin-side way to
@@ -21,9 +25,20 @@ import { dirCompletions, type CompletionItem } from "./completions.js";
  * chrome-less box over the chat instead of showing in the prompt field.
  */
 
+/** Rows of the completion viewport (the model holds the full filtered list). */
 const MAX_VISIBLE = 12;
 /** Children before the completion list: border, title, spacer, input, spacer, hint. */
 const FIXED_CHILDREN = 6;
+
+/**
+ * pi-tui's Input: setValue keeps the cursor at min(cursor, value.length) —
+ * i.e. at 0 on a fresh field — and the typings mark `cursor` private even
+ * though it is a public runtime field. Move it to the end so typing appends
+ * to prefilled/mirrored values instead of requiring cursor juggling first.
+ */
+function caretToEnd(input: Input): void {
+	(input as unknown as { cursor: number }).cursor = input.getValue().length;
+}
 
 export interface PathInputOptions {
 	title: string;
@@ -235,10 +250,10 @@ export class PathInputComponent extends Container {
 	private readonly opts: PathInputOptions;
 	private readonly hint: Text;
 	private completions: CompletionItem[] = [];
-	/** Currently selected completion (the ▸ row; TAB/Enter-after-↑↓ accept it). */
+	/** Currently selected completion (the ▸ row; navigation mirrors it into the field, TAB drills into it). */
 	private selectedIndex = 0;
-	/** True once ↑/↓ was used — Enter then accepts the selection, not the raw text. */
-	private selectionMoved = false;
+	/** First row of the viewport window (index into completions). */
+	private scrollOffset = 0;
 	private _focused = false;
 
 	constructor(
@@ -264,6 +279,7 @@ export class PathInputComponent extends Container {
 		// Completions + bottom border are appended by refresh() (which keeps the
 		// bottom border as the LAST child, after the live list).
 		this.input.setValue(opts.startValue ?? "");
+		caretToEnd(this.input);
 		this.refresh();
 	}
 
@@ -287,27 +303,27 @@ export class PathInputComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
-		// ↑/↓ move the completion selection (wrapping, like pi's select lists);
-		// with an empty list they fall through to the Input (inert there).
-		if (this.kb.matches(keyData, "tui.select.up") || this.kb.matches(keyData, "tui.select.down")) {
-			if (this.completions.length > 0) {
-				const delta = this.kb.matches(keyData, "tui.select.down") ? 1 : -1;
-				this.selectedIndex =
-					(this.selectedIndex + delta + this.completions.length) % this.completions.length;
-				this.selectionMoved = true;
-				this.refresh();
-			}
+		// ↑/↓ (and PgUp/PgDn) navigate the ▸ row; with an empty list they fall
+		// through to the Input (inert there). Navigation does NOT re-filter the
+		// list from the field — the list stays the current directory snapshot;
+		// only typing or TAB (drill-down) recompute it.
+		const down = this.kb.matches(keyData, "tui.select.down");
+		const up = this.kb.matches(keyData, "tui.select.up");
+		if (down || up) {
+			if (this.completions.length > 0) this.moveSelection(down ? 1 : -1);
+			return;
+		}
+		const pageDown = this.kb.matches(keyData, "tui.select.pageDown");
+		const pageUp = this.kb.matches(keyData, "tui.select.pageUp");
+		if (pageDown || pageUp) {
+			if (this.completions.length > 0) this.moveSelection(pageDown ? MAX_VISIBLE : -MAX_VISIBLE);
 			return;
 		}
 		if (this.kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
-			// After ↑/↓ navigation Enter SUBMITS the selected item (like pi's
-			// select lists); otherwise it confirms whatever is in the field.
-			// (TAB is the "fill the field, keep navigating" action.)
-			if (this.selectionMoved && this.completions.length > 0) {
-				this.done(this.completions[this.selectedIndex]!.value);
-			} else {
-				this.done(this.input.getValue());
-			}
+			// Enter always confirms what the field shows. ↑/↓/PgUp/PgDn mirror
+			// the ▸ row into the field, so after navigating they agree; without
+			// navigation Enter confirms the typed/prefilled value.
+			this.done(this.input.getValue());
 			return;
 		}
 		if (this.kb.matches(keyData, "tui.select.cancel")) {
@@ -318,44 +334,89 @@ export class PathInputComponent extends Container {
 			if (this.completions.length > 0) this.accept(this.selectedIndex);
 			return;
 		}
-		// Anything else edits the field: reset the selection, recompute.
-		this.selectedIndex = 0;
-		this.selectionMoved = false;
+		// Anything else goes to the field editor. The completion snapshot
+		// survives caret-only moves (←/→/Home/End — value unchanged): only a
+		// real value change resets the selection + scroll and recomputes the
+		// list from the edited value.
+		const before = this.input.getValue();
 		this.input.handleInput(keyData);
-		this.refresh();
+		if (this.input.getValue() !== before) {
+			this.selectedIndex = 0;
+			this.scrollOffset = 0;
+			this.refresh();
+		}
 	}
 
-	/** Whole-value replace with the selected completion (like pi's applyCompletion). */
+	/**
+	 * Move the ▸ row by `delta` (clamped at the ends — no wrap) and mirror the
+	 * highlighted entry into the field. Mirroring even when the index did not
+	 * move (single-row list / at an edge) makes Enter-after-↓ always commit the
+	 * highlighted row, never stale field text.
+	 */
+	private moveSelection(delta: number): void {
+		const last = this.completions.length - 1;
+		this.selectedIndex = Math.min(last, Math.max(0, this.selectedIndex + delta));
+		const item = this.completions[this.selectedIndex];
+		if (item) {
+			this.input.setValue(item.value);
+			caretToEnd(this.input);
+		}
+		this.renderList();
+	}
+
+	/** Whole-value replace with the selected completion (drill-down, like pi's applyCompletion). */
 	private accept(index: number): void {
 		const item = this.completions[index];
 		if (!item) return;
 		this.input.setValue(item.value);
+		caretToEnd(this.input);
 		this.selectedIndex = 0;
-		this.selectionMoved = false;
+		this.scrollOffset = 0;
 		this.refresh();
 	}
 
+	/** Recompute the completion model from the field value (full list, no cap). */
 	private refresh(): void {
 		this.completions = dirCompletions(this.input.getValue(), this.opts.cwd, {
 			includeFiles: this.opts.includeFiles,
 			paramLabel: this.opts.paramLabel,
-			limit: MAX_VISIBLE,
+			// The dialog must not truncate: the 12-row cap is a VIEWPORT (see
+			// renderList) — entries beyond it stay reachable via ↑/↓ + PgUp/PgDn.
+			limit: Number.POSITIVE_INFINITY,
 		});
 		// Keep the selection valid when the list shrank (e.g. typing narrowed it).
 		if (this.selectedIndex >= this.completions.length) this.selectedIndex = 0;
+		this.renderList();
+	}
+
+	/** Rebuild the visible rows (12-row scroll window) + hint + bottom border. */
+	private renderList(): void {
 		// Drop the old completion lines AND the old bottom border (both live
-		// after FIXED_CHILDREN), then rebuild list + bottom border.
+		// after FIXED_CHILDREN), then rebuild window + bottom border.
 		while (this.children.length > FIXED_CHILDREN) this.removeChild(this.children[this.children.length - 1]!);
-		this.completions.forEach((c, i) => {
-			const marker = i === this.selectedIndex ? this.theme.fg("accent", "▸") : " ";
+		// Keep the ▸ row inside the window.
+		if (this.completions.length <= MAX_VISIBLE) {
+			this.scrollOffset = 0;
+		} else if (this.selectedIndex < this.scrollOffset) {
+			this.scrollOffset = this.selectedIndex;
+		} else if (this.selectedIndex >= this.scrollOffset + MAX_VISIBLE) {
+			this.scrollOffset = this.selectedIndex - MAX_VISIBLE + 1;
+		}
+		const window = this.completions.slice(this.scrollOffset, this.scrollOffset + MAX_VISIBLE);
+		window.forEach((c, i) => {
+			const marker = this.scrollOffset + i === this.selectedIndex ? this.theme.fg("accent", "▸") : " ";
 			this.addChild(new Text(`${marker} ${c.label}`, 1, 0));
 		});
 		this.addChild(new BorderLine(this.theme));
+		const nav =
+			this.completions.length > MAX_VISIBLE ? "↑/↓ scroll · PgUp/PgDn page" : "↑/↓ move";
+		const selected = this.completions[this.selectedIndex];
+		const tabWord = selected && !selected.value.endsWith("/") ? "TAB fills" : "TAB drills in";
 		this.hint.setText(
 			this.completions.length > 0
 				? this.theme.fg(
 						"dim",
-						`▸ ${this.completions[this.selectedIndex]!.label.replace(/\/+$/, "")} · ↑/↓ move · TAB accepts · Enter confirms · Esc cancels`,
+						`▸ ${this.completions[this.selectedIndex]!.label.replace(/\/+$/, "")} · ${nav} · ${tabWord} · Enter confirms · Esc cancels`,
 					)
 				: this.theme.fg("dim", "Enter confirms · Esc cancels"),
 		);

@@ -672,6 +672,8 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 
 const OTHER_REPO = "type a path…";
 const PICK_PR = "a pull request — paste its GitHub URL";
+/** Title of the bare-/chworktree repo-source picker (exported for smoke). */
+export const REPO_PICKER_TITLE = "Select a repository";
 
 /** Repo picker for bare /chworktree: current repo + library repos, a PR (URL
  * prompt), or a typed path. */
@@ -692,7 +694,7 @@ async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined
 		}
 	}
 	const options = [...candidates.keys(), PICK_PR, OTHER_REPO];
-	const choice = await ctx.ui.select("Which repo? (new chunkhound-tracked branch)", options);
+	const choice = await ctx.ui.select(REPO_PICKER_TITLE, options);
 	if (choice === undefined) {
 		notify("Cancelled.", "info");
 		return undefined;
