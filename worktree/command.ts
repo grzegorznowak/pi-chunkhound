@@ -670,7 +670,7 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 	});
 }
 
-const OTHER_REPO = "type a path…";
+export const OTHER_REPO = "select local repository";
 const PICK_PR = "a pull request — paste its GitHub URL";
 /** Title of the bare-/chworktree repo-source picker (exported for smoke). */
 export const REPO_PICKER_TITLE = "Select a repository";

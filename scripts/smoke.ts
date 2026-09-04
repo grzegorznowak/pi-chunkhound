@@ -46,7 +46,7 @@ import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } f
 import { PathInputComponent } from "../chhound/path-input.js";
 import { buildWidgetLines, classifyChhoundLine, filledCells, formatBytes, groupDigits } from "../chhound/progress.js";
 import type { ProgressState } from "../chhound/progress.js";
-import { isWizardInvocation, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
+import { isWizardInvocation, OTHER_REPO, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -207,6 +207,7 @@ async function main(): Promise<void> {
 		check("wizard: --help is not wizard", isWizardInvocation(["repo"], { help: true }) === false);
 		check("wizard: -h is not wizard", isWizardInvocation(["repo"], { h: true }) === false);
 		check("repo picker title wording", REPO_PICKER_TITLE === "Select a repository", REPO_PICKER_TITLE);
+		check("repo picker path-option wording", OTHER_REPO === "select local repository", OTHER_REPO);
 
 		// Design 1: the checkout lives INSIDE its sandbox dir — name derived
 		// from repo + branch, folder = branch (slashes → "-").
