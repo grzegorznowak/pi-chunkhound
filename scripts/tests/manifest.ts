@@ -9,6 +9,7 @@ export interface TestClassification {
 /** Every discovered test must have exactly one entry here. */
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"acceptance/legacy-smoke.test.ts": { tier: "acceptance", subject: "legacy-smoke" },
+	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 };

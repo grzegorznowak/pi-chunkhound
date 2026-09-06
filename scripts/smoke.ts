@@ -9,7 +9,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import { ensureBaseline, listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
-import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
+import { materializeConfig } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, defaultRemoteBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
@@ -358,112 +358,6 @@ async function main(): Promise<void> {
 		tp10.handleInput("\x1b[D");
 		tp10.handleInput("x");
 		check("cursor movement marks prefill touched (insert at cursor)", tp10.getValue() === "xvoyageai", tp10.getValue());
-	}
-
-	// ── 3. adoptConfigFile strips secrets ─────────────────────────────
-	section("adoptConfigFile");
-	{
-		const cfgPath = path.join(tmp, "existing-chhound.json");
-		fs.writeFileSync(
-			cfgPath,
-			JSON.stringify({
-				embedding: { provider: "voyageai", model: "voyage-3.5", rerank_model: "rerank-2.5", api_key: "sk-SECRET" },
-				indexing: { include: ["**/*.rs"], per_file_timeout_seconds: 8 },
-				database: { provider: "duckdb", path: "/ignored" },
-			}),
-		);
-		const { adopted, warnings } = adoptConfigFile(cfgPath, tmp);
-		check("embedding folded", adopted.embedding?.provider === "voyageai" && adopted.embedding?.model === "voyage-3.5");
-		check("rerank_model mapped", adopted.embedding?.rerankModel === "rerank-2.5");
-		check("api_key adopted into settings", adopted.embedding?.apiKey === "sk-SECRET");
-		check("api_key adoption noted", warnings.some((w) => w.includes("api_key")), warnings.join("; "));
-		check("database warning", warnings.some((w) => w.includes("database")));
-	}
-
-	// ── 3. materializeConfig ──────────────────────────────────────────
-	section("materializeConfig");
-	{
-		const dir = path.join(tmp, "cfg-out");
-		const dbDir = path.join(dir, ".chhound.db");
-		const p = materializeConfig(dir, { settings, dbDir });
-		check("config materialized with canonical name", path.basename(p) === ".chunkhound.json", path.basename(p));
-		const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
-		const db = cfg.database as Record<string, unknown>;
-		check("duckdb pinned", db.provider === "duckdb" && db.path === dbDir);
-		check("no api_key without key in settings", JSON.stringify(cfg).includes("api_key") === false);
-		const excludes = (cfg.indexing as Record<string, unknown>).exclude as string[];
-		check("chhound exclusion guaranteed", excludes.includes("**/.chhound/**"));
-
-		// With a key in settings, the materialized config carries it (v1) — 0600.
-		const dir2 = path.join(tmp, "cfg-keyed");
-		const p2 = materializeConfig(dir2, { settings: { ...settings, embedding: { apiKey: "sk-KEY" } }, dbDir: path.join(dir2, ".chhound.db") });
-		const cfg2 = JSON.parse(fs.readFileSync(p2, "utf8")) as Record<string, unknown>;
-		check("api_key materialized when set", (cfg2.embedding as Record<string, unknown>).api_key === "sk-KEY");
-		check("config file 0600", (fs.statSync(p2).mode & 0o777) === 0o600, `mode=${(fs.statSync(p2).mode & 0o777).toString(8)}`);
-
-		// LLM section (research tools) + preserve of non-owned sections.
-		const dir3 = path.join(tmp, "cfg-llm");
-		const p3 = materializeConfig(dir3, {
-			settings: { ...settings, llm: { provider: "openai", model: "gpt-5", apiKey: "sk-LLM" } },
-			dbDir: path.join(dir3, ".chhound.db"),
-		});
-		const cfg3 = JSON.parse(fs.readFileSync(p3, "utf8")) as Record<string, unknown>;
-		const llm3 = cfg3.llm as Record<string, unknown>;
-		check(
-			"llm block materialized",
-			llm3?.provider === "openai" &&
-				llm3?.model === "gpt-5" &&
-				llm3?.api_key === "sk-LLM" &&
-				llm3?.codex_reasoning_effort_utility === "minimal" &&
-				llm3?.codex_reasoning_effort_synthesis === "high" &&
-				llm3?.timeout === 300,
-			JSON.stringify(cfg3),
-		);
-		check("llm defaults present without llm settings", (() => {
-			const p = materializeConfig(dir3, { settings: { ...settings, llm: { provider: "openai" } }, dbDir: path.join(dir3, ".chhound.db") });
-			const llm = (JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>).llm as Record<string, unknown>;
-			return llm?.codex_reasoning_effort_synthesis === "high" && llm?.timeout === 300;
-		})());
-		const p3b = materializeConfig(dir3, {
-			settings,
-			dbDir: path.join(dir3, ".chhound.db"),
-			preserve: { research: { enabled: true } },
-		});
-		const cfg3b = JSON.parse(fs.readFileSync(p3b, "utf8")) as Record<string, unknown>;
-		check("preserve merges extra sections", (cfg3b.research as Record<string, unknown>)?.enabled === true);
-		check("preserve does not carry llm (owned keys rewritten)", (cfg3b.llm as Record<string, unknown> | undefined) === undefined);
-
-		// Worktree-base suggestion rules: cwd is suggested unless it (or a
-		// parent) already contains a .chunkhound.json.
-		const wtProj = path.join(tmp, "wtbase");
-		const wtSub = path.join(wtProj, "sub");
-		fs.mkdirSync(wtSub, { recursive: true });
-		check("suggestWorktreeBase: clean cwd suggested", suggestWorktreeBase(wtProj) === wtProj, String(suggestWorktreeBase(wtProj)));
-		check("insideChunkhoundRoot: clean → false", insideChunkhoundRoot(wtProj) === false);
-		fs.writeFileSync(path.join(wtProj, ".chunkhound.json"), "{}");
-		check("insideChunkhoundRoot: own dir → true", insideChunkhoundRoot(wtProj) === true);
-		check("insideChunkhoundRoot: parent walk → true", insideChunkhoundRoot(wtSub) === true);
-		check("suggestWorktreeBase: inside root → undefined", suggestWorktreeBase(wtProj) === undefined);
-		check("suggestWorktreeBase: subdir of root also undefined", suggestWorktreeBase(wtSub) === undefined);
-
-		// output_dims: materialized when set, absent when unset.
-		const dir4 = path.join(tmp, "cfg-dims");
-		const p4 = materializeConfig(dir4, { settings: { ...settings, embedding: { provider: "voyageai", outputDims: 256 } }, dbDir: path.join(dir4, ".chhound.db") });
-		const cfg4 = JSON.parse(fs.readFileSync(p4, "utf8")) as Record<string, unknown>;
-		check("output_dims materialized", (cfg4.embedding as Record<string, unknown>).output_dims === 256, JSON.stringify(cfg4));
-		const p4b = materializeConfig(dir4, { settings, dbDir: path.join(dir4, ".chhound.db") });
-		const cfg4b = JSON.parse(fs.readFileSync(p4b, "utf8")) as Record<string, unknown>;
-		const emb4b = cfg4b.embedding as Record<string, unknown> | undefined;
-		check("no output_dims without setting", emb4b === undefined || emb4b.output_dims === undefined, JSON.stringify(cfg4b));
-
-		// --config adoption: llm section folds in, secrets warned.
-		const adoptSrc = path.join(tmp, "adopt.json");
-		fs.writeFileSync(adoptSrc, JSON.stringify({ embedding: { provider: "voyageai" }, llm: { provider: "anthropic", api_key: "sk-ADOPT" }, database: { provider: "duckdb" } }));
-		const adopted = adoptConfigFile(adoptSrc, tmp);
-		check("adopt folds llm section", adopted.adopted.llm?.provider === "anthropic" && adopted.adopted.llm?.apiKey === "sk-ADOPT");
-		check("adopt warns on llm api_key", adopted.warnings.some((w) => w.includes("llm.api_key")));
-		const folded = foldAdoptedInto({ version: 1 }, adopted.adopted);
-		check("foldAdoptedInto carries llm", folded.llm?.provider === "anthropic");
 	}
 
 	// ── 4. scratch git repo + baseline prime ─────────────────────────
