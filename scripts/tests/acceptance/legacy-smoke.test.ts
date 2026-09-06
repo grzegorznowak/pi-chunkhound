@@ -23,6 +23,14 @@ function waitForClose(child: ChildProcess): Promise<{ code: number | null; signa
 	});
 }
 
+/** Failure-focused excerpt: FAIL lines, crash lines and the passing tally. */
+function failureFocus(text: string): string {
+	const lines = text.split("\n");
+	const relevant = lines.filter((line) => line.includes("FAIL ") || line.includes("smoke crashed") || /\/\d+ checks passed$/.test(line.trim()));
+	const tail = lines.slice(-3).join("\n");
+	return [...relevant, ...(relevant.length ? [] : [tail])].join("\n") || text.slice(-1000);
+}
+
 async function stopChild(child: ChildProcess): Promise<void> {
 	if (child.exitCode !== null || child.signalCode !== null) return;
 	const closed = waitForClose(child);
@@ -52,7 +60,7 @@ test("remaining legacy smoke obligations", { timeout: 300_000 }, async (t) => {
 			child.stdout?.on("data", append);
 			child.stderr?.on("data", append);
 			const closed = waitForClose(child);
-			closed.then(({ code, signal }) => code === 0 ? resolve(text) : reject(new Error(`legacy smoke exit=${code} signal=${signal}; output tail:\n${redact(text)}`)), reject);
+			closed.then(({ code, signal }) => code === 0 ? resolve(text) : reject(new Error(`legacy smoke exit=${code} signal=${signal}; focus:\n${redact(failureFocus(text))}`)), reject);
 		});
 		assert.ok(!output.includes("FAIL "), "legacy smoke reported FAIL");
 		assert.ok(!output.includes("smoke crashed"), "legacy smoke crashed");
