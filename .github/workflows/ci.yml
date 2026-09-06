@@ -38,7 +38,12 @@ jobs:
           git clone "$CHUNKHOUND_REPOSITORY" .ci/chunkhound
           git -C .ci/chunkhound checkout "$CHUNKHOUND_COMMIT"
           test "$(git -C .ci/chunkhound rev-parse HEAD)" = "$CHUNKHOUND_COMMIT"
-          uv tool install --editable "$GITHUB_WORKSPACE/.ci/chunkhound"
+          # Pin the python MCP SDK: the engine @2ab77535 uses Server.call_tool,
+          # removed in mcp 2.x; a fresh uv resolution pulls 2.x and the engine
+          # dies at startup ("'Server' object has no attribute 'call_tool'").
+          # The developer's installed engine (5.2.2.dev20+gfba92db05) runs mcp
+          # 1.27.1; re-evaluate when the user branch lands upstream.
+          uv tool install --editable "$GITHUB_WORKSPACE/.ci/chunkhound" --with "mcp==1.27.1"
           "$UV_TOOL_BIN_DIR/chunkhound" --version
           echo "CHHOUND_BINARY=$UV_TOOL_BIN_DIR/chunkhound" >> "$GITHUB_ENV"
       - name: Warm engine runtime cache outside timed tests
