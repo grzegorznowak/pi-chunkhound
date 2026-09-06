@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { parseArgs, WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 
 import { ensureBaseline, listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
@@ -48,6 +49,11 @@ import { buildWidgetLines, classifyChhoundLine, filledCells, formatBytes, groupD
 import type { ProgressState } from "../chhound/progress.js";
 import { isWizardInvocation, OTHER_REPO, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
 import type { ChhoundSettings } from "../chhound/types.js";
+import { LIBRARY_VERSION, clearDiscoveryOnboardingMarker, hasDiscoveryOnboardingMarker, libraryPath, mergeLibraryEntry, readLibrary, setDiscoveryOnboardingMarker, upsertLibraryEntry, withLibraryLock, writeLibrary } from "../chhound/library.js";
+import { globalSettingsPath } from "../chhound/paths.js";
+import type { LibraryEntry } from "../chhound/library.js";
+import { deepSweep, fastPass, isManagedContainment, retriageEntry, runSetupDiscovery, selectAdoptable, sizeAskEligible, triage, verdictCopy } from "../chhound/discovery.js";
+import type { DiscoveryCandidate } from "../chhound/discovery.js";
 
 let checks = 0;
 let failures = 0;
@@ -60,6 +66,16 @@ function check(name: string, cond: boolean, detail = ""): void {
 	}
 }
 const section = (t: string) => console.log(`\n== ${t}`);
+
+// Runs one C1 scenario so RED failures surface per scenario without crashing
+// the sequential harness (production shells throw until green).
+async function c1Scenario(title: string, fn: () => Promise<void>): Promise<void> {
+	try { await fn(); }
+	catch (err) {
+		checks++; failures++;
+		console.log(`  FAIL ${title} — ${err instanceof Error ? err.message : String(err)}`);
+	}
+}
 
 async function main(): Promise<void> {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chhound-smoke-"));
@@ -1509,6 +1525,207 @@ async function main(): Promise<void> {
 		} finally {
 			restorePath();
 		}
+	}
+
+	// ── C1. discovery + personal catalog (RED-first fixture groups) ───
+	/* C1 coverage map (contract → scenarios):
+	 * 1 schema/concurrency → catalog schema; catalog malformed/future; catalog writers
+	 * 2 advisory re-triage → advisory current verdict       3 order → selection order
+	 * 4 fast pass → fast-pass host/fixed spots              5 sweep → deep-sweep tree/budgets
+	 * 6 matrix → triage matrix                              7 containment → containment aliases
+	 * 8 budgets → triage bounded files; deep-sweep budgets  9 setup → setup transaction
+	 * 10 S4 copy → verdict copy
+	 */
+	const c1Env = Object.fromEntries(["HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CHHOUND_SANDBOX_ROOT", "CHHOUND_BASE_ROOT", "CHHOUND_MIRROR_ROOT"].map((key) => [key, process.env[key]]));
+	const c1Root = path.join(tmp, "c1-discovery");
+	const c1Home = path.join(c1Root, "home");
+	const c1Repo = path.join(c1Root, "repo");
+	const c1Cwd = path.join(c1Root, "unrelated-cwd");
+	const c1Managed = ["managed-sandboxes", "managed-bases", "managed-mirrors"].map((n) => path.join(c1Root, n));
+	const c1Canary = "sk-chcanary-C1-fixture";
+	const c1Config = (dbPath: string) => JSON.stringify({ database: { path: dbPath }, embedding: { api_key: c1Canary } }) + "\n";
+	const plantC1 = (repoRoot: string, name: string, layout: "file" | "dir" = "file", claimRoot = repoRoot) => {
+		fs.mkdirSync(repoRoot, { recursive: true });
+		const configPath = layout === "file" ? path.join(repoRoot, name) : path.join(repoRoot, ".chunkhound", name);
+		const dbPath = layout === "file" ? path.join(repoRoot, ".chunkhound.db") : path.join(repoRoot, ".chunkhound", "chunks.db");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, c1Config(dbPath), { mode: 0o600 });
+		fs.writeFileSync(dbPath, "tiny duckdb seed", { mode: 0o600 });
+		fs.writeFileSync(`${dbPath}.root.json`, JSON.stringify({ version: 1, indexed_root_path: claimRoot }) + "\n", { mode: 0o600 });
+		return { repoRoot, configPath, dbPath, layout, sidecarRoot: claimRoot } satisfies DiscoveryCandidate;
+	};
+	const runC1Writer = (worker: string, entry: LibraryEntry) => new Promise<number>((resolve, reject) => {
+		const child = spawn(path.join(process.cwd(), "node_modules", ".bin", "tsx"), [worker, JSON.stringify(entry)], { env: process.env });
+		child.once("error", reject); child.once("exit", (code) => resolve(code ?? -1));
+	});
+	const waitC1File = async (file: string) => {
+		for (let n = 0; n < 200 && !fs.existsSync(file); n++) await new Promise((resolve) => setTimeout(resolve, 5));
+		if (!fs.existsSync(file)) throw new Error(`writer barrier was not reached: ${file}`);
+	};
+	fs.mkdirSync(c1Home, { recursive: true }); fs.mkdirSync(c1Repo, { recursive: true }); fs.mkdirSync(c1Cwd, { recursive: true });
+	process.env.HOME = c1Home; process.env.XDG_STATE_HOME = path.join(c1Root, "state"); process.env.XDG_CACHE_HOME = path.join(c1Root, "cache");
+	process.env.CHHOUND_SANDBOX_ROOT = c1Managed[0]; process.env.CHHOUND_BASE_ROOT = c1Managed[1]; process.env.CHHOUND_MIRROR_ROOT = c1Managed[2];
+	try {
+	const c1Candidate = plantC1(c1Repo, ".chunkhound.json");
+	const c1Entry: LibraryEntry = { ...c1Candidate, dbPath: c1Candidate.dbPath!, layout: "file", sidecarRoot: c1Repo, verdict: "adoptable", source: "fast-pass", addedAt: "2026-01-01T00:00:00.000Z", lastSeenAt: "2026-01-01T00:00:00.000Z" };
+	const c1Library = path.join(path.dirname(globalSettingsPath()), "library.json");
+
+	section("C1 catalog schema + concurrent merge (RED)");
+	await c1Scenario("C1 catalog schema: personal versioned entries are secret-free and deduplicated", async () => {
+		fs.mkdirSync(path.dirname(c1Library), { recursive: true });
+		const existing = { ...c1Entry, configPath: "/old/config.json", dbPath: "/old/db", lastSeenAt: "2026-01-01T00:00:01.000Z" };
+		fs.writeFileSync(c1Library, JSON.stringify({ version: 1, entries: [existing] }) + "\n", { mode: 0o600 });
+		const read = await readLibrary();
+		const merged = mergeLibraryEntry(read.catalog, c1Entry, new Date("2026-01-02T00:00:00.000Z"));
+		check("C1 catalog is beside global settings", libraryPath() === c1Library);
+		check("C1 catalog version and exact entry fields", merged.version === LIBRARY_VERSION && Object.keys(merged.entries[0]!).sort().join(",") === "addedAt,configPath,dbPath,lastSeenAt,layout,repoRoot,sidecarRoot,source,verdict");
+		check("C1 dedup refreshes current paths and lastSeenAt", merged.entries.length === 1 && merged.entries[0]!.dbPath === c1Entry.dbPath && merged.entries[0]!.lastSeenAt === "2026-01-02T00:00:00.000Z");
+		check("C1 catalog never serializes canary", !JSON.stringify(merged).includes(c1Canary));
+	});
+	await c1Scenario("C1 catalog malformed/future: sanitized advisory read and guarded write", async () => {
+		fs.mkdirSync(path.dirname(c1Library), { recursive: true });
+		const futureFixture = path.join(c1Root, "future-library.json"); const malformedEntryFixture = path.join(c1Root, "malformed-entry-library.json");
+		fs.writeFileSync(c1Library, `{ broken ${c1Canary}`, { mode: 0o600 });
+		fs.writeFileSync(futureFixture, JSON.stringify({ version: 99, entries: [c1Entry] }), { mode: 0o600 });
+		fs.writeFileSync(malformedEntryFixture, JSON.stringify({ version: 1, entries: [{ repoRoot: c1Repo, configPath: 9, secret: c1Canary }] }), { mode: 0o600 });
+		const malformed = await readLibrary();
+		check("C1 malformed JSON is empty advisory with sanitized issue", malformed.catalog.entries.length === 0 && !!malformed.issue && !malformed.issue.includes(c1Canary) && !malformed.issue.includes("Unexpected token"));
+		fs.copyFileSync(futureFixture, c1Library);
+		const future = await readLibrary();
+		let refused = false; try { await writeLibrary({ version: LIBRARY_VERSION, entries: [c1Entry] }); } catch { refused = true; }
+		check("C1 future version is empty advisory", future.catalog.entries.length === 0 && !!future.issue);
+		check("C1 future version write is refused", refused);
+		fs.copyFileSync(malformedEntryFixture, c1Library); const malformedEntries = await readLibrary();
+		check("C1 malformed catalog entries are dropped without exposing canaries", malformedEntries.catalog.entries.length === 0 && !malformedEntries.issue?.includes(c1Canary));
+		fs.writeFileSync(c1Library, JSON.stringify({ version: 1, entries: [] })); let oldWasParseable = false;
+		await writeLibrary({ version: LIBRARY_VERSION, entries: [c1Entry] }, { onPhase: (phase) => { if (phase === "beforeRename") oldWasParseable = JSON.parse(fs.readFileSync(c1Library, "utf8")).entries.length === 0; } });
+		check("C1 atomic temp-and-rename leaves parseable catalog", oldWasParseable && JSON.parse(fs.readFileSync(c1Library, "utf8")).entries.length === 1);
+	});
+	await c1Scenario("C1 catalog writers: real contending processes preserve both atomic updates", async () => {
+		const barrier = path.join(c1Root, "writer-barrier"); const worker = path.join(c1Root, "library-writer.ts");
+		fs.mkdirSync(path.dirname(c1Library), { recursive: true }); fs.writeFileSync(c1Library, JSON.stringify({ version: 1, entries: [] }));
+		await upsertLibraryEntry(c1Entry); // RED seam; green then executes the real child-writer race below.
+		fs.writeFileSync(worker, `import * as fs from 'node:fs'; import { upsertLibraryEntry } from ${JSON.stringify(path.resolve("chhound/library.ts"))};\nconst e=JSON.parse(process.argv[2]!); await upsertLibraryEntry(e,{onPhase:async p=>{if(p==='read'&&e.repoRoot.endsWith('one')){fs.writeFileSync(${JSON.stringify(barrier + ".first-ready")},'ready'); await new Promise(r=>{const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(barrier)})){clearInterval(t);r(undefined)}},5)})}}});`);
+		const one = { ...c1Entry, repoRoot: path.join(c1Root, "one") }; const two = { ...c1Entry, repoRoot: path.join(c1Root, "two") };
+		const first = runC1Writer(worker, one); await waitC1File(barrier + ".first-ready");
+		const second = runC1Writer(worker, two); fs.writeFileSync(barrier, "resume");
+		const codes = await Promise.all([first, second]); const raw = fs.readFileSync(c1Library, "utf8"); const final = JSON.parse(raw) as { entries: LibraryEntry[] };
+		check("C1 two writers exit successfully", codes.every((code) => code === 0), codes.join(","));
+		check("C1 concurrent merge retains both and JSON never tears", final.entries.map((e) => e.repoRoot).sort().join(",") === [one.repoRoot, two.repoRoot].sort().join(",") && JSON.parse(raw).version === 1);
+		let timedOut = false; try { await withLibraryLock(async () => new Promise<void>(() => {}), { lockTimeoutMs: 15 }); } catch { timedOut = true; }
+		check("C1 lock timeout is bounded and reported", timedOut);
+	});
+
+	section("C1 advisory catalog + selection order (RED)");
+	await c1Scenario("C1 advisory current verdict: moved/deleted/reappeared sources never retain stale suppression", async () => {
+		const staleDb = plantC1(path.join(c1Root, "stale-db"), ".chunkhound.json"); fs.renameSync(staleDb.dbPath!, staleDb.dbPath! + ".moved");
+		const staleConfig = plantC1(path.join(c1Root, "stale-config"), ".chunkhound.json"); fs.rmSync(staleConfig.configPath);
+		const staleSidecar = plantC1(path.join(c1Root, "stale-sidecar"), ".chunkhound.json"); fs.writeFileSync(`${staleSidecar.dbPath}.root.json`, JSON.stringify({ version: 1, indexed_root_path: path.join(c1Root, "other-root") }));
+		const reappeared = plantC1(path.join(c1Root, "reappeared"), ".chunkhound.json");
+		const [goneDb, goneConfig, replacedClaim, current] = await Promise.all([retriageEntry({ ...c1Entry, ...staleDb }), retriageEntry({ ...c1Entry, ...staleConfig }), retriageEntry({ ...c1Entry, ...staleSidecar }), retriageEntry({ ...c1Entry, ...reappeared, verdict: "unusable" })]);
+		check("C1 moved db and deleted config are dropped or currently unusable", (goneDb === undefined || goneDb.verdict === "unusable") && (goneConfig === undefined || goneConfig.verdict === "unusable"));
+		check("C1 replaced sidecar re-triages to current layout verdict", replacedClaim?.verdict === "layout-not-supported");
+		check("C1 historical unusable reappeared source is currently adoptable", current?.verdict === "adoptable");
+		check("C1 historical busy/unusable never suppresses retry or the current size ask", current?.verdict === "adoptable" && sizeAskEligible(goneDb) && !sizeAskEligible(current));
+	});
+	await c1Scenario("C1 selection order: fixed spots outrank catalog insertion and bad first does not block", async () => {
+		const bad = { ...c1Candidate, repoRoot: path.join(c1Root, "fixed-first") }; const good = { ...c1Candidate, repoRoot: path.join(c1Root, "fixed-later") };
+		const selected = selectAdoptable([bad, good], [{ candidate: good, verdict: "adoptable" }, { candidate: bad, verdict: "unusable" }]);
+		check("C1 bad first fixed spot does not block good later spot", selected?.repoRoot === good.repoRoot);
+		check("C1 selected candidate follows fixed-spot candidate order rather than catalog insertion", selected?.repoRoot === [bad, good][1]!.repoRoot);
+	});
+
+	section("C1 host fast-pass + deep sweep (RED)");
+	await c1Scenario("C1 fast-pass: selected host fixed spots only and silent entry is callable", async () => {
+		const host = path.join(c1Root, "host"); const parent = path.dirname(host); const session = plantC1(c1Cwd, ".chunkhound.json");
+		const file = plantC1(host, ".chunkhound.json"); plantC1(host, "config.json", "dir"); const parentConfig = plantC1(parent, ".chunkhound.json");
+		fs.mkdirSync(path.join(host, ".chunkhound", "sub"), { recursive: true }); fs.writeFileSync(path.join(host, ".chunkhound", "sub", "deep.json"), c1Config(file.dbPath!)); fs.writeFileSync(path.join(host, ".chunkhound", "watchman.sock"), "artifact");
+		const found = await fastPass(host, c1Cwd);
+		check("C1 selected host is scanned rather than process cwd", found.some((x) => x.repoRoot === host && x.configPath === file.configPath));
+		check("C1 all four fixed spots include host, dir, parent, session and exclude recursion/artifacts", found.some((x) => x.configPath === session.configPath) && found.some((x) => x.configPath === parentConfig.configPath) && !found.some((x) => x.configPath.endsWith("deep.json") || x.configPath.endsWith("watchman.sock")));
+		check("C1 silent fast-pass is callable without UI", Array.isArray(found));
+	});
+	await c1Scenario("C1 deep-sweep: real bounded tree skips decoys, symlinks and managed roots", async () => {
+		const sweepRoot = path.join(c1Root, "sweep"); const allowed = plantC1(path.join(sweepRoot, "allowed"), ".chunkhound.json");
+		for (const d of ["node_modules/pkg", ".git/x", "dependency/x", "cache/x", "managed-bases/x"]) plantC1(path.join(sweepRoot, d), ".chunkhound.json");
+		const denied = path.join(sweepRoot, "denied"); fs.mkdirSync(denied, { recursive: true }); fs.chmodSync(denied, 0o000);
+		fs.symlinkSync(sweepRoot, path.join(sweepRoot, "cycle")); const outside = plantC1(path.join(c1Root, "outside"), ".chunkhound.json"); fs.symlinkSync(outside.configPath, path.join(sweepRoot, "outside-link.json"));
+		try {
+			const result = await deepSweep(sweepRoot, { managedRoots: c1Managed, limits: { maxDirs: 100, maxFiles: 100, maxMs: 5_000 } });
+			check("C1 sweep reports only reviewable allowed candidates", result.candidates.some((x) => x.configPath === allowed.configPath) && !result.candidates.some((x) => x.configPath.includes("node_modules") || x.configPath === outside.configPath));
+			check("C1 sweep terminates symlink cycle and reports permission denial", !result.cancelled && result.permissionErrors >= 1);
+			const truncated = await deepSweep(sweepRoot, { limits: { maxDirs: 1, maxFiles: 1, maxMs: 1 } });
+			const cancelled = await deepSweep(sweepRoot, { signal: AbortSignal.abort() });
+			check("C1 limits and AbortSignal are reported", truncated.truncated && cancelled.cancelled);
+		} finally { fs.chmodSync(denied, 0o700); }
+	});
+
+	section("C1 triage, containment + secret handling (RED)");
+	await c1Scenario("C1 triage matrix: layouts, claims, paths and writer artifacts have exact verdict keys", async () => {
+		const file = plantC1(path.join(c1Root, "matrix-file"), ".chunkhound.json"); const dir = plantC1(path.join(c1Root, "matrix-dir"), "config.json", "dir");
+		const missingSidecar = plantC1(path.join(c1Root, "missing-claim"), ".chunkhound.json"); fs.rmSync(`${missingSidecar.dbPath}.root.json`);
+		const v2 = plantC1(path.join(c1Root, "v2"), ".chunkhound.json"); fs.writeFileSync(`${v2.dbPath}.root.json`, JSON.stringify({ version: 2, indexed_root_path: v2.repoRoot }));
+		const wrong = plantC1(path.join(c1Root, "wrong"), ".chunkhound.json", "file", path.join(c1Root, "workspace-root")); const absent = plantC1(path.join(c1Root, "absent"), ".chunkhound.json"); fs.rmSync(absent.dbPath!);
+		const relative = { ...file, repoRoot: path.join(c1Root, "relative"), configPath: path.join(c1Root, "relative", ".chunkhound.json") }; fs.mkdirSync(relative.repoRoot, { recursive: true }); fs.writeFileSync(relative.configPath, c1Config("relative.db"), { mode: 0o600 });
+		const busyWal = plantC1(path.join(c1Root, "busy-wal"), ".chunkhound.json"); fs.writeFileSync(`${busyWal.dbPath}.wal`, "writer");
+		const busyBackup = plantC1(path.join(c1Root, "busy-backup"), ".chunkhound.json"); fs.writeFileSync(`${busyBackup.dbPath}.compact_backup`, "writer");
+		const busyNew = plantC1(path.join(c1Root, "busy-new"), ".chunkhound.json"); fs.writeFileSync(`${busyNew.dbPath}.compact_new`, "writer");
+		const results = await Promise.all([file, dir, missingSidecar, v2, wrong, absent, relative, busyWal, busyBackup, busyNew].map((x) => triage(x, { limits: { maxConfigBytes: 256 * 1024 } })));
+		check("C1 matching file and dir layouts are adoptable", results[0]!.verdict === "adoptable" && results[1]!.verdict === "adoptable");
+		check("C1 missing/v2 claims and missing db are unusable", results[2]!.verdict === "unusable" && results[3]!.verdict === "unusable" && results[5]!.verdict === "unusable");
+		check("C1 wrong root class-1 and relative db are distinct", results[4]!.verdict === "layout-not-supported" && results[6]!.verdict === "unresolved-path");
+		check("C1 WAL and both compact writer artifacts are busy", results[7]!.verdict === "busy" && results[8]!.verdict === "busy" && results[9]!.verdict === "busy");
+	});
+	await c1Scenario("C1 triage bounded files: malformed, oversized and FIFO never expose secrets or hang", async () => {
+		const malformed = plantC1(path.join(c1Root, "malformed"), ".chunkhound.json"); fs.writeFileSync(malformed.configPath, `{ ${c1Canary}`);
+		const oversized = plantC1(path.join(c1Root, "oversized"), ".chunkhound.json"); fs.writeFileSync(oversized.configPath, "x".repeat(256 * 1024 + 1));
+		const fifo = path.join(c1Root, "fifo.json"); await new Promise<void>((resolve, reject) => spawn("mkfifo", [fifo]).once("exit", (c) => c === 0 ? resolve() : reject(new Error("mkfifo"))));
+		const fifoCandidate = { ...malformed, configPath: fifo };
+		const results = await Promise.all([triage(malformed), triage(oversized, { limits: { maxConfigBytes: 256 * 1024 } }), triage(fifoCandidate, { limits: { maxConfigBytes: 256 * 1024 } })]);
+		check("C1 malformed and oversized configs are sanitized unusable", results[0]!.verdict === "unusable" && results[1]!.verdict === "unusable" && results.every((r) => !r.issue?.includes(c1Canary)));
+		check("C1 FIFO is stat-skipped without blocking", results[2]!.verdict === "unusable");
+	});
+	await c1Scenario("C1 containment: managed paths, realpath aliases and mirrors are never catalogued", async () => {
+		const managed = plantC1(path.join(c1Managed[1], "source"), ".chunkhound.json"); const alias = path.join(c1Root, "managed-alias"); fs.symlinkSync(c1Managed[1], alias);
+		const aliased = { ...managed, configPath: path.join(alias, "source", ".chunkhound.json"), dbPath: path.join(alias, "source", ".chunkhound.db") };
+		const mirror = plantC1(path.join(c1Managed[2], "github.com", "o", "r"), ".chunkhound.json");
+		check("C1 direct managed root is excluded", isManagedContainment(managed, c1Managed));
+		check("C1 symlink alias resolves into managed root", isManagedContainment(aliased, c1Managed));
+		check("C1 PR mirror host is excluded from catalog", isManagedContainment(mirror, c1Managed));
+		check("C1 canary fixtures are 0600", (fs.statSync(managed.configPath).mode & 0o777) === 0o600);
+	});
+
+	section("C1 setup transaction + onboarding control flow (RED)");
+	await c1Scenario("C1 setup transaction: captured handler and SetupDeps enforce verify-first consent boundaries", async () => {
+		let captured: ((args: string, ctx: unknown) => Promise<void>) | undefined; registerSetupCommand({ registerCommand: (_n: string, d: { handler: (args: string, ctx: unknown) => Promise<void> }) => { captured = d.handler; } } as unknown as ExtensionAPI, {});
+		const events: string[] = []; const candidates = [c1Candidate];
+		const deps = { verifyCombined: async () => { events.push("verify"); return true; }, discover: async () => { events.push("discover"); return { candidates, truncated: false, permissionErrors: 0, cancelled: false }; }, consent: async () => { events.push("consent"); return "fast-pass" as const; }, readGlobalMarker: async () => false, writeGlobalMarker: async () => { events.push("marker"); }, writeCatalog: async () => { events.push("catalog"); } };
+		const result = await runSetupDiscovery(deps, { uiAvailable: true });
+		check("C1 setup handler was captured for command integration", typeof captured === "function");
+		check("C1 successful global UI setup verifies before consent then records", events.join(",") === "verify,consent,discover,marker,catalog" && !result.cancelled);
+		const beforeBypasses = events.length;
+		const headless = await runSetupDiscovery({ ...deps, consent: async () => { throw new Error("prompted headless"); } }, { uiAvailable: false });
+		const verifyOnly = await runSetupDiscovery({ ...deps, consent: async () => { throw new Error("prompted verify-only"); } }, { uiAvailable: true, verifyOnly: true });
+		const projectOnly = await runSetupDiscovery({ ...deps, consent: async () => { throw new Error("prompted project-only"); } }, { uiAvailable: true, projectOnly: true });
+		check("C1 verify-only/headless/project-only never prompt or write global catalog", !headless.cancelled && !verifyOnly.cancelled && !projectOnly.cancelled && !events.slice(beforeBypasses).includes("consent") && !events.slice(beforeBypasses).includes("catalog"));
+	});
+	await c1Scenario("C1 setup transaction: failure/cancel preserve catalog bytes; marker is global and resettable", async () => {
+		fs.mkdirSync(path.dirname(c1Library), { recursive: true }); fs.writeFileSync(c1Library, JSON.stringify({ version: 1, entries: [c1Entry] })); const before = fs.readFileSync(c1Library, "utf8");
+		let marker = setDiscoveryOnboardingMarker({}); let writes = 0;
+		const cancelled = await runSetupDiscovery({ verifyCombined: async () => false, discover: async () => ({ candidates: [], truncated: false, permissionErrors: 0, cancelled: true }), writeCatalog: async () => { writes++; } }, { uiAvailable: true });
+		marker = clearDiscoveryOnboardingMarker(marker);
+		check("C1 failed verification gives no consent/catalog state change", cancelled.cancelled && writes === 0 && fs.readFileSync(c1Library, "utf8") === before);
+		check("C1 global additive marker resets and project overlay cannot satisfy it", !hasDiscoveryOnboardingMarker(marker) && !hasDiscoveryOnboardingMarker({ discoveryOnboardingComplete: false }));
+		const standalone = await runSetupDiscovery({ verifyCombined: async () => true, discover: async () => ({ candidates: [c1Candidate], truncated: false, permissionErrors: 0, cancelled: false }) }, { standalone: true, uiAvailable: false });
+		check("C1 standalone deep sweep remains reachable without onboarding", standalone.candidates.length === 1);
+	});
+
+	section("C1 verdict copy (RED)");
+	await c1Scenario("C1 verdict copy: all S4 strings are exact", async () => {
+		check("C1 S4 exact verdict strings", verdictCopy("adoptable") === "Existing index for this repo found — will be reused" && verdictCopy("layout-not-supported") === "Index layout not supported (covers a different or multiple folders) — skipped" && verdictCopy("unresolved-path") === "Index location unclear (relative db path) — needs your answer or skip" && verdictCopy("busy") === "Index in use by chunkhound right now — will copy when free" && verdictCopy("unusable") === "Config or db missing/unreadable — skipped");
+	});
+	} finally {
+		for (const [key, value] of Object.entries(c1Env)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
 	}
 
 	// ── 8. extension loads ────────────────────────────────────────────
