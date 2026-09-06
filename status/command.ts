@@ -13,6 +13,16 @@ import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 import type { BaselineMeta } from "../chhound/types.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 
+/** A connection as shown in /ch-status; repo identity fields are set by
+ * buildStatusLines from the owning sandbox meta when available. */
+export interface McpStatusConn {
+	worktree: string;
+	prefix: string;
+	toolNames: string[];
+	repoRoot?: string;
+	branchLabel?: string;
+}
+
 /**
  * Full /ch-status rendering (pure — the handler assembles the inputs and
  * notifies the result). Kept headless so the exact output is verifiable.
@@ -22,7 +32,7 @@ export function buildStatusLines(opts: {
 	settings: ChhoundSettings;
 	sandboxes: SandboxEntry[];
 	baselines: Array<{ dir: string; meta?: BaselineMeta }>;
-	conns: readonly { worktree: string; prefix: string; toolNames: string[] }[];
+	conns: readonly McpStatusConn[];
 }): string[] {
 	const { version, settings, sandboxes, baselines, conns } = opts;
 	const lines: string[] = [
@@ -84,7 +94,14 @@ export function buildStatusLines(opts: {
 			);
 		}
 	}
-	lines.push(...mcpStatusLines(conns));
+	// Join connections to their sandbox meta so each line can name the source
+	// repo and branch behind the connection (the bare format stays when the
+	// sandbox is gone or its meta predates repoRoot).
+	const enriched = conns.map((c) => {
+		const sb = sandboxes.find((s) => s.meta.worktree === c.worktree);
+		return sb ? { ...c, repoRoot: sb.meta.repoRoot, branchLabel: sandboxBranchLabel(sb.meta) } : c;
+	});
+	lines.push(...mcpStatusLines(enriched));
 	lines.push(
 		`cleanup: /ch-status --prune removes storage for gone worktrees and unused or incomplete baselines` +
 			(conns.length === 0 ? " · connect: /ch-mcp <worktree>" : ""),
@@ -92,17 +109,34 @@ export function buildStatusLines(opts: {
 	return lines;
 }
 
+/** Tool list for one connection: first name in full, later ones as _suffixes. */
+function toolListLine(c: McpStatusConn): string {
+	const [first, ...rest] = c.toolNames;
+	if (!first) return "";
+	return [first, ...rest.map((n) => (n.startsWith(c.prefix) ? n.slice(c.prefix.length) : n))].join(" · ");
+}
+
 /** MCP connection section for /ch-status (pure — smoke-tested headless). */
-export function mcpStatusLines(conns: readonly { worktree: string; prefix: string; toolNames: string[] }[]): string[] {
+export function mcpStatusLines(conns: readonly McpStatusConn[]): string[] {
 	const lines = ["", `mcp connections (${conns.length}):`];
 	if (conns.length === 0) {
 		lines.push("  (none — run /ch-mcp to connect)");
 	} else {
 		for (const c of conns) {
-			lines.push(
-				`  ● ${path.basename(c.worktree)} · prefix ${c.prefix} · ${c.toolNames.length} tools`,
-				`      ${c.worktree}`,
-			);
+			const name = path.basename(c.worktree);
+			if (c.repoRoot && c.branchLabel) {
+				lines.push(
+					`  ● ${name} — ${path.basename(c.repoRoot)} @ ${c.branchLabel} · ${c.toolNames.length} tools`,
+					`      tools: ${toolListLine(c)}`,
+					`      example: ${c.prefix}_code_research("your question") · ${c.prefix}_search for exact symbols`,
+					`      worktree: ${c.worktree}`,
+				);
+			} else {
+				lines.push(
+					`  ● ${name} · prefix ${c.prefix} · ${c.toolNames.length} tools`,
+					`      ${c.worktree}`,
+				);
+			}
 		}
 	}
 	return lines;
