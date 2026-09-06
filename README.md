@@ -87,6 +87,14 @@ Long index runs stream a live progress widget above the editor
 `██████░░░░ … 45% · 636/1,412 files` — the rail tracks chunk generation first,
 then embedding batches; a sweeping rail marks indeterminate stages).
 
+<p align="center">
+  <img src="docs/assets/worktree-indexing-progress.png"
+       alt="pi terminal showing pi-chhound creating a worktree and live baseline embedding-index progress at 13 percent"
+       width="1000">
+</p>
+
+<p align="center"><em>Worktree creation streams baseline-index progress directly above pi's editor.</em></p>
+
 **PR sandboxes** need the GitHub CLI (`gh`, authenticated) for the base-branch
 resolution; the head commit comes from `refs/pull/<n>/head` (GitHub synthesizes it
 for fork and draft PRs too, and it persists after merge). A PR of a repo with a
