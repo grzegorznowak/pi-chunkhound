@@ -22,8 +22,14 @@ jobs:
       - run: npm ci
       - name: Provision pinned ChunkHound engine
         env:
-          CHUNKHOUND_REPOSITORY: https://github.com/adamNewell/chunkhound.git
-          CHUNKHOUND_COMMIT: gfba92db05
+          CHUNKHOUND_REPOSITORY: https://github.com/chunkhound/chunkhound.git
+          # Installed dev engine was 5.2.2.dev20+gfba92db05, built from a local-only
+          # commit (gfba92db05 exists on NO remote). Reproducible pin: upstream main
+          # @2ab77535 == the audited workspace engine checkout HEAD (v5.2.1-18-g2ab77535,
+          # "mostly byte-identical" to the installed package). Drift caveat: if a test
+          # depends on user-branch-only engine changes, CI surfaces it; re-pin when the
+          # user branch lands upstream.
+          CHUNKHOUND_COMMIT: 2ab775354d8d378bdacc8ea76b51a588362cfb99
           UV_TOOL_BIN_DIR: ${{ github.workspace }}/.ci/bin
         shell: bash
         run: |
