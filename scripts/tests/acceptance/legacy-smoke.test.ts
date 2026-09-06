@@ -74,7 +74,15 @@ test("remaining legacy smoke obligations", { timeout: 300_000 }, async (t) => {
 			child.stdout?.on("data", append);
 			child.stderr?.on("data", append);
 			const closed = waitForClose(child);
-			closed.then(({ code, signal }) => code === 0 ? resolve(text) : reject(new Error(`legacy smoke exit=${code} signal=${signal}; focus:\n${redact(failureFocus(text))}`)), reject);
+			closed.then(({ code, signal }) => {
+				if (code === 0) resolve(text);
+				else {
+					// Echo the captured output so CI logs carry the full pre-crash
+					// context (node:test forwards this process's console output).
+					console.error(`legacy smoke exit=${code} signal=${signal}; captured output:\n${redact(text)}`);
+					reject(new Error(`legacy smoke exit=${code} signal=${signal}; focus:\n${redact(failureFocus(text))}`));
+				}
+			}, reject);
 		});
 		assert.ok(!output.includes("FAIL "), "legacy smoke reported FAIL");
 		assert.ok(!output.includes("smoke crashed"), "legacy smoke crashed");
