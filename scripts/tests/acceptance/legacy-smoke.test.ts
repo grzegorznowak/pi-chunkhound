@@ -23,12 +23,21 @@ function waitForClose(child: ChildProcess): Promise<{ code: number | null; signa
 	});
 }
 
-/** Failure-focused excerpt: FAIL lines, crash lines and the passing tally. */
+/** Failure-focused excerpt: crash line first, then the last engine diagnostics,
+ * then the most recent FAIL line and the tally. The reporter keeps only the
+ * first ~500 chars of the message, so the highest-signal lines come first and
+ * every bucket is bounded. */
 function failureFocus(text: string): string {
 	const lines = text.split("\n");
-	const relevant = lines.filter((line) => line.includes("FAIL ") || line.includes("smoke crashed") || /\/\d+ checks passed$/.test(line.trim()));
+	const isDiag = (line: string) => /^\s*\[chhound\] /.test(line) && /(error|exception|failed|fail|traceback|warning|watchman|runtime|denied|refused|unable|\bexit\b)/i.test(line);
+	const crash = lines.filter((line) => line.includes("smoke crashed")).slice(-1);
+	const diag = lines.filter(isDiag).slice(-3);
+	const fails = lines.filter((line) => line.includes("FAIL ")).slice(-1);
+	const tally = lines.filter((line) => /\/\d+ checks passed$/.test(line.trim())).slice(-1);
+	const focused = [...crash, ...diag, ...fails, ...tally].join("\n");
+	if (focused) return focused;
 	const tail = lines.slice(-3).join("\n");
-	return [...relevant, ...(relevant.length ? [] : [tail])].join("\n") || text.slice(-1000);
+	return tail || text.slice(-1000);
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
