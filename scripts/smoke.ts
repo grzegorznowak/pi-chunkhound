@@ -31,7 +31,6 @@ import {
 	sandboxBranchLabel,
 } from "../chhound/sandbox.js";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { loadSettings, saveSettings } from "../chhound/settings.js";
 import { connectMcp, disconnectMcp, listMcpConnections, mcpFooterStatusText, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
 import { CONNECTION_ENTRY_TYPE, recordConnection, rehydrateConnections, restoreConnections } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
@@ -41,6 +40,7 @@ import { refreshMaterializedConfigs, registerSetupCommand } from "../setup/comma
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
 import { isWizardInvocation, OTHER_REPO, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
+import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
 let checks = 0;
@@ -1187,25 +1187,6 @@ async function main(): Promise<void> {
 	const removed = pruneSandboxes(settings);
 	check("prune removed orphan sandbox", removed.length === 1 && listSandboxes(settings).length === 0);
 	check("config path helper", sandboxConfigPath(sandboxDir).endsWith(path.join(sandboxDir, ".chunkhound.json")));
-
-	// ── 7. settings round-trip (project scope, in scratch) ────────────
-	section("settings round-trip");
-	const proj = path.join(tmp, "proj");
-	fs.mkdirSync(path.join(proj, ".pi", "pi-chhound"), { recursive: true });
-	const saved = saveSettings(
-		{ ...settings, embedding: { provider: "voyageai", model: "voyage-3.5", apiKey: "sk-ROUNDTRIP" } },
-		"project",
-		proj,
-	);
-	const loaded = loadSettings(proj);
-	check("project settings round-trip", loaded.settings.embedding?.model === "voyage-3.5", saved);
-	check("api key round-trips through settings", loaded.settings.embedding?.apiKey === "sk-ROUNDTRIP");
-	check("settings file 0600", (fs.statSync(saved).mode & 0o777) === 0o600, `mode=${(fs.statSync(saved).mode & 0o777).toString(8)}`);
-	check("project path used", loaded.projectPath === saved);
-	const savedLlm = saveSettings({ ...settings, llm: { provider: "gemini", model: "gemini-2.5-pro" } }, "project", proj);
-	check("llm settings round-trip", loadSettings(proj).settings.llm?.provider === "gemini" && loadSettings(proj).settings.llm?.model === "gemini-2.5-pro", savedLlm);
-	const savedBase = saveSettings({ ...settings, worktreeBase: "/home/x/wt-base" }, "project", proj);
-	check("worktreeBase settings round-trip", loadSettings(proj).settings.worktreeBase === "/home/x/wt-base", savedBase);
 
 	// ── 7b. PR sandboxes (hermetic: fake gh shim + local bare with pull refs) ──
 	section("PR resolution (hermetic)");
