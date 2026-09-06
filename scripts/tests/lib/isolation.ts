@@ -56,13 +56,16 @@ export function restoreScope(snapshot: ScopeSnapshot): void {
 
 /**
  * Allocate an owned scratch root under os.tmpdir(); caller removes it.
- * Rejects traversal so the prefix can never escape the temp root.
+ * Rejects traversal so the prefix can never escape the temp root. The result
+ * is symlink-resolved (macOS /var → /private/var): git and the engine
+ * canonicalize path prefixes while Node path ops do not, so an unresolved
+ * root makes engine claims/daemon locks disagree with asserted paths.
  */
 export async function makeFixtureRoot(prefix: string): Promise<string> {
 	if (!/^[A-Za-z0-9._-]+$/.test(prefix) || prefix.includes("..")) {
 		throw new Error(`invalid fixture-root prefix: ${prefix}`);
 	}
-	return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	return fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
 }
 
 /**

@@ -56,7 +56,11 @@ function check(name: string, cond: boolean, detail = ""): void {
 const section = (t: string) => console.log(`\n== ${t}`);
 
 async function main(): Promise<void> {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-chhound-smoke-"));
+	// Resolve the scratch root BEFORE building any paths from it: git and the
+	// engine canonicalize symlinked prefixes (macOS /var → /private/var), while
+	// Node path ops do not — an unresolved root makes engine claims, daemon
+	// locks and git results disagree with the paths this suite asserts on.
+	const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-chhound-smoke-")));
 	console.log(`scratch: ${tmp}`);
 	const settings: ChhoundSettings = {
 		version: 1,
