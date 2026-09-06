@@ -55,8 +55,8 @@ jobs:
           printf 'export const warm = true;\n' > "$scratch/warm.ts"
           "$CHHOUND_BINARY" index "$scratch" --db "$scratch/.chhound.db" --no-embeddings
           test -e "$scratch/.chhound.db"
-          # Watchman runtime acquisition is NOT exercised by the suite: engine
-          # MCP/daemon tests force CHUNKHOUND_INDEXING__REALTIME_BACKEND=polling
+          # Watchman runtime acquisition is NOT exercised by the suite: the
+          # smoke materializes engine configs with realtime_backend=polling
           # (macOS Watchman socket paths exceed the platform limit under deep
           # runner tmp dirs; daemon-status polling semantics are unaffected).
       - name: Capability probe

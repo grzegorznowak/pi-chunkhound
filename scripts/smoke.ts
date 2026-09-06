@@ -66,6 +66,13 @@ async function main(): Promise<void> {
 		version: 1,
 		sandboxRoot: path.join(tmp, "sandboxes"),
 		baseRoot: path.join(tmp, "bases"),
+		// Materialized engine configs force watchman by default (config.ts
+		// REALTIME_BACKEND_DEFAULT); the config file wins over the
+		// CHUNKHOUND_INDEXING__REALTIME_BACKEND env var. On macOS the watchman
+		// socket path exceeds the platform limit under deep runner tmp dirs, so
+		// the suite (which polls daemon status and never asserts watchman
+		// semantics) opts into the engine's polling backend here.
+		indexing: { realtimeBackend: "polling" },
 	};
 
 	// ── 2. completions ─────────────────────────────────────────────────
@@ -405,7 +412,7 @@ async function main(): Promise<void> {
 	section("baseline anchor: local first");
 	{
 		// Isolated cache root — the main suite's baseline listings stay intact.
-		const anchorSettings: ChhoundSettings = { version: 1, sandboxRoot: settings.sandboxRoot, baseRoot: path.join(tmp, "anchor-bases") };
+		const anchorSettings: ChhoundSettings = { version: 1, sandboxRoot: settings.sandboxRoot, baseRoot: path.join(tmp, "anchor-bases"), indexing: { realtimeBackend: "polling" } };
 
 		// Repo A: local main @ c1 while a local bare origin carries a DIFFERENT
 		// main tip c2 (fetched → origin/main = c2). Worktrees are cut from local
