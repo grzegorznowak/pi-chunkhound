@@ -77,9 +77,13 @@ test("remaining legacy smoke obligations", { timeout: 300_000 }, async (t) => {
 			closed.then(({ code, signal }) => {
 				if (code === 0) resolve(text);
 				else {
-					// Echo the captured output so CI logs carry the full pre-crash
-					// context (node:test forwards this process's console output).
-					console.error(`legacy smoke exit=${code} signal=${signal}; captured output:\n${redact(text)}`);
+					// Persist the captured output so the runner can surface it in CI logs
+					// (node:test swallows this process's console output under a custom
+					// reporter). Best-effort: diagnostics must never mask the failure.
+					const diagDir = process.env.CHHOUND_TEST_DIAG_DIR;
+					if (diagDir) {
+						fs.writeFile(path.join(diagDir, "legacy-smoke-capture.txt"), redact(text), { mode: 0o600 }).catch(() => {});
+					}
 					reject(new Error(`legacy smoke exit=${code} signal=${signal}; focus:\n${redact(failureFocus(text))}`));
 				}
 			}, reject);

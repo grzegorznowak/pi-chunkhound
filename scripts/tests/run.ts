@@ -117,9 +117,25 @@ async function main(): Promise<void> {
 			if (!files.length) continue;
 			console.log(`\n== tier ${tier}`);
 			const reportPath = path.join(reportRoot, `${tier.replace("/", "-")}.json`);
+			const diagDir = path.join(reportRoot, `${tier.replace("/", "-")}-diag`);
+			await fs.mkdir(diagDir, { recursive: true });
 			const concurrency = tier === "unit" ? Math.min(4, os.cpus().length) : 1;
-			const result = await run(process.execPath, ["--import", "tsx", "--test", `--test-concurrency=${concurrency}`, `--test-timeout=${tierTimeoutMs[tier]}`, `--test-reporter=${reporter}`, ...files], { ...process.env, CHHOUND_TEST_REPORT_PATH: reportPath, CHHOUND_TEST_TIER: tier });
-			if (result.code !== 0) failed = true;
+			const result = await run(process.execPath, ["--import", "tsx", "--test", `--test-concurrency=${concurrency}`, `--test-timeout=${tierTimeoutMs[tier]}`, `--test-reporter=${reporter}`, ...files], { ...process.env, CHHOUND_TEST_REPORT_PATH: reportPath, CHHOUND_TEST_TIER: tier, CHHOUND_TEST_DIAG_DIR: diagDir });
+			if (result.code !== 0) {
+				failed = true;
+				// Test processes may write failure artifacts (captured subprocess output)
+				// into the diag dir; surface them through the runner's own stdout, which
+				// reaches CI logs even though node:test swallows child console output.
+				// Best-effort: artifact I/O must never mask the real failure summary.
+				try {
+					for (const file of (await fs.readdir(diagDir)).sort()) {
+						const text = await fs.readFile(path.join(diagDir, file), "utf8");
+						console.error(`=== ${tier} artifact: ${file} ===\n${text.slice(-16_000)}`);
+					}
+				} catch (error) {
+					console.error(`diag artifact read failed for ${tier}: ${error instanceof Error ? error.message : error}`);
+				}
+			}
 			try {
 				const report = JSON.parse(await fs.readFile(reportPath, "utf8")) as Report;
 				for (const key of Object.keys(total) as (keyof Report)[]) total[key] += report[key];
