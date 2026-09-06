@@ -10,6 +10,7 @@ export interface TestClassification {
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"acceptance/legacy-smoke.test.ts": { tier: "acceptance", subject: "legacy-smoke" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
+	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 };
 
 export const tierOrder: readonly Tier[] = [
