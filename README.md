@@ -144,6 +144,14 @@ garbage baselines (incomplete from a crashed prime, source repo deleted, or a
 superseded duplicate). The same baseline GC also runs automatically after each
 baseline prime — the cache is self-healing, no manual cleanup needed.
 
+<p align="center">
+  <img src="docs/assets/ch-status-overview.png"
+       alt="pi terminal showing ch-status output: ChunkHound version, worktree and baseline library roots, embedding and LLM config, one indexed worktree with its commit and index size, a baseline, and one connected ch-mcp exposing five tools"
+       width="1000">
+</p>
+
+<p align="center"><em><code>/ch-status</code> — roots, worktrees, baselines and live MCP connections at a glance.</em></p>
+
 ### /ch-setup
 
 Interactive wizard in the TUI (defaults prefill the fields, TAB skips already
