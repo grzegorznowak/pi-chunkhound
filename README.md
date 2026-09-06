@@ -113,6 +113,14 @@ servers needed. With no argument it opens an interactive picker of all worktrees
 `--prefix` namespaces the exposed tools, `--read-only` restricts them,
 `--no-daemon` attaches to an already-running chunkhound daemon.
 
+<p align="center">
+  <img src="docs/assets/ch-mcp-picker.png"
+       alt="pi terminal showing the ch-mcp interactive picker headed 'Connect chhound MCP to:' with a sandbox worktree selected"
+       width="1000">
+</p>
+
+<p align="center"><em><code>/ch-mcp</code> — pick any indexed worktree from an interactive list, no pre-registered servers.</em></p>
+
 **Auto-reconnect.** Connections are recorded in the session log (`pi.appendEntry`,
 same mechanism as the notebook plugin's pages). When a session starts — resume,
 restart, or `/reload` — the recorded connections are restored automatically and
