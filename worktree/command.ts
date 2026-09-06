@@ -680,20 +680,30 @@ export const REPO_PICKER_TITLE = "Select a repository";
 async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(ctx.cwd).settings;
-	const candidates = new Map<string, string>();
-	const fromCwd = await gitRootOrNull(ctx.cwd);
-	if (fromCwd) candidates.set(`current: ${fromCwd}`, fromCwd);
-	for (const b of listBaselines(settings)) {
-		if (typeof b.meta?.repoRoot === "string") {
-			candidates.set(`${path.basename(b.meta.repoRoot)} (baseline) — ${b.meta.repoRoot}`, b.meta.repoRoot);
+	// One row per source repo, keyed by its canonical root. The same root can be
+	// cached as a baseline AND cut into an indexed sandbox; both rows select the
+	// identical source (only the root is returned downstream), so duplicates are
+	// collapsed. When a root has both, the "(indexed)" marker wins — the sandbox
+	// is the fresher of the two caches; "current" always wins.
+	const labelFor = (root: string, marker: "baseline" | "indexed") =>
+		`${path.basename(root)} (${marker}) — ${root}`;
+	const candidates = new Map<string, string>(); // canonical root → display label
+	const addRepo = (rawRoot: string, marker: "baseline" | "indexed"): void => {
+		const root = path.resolve(rawRoot);
+		const existing = candidates.get(root);
+		if (existing === undefined || (marker === "indexed" && existing === labelFor(root, "baseline"))) {
+			candidates.set(root, labelFor(root, marker));
 		}
+	};
+	const fromCwd = await gitRootOrNull(ctx.cwd);
+	if (fromCwd) candidates.set(path.resolve(fromCwd), `current: ${fromCwd}`);
+	for (const b of listBaselines(settings)) {
+		if (typeof b.meta?.repoRoot === "string") addRepo(b.meta.repoRoot, "baseline");
 	}
 	for (const s of listSandboxes(settings)) {
-		if (typeof s.meta.repoRoot === "string") {
-			candidates.set(`${path.basename(s.meta.repoRoot)} (indexed) — ${s.meta.repoRoot}`, s.meta.repoRoot);
-		}
+		if (typeof s.meta.repoRoot === "string") addRepo(s.meta.repoRoot, "indexed");
 	}
-	const options = [...candidates.keys(), PICK_PR, OTHER_REPO];
+	const options = [...candidates.values(), PICK_PR, OTHER_REPO];
 	const choice = await ctx.ui.select(REPO_PICKER_TITLE, options);
 	if (choice === undefined) {
 		notify("Cancelled.", "info");
@@ -716,7 +726,11 @@ async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined
 		notify("No valid PR URL — cancelling.", "error");
 		return undefined;
 	}
-	if (choice !== OTHER_REPO && candidates.has(choice)) return { kind: "repo", root: candidates.get(choice)! };
+	if (choice !== OTHER_REPO) {
+		for (const [root, label] of candidates) {
+			if (label === choice) return { kind: "repo", root };
+		}
+	}
 
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const raw = await promptPath(ctx.ui, { title: "Repo path (a git repository) — TAB completes:", cwd: ctx.cwd, paramLabel: "repo directory" });
