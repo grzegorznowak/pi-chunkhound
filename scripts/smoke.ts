@@ -1,16 +1,12 @@
 /**
- * pi-chhound mechanics smoke test — no pi session needed.
- * Uses a scratch git repo and the real chunkhound CLI with --no-embeddings
- * (no API key required). Verifies baseline prime/refresh, worktree spin-up
- * via db copy + top-up, config materialization, sandbox listing/prune.
- *
- * Run: npm run smoke
+ * Legacy mechanics suite, temporarily invoked by the modular test adapter.
+ * `npm run smoke` is now an alias for the full `npm test` suite; this file
+ * remains only until Phase 2 extraction completes.
  */
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { parseArgs, WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 
 import { ensureBaseline, listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
 import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../chhound/config.js";
@@ -69,33 +65,6 @@ async function main(): Promise<void> {
 		sandboxRoot: path.join(tmp, "sandboxes"),
 		baseRoot: path.join(tmp, "bases"),
 	};
-
-	// ── 1. arg parsing ────────────────────────────────────────────────
-	section("parseArgs");
-	{
-		const p = parseArgs(`../wt -b feature/x --from abc123 --no-index --config "my cfg.json"`);
-		check("positionals", JSON.stringify(p.positionals) === JSON.stringify(["../wt"]), JSON.stringify(p.positionals));
-		check("-b value", p.flags["b"] === "feature/x");
-		check("--from value", p.flags["from"] === "abc123");
-		check("--no-index boolean", p.flags["no-index"] === true);
-		check("quoted --config", p.flags["config"] === "my cfg.json");
-		const p2 = parseArgs(`--dest ~/wt -b x`);
-		check("--dest space value", p2.flags["dest"] === "~/wt" && p2.positionals.length === 0, JSON.stringify(p2));
-		const p3 = parseArgs(`--dest=/tmp/x`);
-		check("--dest = form", p3.flags["dest"] === "/tmp/x", JSON.stringify(p3));
-		const p4 = parseArgs(`--dest`);
-		check("--dest bare → true", p4.flags["dest"] === true, JSON.stringify(p4));
-		// With the command's value-flag schema, a boolean flag NEVER eats the
-		// token after it (the runtime fix for flags before positionals).
-		const p5 = parseArgs(`--no-index wt main`, WORKTREE_VALUE_FLAGS);
-		check("schema: boolean flag doesn't consume positionals", p5.flags["no-index"] === true && JSON.stringify(p5.positionals) === JSON.stringify(["wt", "main"]), JSON.stringify(p5));
-		const p6 = parseArgs(`-b feature/x --no-index main`, WORKTREE_VALUE_FLAGS);
-		check("schema: value flag consumes, boolean doesn't", p6.flags["b"] === "feature/x" && p6.flags["no-index"] === true && JSON.stringify(p6.positionals) === JSON.stringify(["main"]), JSON.stringify(p6));
-		const p7 = parseArgs(`-- --no-index wt`);
-		check("-- ends flag parsing (rest is positional)", JSON.stringify(p7.positionals) === JSON.stringify(["--no-index", "wt"]) && !("" in p7.flags), JSON.stringify(p7));
-		const p8 = parseArgs(`"my project/`);
-		check("unterminated quote is one positional", JSON.stringify(p8.positionals) === JSON.stringify(["my project/"]), JSON.stringify(p8));
-	}
 
 	// ── 1b. progress extraction (classifyChhoundLine / buildStatusText / buildWidgetLines) ──
 	section("progress extraction");

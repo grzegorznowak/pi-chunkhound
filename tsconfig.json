@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["*.ts", "**/*.ts"]
+  "include": ["*.ts", "**/*.ts", "**/*.mts"]
 }

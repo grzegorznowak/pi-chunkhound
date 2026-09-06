@@ -18,8 +18,16 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke.ts",
-    "verify:completions": "tsx scripts/verify-completions.mts"
+    "test": "tsx scripts/tests/run.ts --all",
+    "smoke": "npm test",
+    "test:unit": "tsx scripts/tests/run.ts --tier unit",
+    "test:fs": "tsx scripts/tests/run.ts --tier fs",
+    "test:command": "tsx scripts/tests/run.ts --tier command",
+    "test:engine": "tsx scripts/tests/run.ts --tier engine",
+    "test:robustness": "tsx scripts/tests/run.ts --tier robustness",
+    "test:acceptance": "tsx scripts/tests/run.ts --tier acceptance",
+    "verify:completions": "tsx scripts/verify-completions.mts",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",

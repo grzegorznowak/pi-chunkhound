@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22.19.x, 24.x]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - uses: astral-sh/setup-uv@v5
+      - run: npm ci
+      - name: Provision pinned ChunkHound engine
+        env:
+          CHUNKHOUND_REPOSITORY: https://github.com/adamNewell/chunkhound.git
+          CHUNKHOUND_COMMIT: gfba92db05
+          UV_TOOL_BIN_DIR: ${{ github.workspace }}/.ci/bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+          git clone "$CHUNKHOUND_REPOSITORY" .ci/chunkhound
+          git -C .ci/chunkhound checkout "$CHUNKHOUND_COMMIT"
+          test "$(git -C .ci/chunkhound rev-parse --short=10 HEAD)" = "$CHUNKHOUND_COMMIT"
+          uv tool install --editable "$GITHUB_WORKSPACE/.ci/chunkhound"
+          "$UV_TOOL_BIN_DIR/chunkhound" --version
+          echo "CHHOUND_BINARY=$UV_TOOL_BIN_DIR/chunkhound" >> "$GITHUB_ENV"
+      - name: Warm engine runtime cache outside timed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d "${RUNNER_TEMP}/pi-chhound-engine-warm.XXXXXX")"
+          trap 'rm -rf "$scratch"' EXIT
+          printf 'export const warm = true;\n' > "$scratch/warm.ts"
+          "$CHHOUND_BINARY" index "$scratch" --db "$scratch/.chhound.db" --no-embeddings
+          test -e "$scratch/.chhound.db"
+          # TODO(full-gate): verify and invoke ChunkHound's supported Watchman/runtime
+          # prefetch mechanism. This successful warm index does not prove that a fresh
+          # isolated test HOME cannot trigger runtime acquisition.
+      - name: Capability probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { constants } from 'node:fs';
+          import { copyFile, mkdtemp, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const root = await mkdtemp(join(tmpdir(), 'pi-chhound-capability-'));
+          try {
+            const source = join(root, 'a');
+            const target = join(root, 'b');
+            await writeFile(source, 'x');
+            if (typeof constants.COPYFILE_FICLONE !== 'number') {
+              console.log('CoW clone mechanism: not probed/skipped (COPYFILE_FICLONE unavailable)');
+            } else {
+              await copyFile(source, target, constants.COPYFILE_FICLONE);
+              console.log('CoW clone mechanism: COPYFILE_FICLONE requested (the API may fall back to a normal copy)');
+            }
+            const locked = join(root, 'locked');
+            await mkdir(locked);
+            await chmod(locked, 0);
+            try {
+              await readdir(locked);
+              throw new Error('chmod-000 capability is required (runner appears privileged)');
+            } catch (error) {
+              if (error instanceof Error && error.message.includes('runner appears privileged')) throw error;
+              console.log('chmod-000 access denial: observed');
+            } finally { await chmod(locked, 0o700); }
+          } finally { await rm(root, { recursive: true, force: true }); }
+          NODE
+      - name: Typecheck and full suite
+        env:
+          CHHOUND_TEST_SUMMARY_PATH: ${{ github.workspace }}/test-summary.json
+        run: |
+          # TODO(full-gate): the Watchman/runtime prefetch above is unresolved; this
+          # full suite intentionally still runs and fails if engine coverage cannot run.
+          npm run check
+      - name: Upload test summary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary-${{ matrix.os }}-node${{ matrix.node }}
+          path: test-summary.json
+          if-no-files-found: warn
