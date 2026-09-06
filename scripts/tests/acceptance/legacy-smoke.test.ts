@@ -25,7 +25,7 @@ function waitForClose(child: ChildProcess): Promise<{ code: number | null; signa
 
 /** Failure-focused excerpt: crash line first, then the last engine diagnostics,
  * then the most recent FAIL line and the tally. The reporter keeps only the
- * first ~500 chars of the message, so the highest-signal lines come first and
+ * first ~2500 chars of the message, so the highest-signal lines come first and
  * every bucket is bounded. */
 function failureFocus(text: string): string {
 	const lines = text.split("\n");
@@ -35,7 +35,12 @@ function failureFocus(text: string): string {
 	const fails = lines.filter((line) => line.includes("FAIL ")).slice(-1);
 	const tally = lines.filter((line) => /\/\d+ checks passed$/.test(line.trim())).slice(-1);
 	const focused = [...crash, ...diag, ...fails, ...tally].join("\n");
-	if (focused) return focused;
+	if (focused) {
+		// The reporter keeps ~2500 chars now; the raw pre-crash tail (last 12
+		// lines) carries section context the focused buckets cannot express.
+		const rawTail = lines.slice(-12).join("\n");
+		return `${focused}\n---- raw tail ----\n${rawTail}`;
+	}
 	const tail = lines.slice(-3).join("\n");
 	return tail || text.slice(-1000);
 }

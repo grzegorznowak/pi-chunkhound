@@ -5,7 +5,7 @@ type Event = { type: string; data?: Record<string, unknown> };
 const secretKey = "(?:api[_-]?key|api[_-]?token|access[_-]?token|auth(?:orization)?|credential(?:s)?|password|secret(?:s)?|token|key)";
 const secretValue = new RegExp(`((?:"?${secretKey}"?)\\s*[:=]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s,}\\]]+)`, "gi");
 
-const cap = (value: unknown, limit = 500): string => {
+const cap = (value: unknown, limit = 2500): string => {
 	let text: string;
 	try { text = typeof value === "string" ? value : JSON.stringify(value); } catch { text = String(value); }
 	return text.replace(secretValue, "$1[redacted]").replace(/\s+/g, " ").slice(0, limit);
