@@ -121,6 +121,14 @@ servers needed. With no argument it opens an interactive picker of all worktrees
 
 <p align="center"><em><code>/ch-mcp</code> — pick any indexed worktree from an interactive list, no pre-registered servers.</em></p>
 
+<p align="center">
+  <img src="docs/assets/ch-mcp-connected.png"
+       alt="pi terminal immediately after ch-mcp connects a ChunkHound worktree, listing five chh tools and showing the ch-mcp 1 connected footer indicator"
+       width="1000">
+</p>
+
+<p align="center"><em><code>/ch-mcp</code> — the selected worktree is connected, its tools available, live status confirmed in pi’s footer.</em></p>
+
 **Auto-reconnect.** Connections are recorded in the session log (`pi.appendEntry`,
 same mechanism as the notebook plugin's pages). When a session starts — resume,
 restart, or `/reload` — the recorded connections are restored automatically and
