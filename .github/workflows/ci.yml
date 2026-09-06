@@ -37,7 +37,7 @@ jobs:
           mkdir -p .ci
           git clone "$CHUNKHOUND_REPOSITORY" .ci/chunkhound
           git -C .ci/chunkhound checkout "$CHUNKHOUND_COMMIT"
-          test "$(git -C .ci/chunkhound rev-parse --short=10 HEAD)" = "$CHUNKHOUND_COMMIT"
+          test "$(git -C .ci/chunkhound rev-parse HEAD)" = "$CHUNKHOUND_COMMIT"
           uv tool install --editable "$GITHUB_WORKSPACE/.ci/chunkhound"
           "$UV_TOOL_BIN_DIR/chunkhound" --version
           echo "CHHOUND_BINARY=$UV_TOOL_BIN_DIR/chunkhound" >> "$GITHUB_ENV"
