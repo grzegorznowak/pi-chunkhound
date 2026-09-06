@@ -676,6 +676,7 @@ async function main(): Promise<void> {
 			stderr: "pipe",
 		});
 		const c1 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
+		t1.stderr?.on("data", (d: Buffer) => console.log(`    [mcp-stderr] ${d.toString("utf8").trimEnd()}`));
 		await c1.connect(t1, { timeout: 30_000 });
 		const listed = await c1.listTools();
 		check(
@@ -701,6 +702,7 @@ async function main(): Promise<void> {
 			stderr: "pipe",
 		});
 		const c2 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
+		t2.stderr?.on("data", (d: Buffer) => console.log(`    [mcp-stderr] ${d.toString("utf8").trimEnd()}`));
 		await c2.connect(t2, { timeout: 30_000 });
 		const st2 = await c2.callTool({ name: "daemon_status", arguments: {} });
 		check("mcp: daemonized mode callable", JSON.stringify(st2).includes("query_ready"));
