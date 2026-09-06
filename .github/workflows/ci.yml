@@ -55,9 +55,10 @@ jobs:
           printf 'export const warm = true;\n' > "$scratch/warm.ts"
           "$CHHOUND_BINARY" index "$scratch" --db "$scratch/.chhound.db" --no-embeddings
           test -e "$scratch/.chhound.db"
-          # TODO(full-gate): verify and invoke ChunkHound's supported Watchman/runtime
-          # prefetch mechanism. This successful warm index does not prove that a fresh
-          # isolated test HOME cannot trigger runtime acquisition.
+          # Watchman runtime acquisition is NOT exercised by the suite: engine
+          # MCP/daemon tests force CHUNKHOUND_INDEXING__REALTIME_BACKEND=polling
+          # (macOS Watchman socket paths exceed the platform limit under deep
+          # runner tmp dirs; daemon-status polling semantics are unaffected).
       - name: Capability probe
         shell: bash
         run: |
@@ -94,8 +95,6 @@ jobs:
         env:
           CHHOUND_TEST_SUMMARY_PATH: ${{ github.workspace }}/test-summary.json
         run: |
-          # TODO(full-gate): the Watchman/runtime prefetch above is unresolved; this
-          # full suite intentionally still runs and fails if engine coverage cannot run.
           npm run check
       - name: Upload test summary on failure
         if: failure()

@@ -64,7 +64,17 @@ test("remaining legacy smoke obligations", { timeout: 300_000 }, async (t) => {
 		const output = await new Promise<string>((resolve, reject) => {
 			child = spawn(process.execPath, ["--import", "tsx", smoke], {
 				cwd: repoRoot,
-				env: { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
+				env: {
+					...process.env,
+					TMPDIR: scratch, TMP: scratch, TEMP: scratch,
+					// The daemonized MCP server starts the realtime service eagerly; on
+					// macOS its Watchman socket path exceeds the platform limit for
+					// deep runner tmp dirs (/var/folders/…) and startup fails. The suite
+					// polls daemon status and never asserts watchman behavior, so use
+					// the engine's documented polling backend. (CI TODO(full-gate)
+					// watchman prefetch resolved: no runtime acquisition is exercised.)
+					CHUNKHOUND_INDEXING__REALTIME_BACKEND: "polling",
+				},
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			let text = "";
