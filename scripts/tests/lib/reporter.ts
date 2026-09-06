@@ -11,6 +11,14 @@ const cap = (value: unknown, limit = 500): string => {
 	return text.replace(secretValue, "$1[redacted]").replace(/\s+/g, " ").slice(0, limit);
 };
 
+/** Cross-process test failures arrive as plain objects; message is top-level. */
+const errorText = (error: unknown): string => {
+	if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+		return (error as { message: string }).message;
+	}
+	return String(error);
+};
+
 const id = (data: Record<string, unknown>): string => `${data.file ?? ""}:${data.nesting ?? 0}:${data.name ?? ""}`;
 
 /** Node's public event-stream reporter interface; no TAP/stdout scraping. */
@@ -54,14 +62,14 @@ export default async function* reporter(source: AsyncIterable<Event>): AsyncGene
 		if (event.type === "test:skip" || data.skip === true) { skipped++; yield `skip ${String(data.name)}\n`; continue; }
 		if (isCancelled) { cancelled++; yield `cancelled ${String(data.name)}\n`; continue; }
 		if (isFile) {
-			if (event.type === "test:fail") { fileFailures++; yield `FAIL file ${String(data.file)} — ${cap(details.error)}\n`; }
+			if (event.type === "test:fail") { fileFailures++; yield `FAIL file ${String(data.file)} — ${cap(errorText(details.error))}\n`; }
 			continue;
 		}
 		if (isParent) {
 			if (event.type === "test:fail" && failureType !== "subtestsFailed") {
 				failedBeforeAssertion++;
 				if (failureType === "testTimeoutFailure") timeouts++;
-				yield `FAIL scenario ${String(data.name)} — ${cap(details.error)}\n`;
+				yield `FAIL scenario ${String(data.name)} — ${cap(errorText(details.error))}\n`;
 			}
 			continue;
 		}
@@ -69,12 +77,12 @@ export default async function* reporter(source: AsyncIterable<Event>): AsyncGene
 		if (event.type === "test:fail" && nesting === 0) {
 			failedBeforeAssertion++;
 			if (failureType === "testTimeoutFailure") timeouts++;
-			yield `FAIL scenario ${String(data.name)} — ${cap(details.error)}\n`;
+			yield `FAIL scenario ${String(data.name)} — ${cap(errorText(details.error))}\n`;
 		} else if (event.type === "test:pass") { assertions++; yield `ok ${String(data.name)}\n`; }
 		else {
 			failedAssertions++;
 			if (failureType === "testTimeoutFailure") timeouts++;
-			yield `FAIL ${String(data.name)} — ${cap(details.error)}\n`;
+			yield `FAIL ${String(data.name)} — ${cap(errorText(details.error))}\n`;
 		}
 	}
 	const summary = { assertions, failedAssertions, failedBeforeAssertion, skipped, cancelled, timeouts, fileFailures };
