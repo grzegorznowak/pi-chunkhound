@@ -113,7 +113,19 @@ export function buildStatusLines(opts: {
 function toolListLine(c: McpStatusConn): string {
 	const [first, ...rest] = c.toolNames;
 	if (!first) return "";
-	return [first, ...rest.map((n) => (n.startsWith(c.prefix) ? n.slice(c.prefix.length) : n))].join(" · ");
+	// Only shorten names that are really `${prefix}_<tool>` (with the separator).
+	return [first, ...rest.map((n) => (n.startsWith(`${c.prefix}_`) ? n.slice(c.prefix.length) : n))].join(" · ");
+}
+
+/** Usage example for the listed tools — never names a tool that is not
+ * callable on this connection (capability-gated servers expose fewer tools). */
+function exampleLine(c: McpStatusConn): string | undefined {
+	const kinds = new Set(
+		c.toolNames.map((n) => (n.startsWith(`${c.prefix}_`) ? n.slice(c.prefix.length + 1) : n)),
+	);
+	if (kinds.has("code_research")) return `      example: ${c.prefix}_code_research({ query: "your question" })`;
+	if (kinds.has("search")) return `      example: ${c.prefix}_search({ type: "regex", query: "your symbol" })`;
+	return undefined;
 }
 
 /** MCP connection section for /ch-status (pure — smoke-tested headless). */
@@ -125,12 +137,11 @@ export function mcpStatusLines(conns: readonly McpStatusConn[]): string[] {
 		for (const c of conns) {
 			const name = path.basename(c.worktree);
 			if (c.repoRoot && c.branchLabel) {
-				lines.push(
-					`  ● ${name} — ${path.basename(c.repoRoot)} @ ${c.branchLabel} · ${c.toolNames.length} tools`,
-					`      tools: ${toolListLine(c)}`,
-					`      example: ${c.prefix}_code_research("your question") · ${c.prefix}_search for exact symbols`,
-					`      worktree: ${c.worktree}`,
-				);
+				lines.push(`  ● ${name} — ${path.basename(c.repoRoot)} @ ${c.branchLabel} · ${c.toolNames.length} tools`);
+				lines.push(`      tools: ${toolListLine(c)}`);
+				const example = exampleLine(c);
+				if (example) lines.push(example);
+				lines.push(`      worktree: ${c.worktree}`);
 			} else {
 				lines.push(
 					`  ● ${name} · prefix ${c.prefix} · ${c.toolNames.length} tools`,
