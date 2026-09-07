@@ -5,6 +5,7 @@ import { baselineDirFor, listBaselines } from "../../../chhound/baseline.js";
 import { runGit } from "../../../chhound/git.js";
 import { claimedRootMatches, listSandboxes, pruneSandboxes, readClaimedRoot, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../../../chhound/sandbox.js";
 import type { BaselineMeta, ChhoundSettings, SandboxMeta } from "../../../chhound/types.js";
+import { mcpSelectOptions, mcpTargetLines } from "../../../mcp/command.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
@@ -16,6 +17,8 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // isolation. HOME is fake and GIT_CONFIG_NOSYSTEM=1 so git never reads the
 // operator's config. Git setup failures abort the scenario (infrastructure),
 // they are not silently ignored.
+// Also holds the 8 fs-backed target/picker view checks from smoke.ts section
+// 5b (mcp bridge integration) — same handcrafted-catalog fixture, no engine.
 
 describe("sandbox catalog", () => {
 	test("legacy status list + prune obligations", async (t) => {
@@ -98,6 +101,70 @@ describe("sandbox catalog", () => {
 			const removed = pruneSandboxes(settings);
 			await check(t, "prune removed orphan sandbox", removed.length === 1 && listSandboxes(settings).length === 0);
 			await check(t, "config path helper", sandboxConfigPath(sandboxDir).endsWith(path.join(sandboxDir, ".chunkhound.json")));
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("mcp target lines", () => {
+	test("legacy mcp target + picker obligations", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-sandbox-catalog-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const settings: ChhoundSettings = {
+				version: 1,
+				sandboxRoot: path.join(root, "sandboxes"),
+				baseRoot: path.join(root, "bases"),
+			};
+			// The view helpers read the same handcrafted catalog (meta + fake db
+			// bytes in the .state sibling) — no git, no engine needed.
+			const sandboxDir = path.join(settings.sandboxRoot!, "repo-fix-smoke-abc123");
+			const wt = path.join(sandboxDir, "fix-smoke");
+			const stateDir = sandboxStateDir(sandboxDir);
+			const dbDir = sandboxDbDir(sandboxDir);
+			fs.mkdirSync(stateDir, { recursive: true });
+			fs.writeFileSync(dbDir, "fake catalog db bytes — never opened by the engine\n");
+			const meta: SandboxMeta = {
+				version: 1,
+				worktree: wt,
+				repoRoot: path.join(root, "repo"),
+				branch: "fix/smoke",
+				baseRef: "main",
+				baseCommit: "0123456789abcdef0123456789abcdef01234567",
+				chhoundVersion: "test-fixture",
+				createdAt: "2026-09-07T00:00:00.000Z",
+				copiedFrom: "",
+				dbPath: dbDir,
+			};
+			writeSandboxMeta(stateDir, meta);
+
+			// No-argument target list (pure helper — same view the command shows).
+			const targetLines = mcpTargetLines(settings, []);
+			await check(t, "mcp: no-arg lists sandbox targets", targetLines.some((l) => l.includes(wt)), targetLines.join("\n"));
+			await check(t, "mcp: no-arg connect hint", targetLines.some((l) => l.startsWith("connect:")));
+			await check(t, "mcp: disconnect hint hidden when idle", !targetLines.some((l) => l.startsWith("disconnect:")));
+			const connectedLines = mcpTargetLines(settings, [
+				{ id: path.basename(sandboxDir), prefix: "chh_wt-fix", toolNames: ["chh_wt-fix_search"] },
+			]);
+			const connectedText = connectedLines.join("\n");
+			await check(
+				t,
+				"mcp: connected target marked",
+				connectedText.includes("●") && connectedText.includes("(connected)") && connectedText.includes("· 1 tools"),
+				connectedText,
+			);
+			await check(t, "mcp: disconnect hint when connected", connectedLines.some((l) => l.startsWith("disconnect:")));
+
+			// Interactive picker options: one per sandbox, in list order.
+			const opts = mcpSelectOptions(settings, []);
+			await check(t, "mcp: picker option per sandbox", opts.length === 1 && opts[0]!.includes(wt) && !opts[0]!.includes("●"), JSON.stringify(opts));
+			const optsConnected = mcpSelectOptions(settings, [{ id: path.basename(sandboxDir) }]);
+			await check(t, "mcp: picker marks connected", optsConnected.length === 1 && optsConnected[0]!.includes("●") && optsConnected[0]!.includes("(connected)"), JSON.stringify(optsConnected));
+			await check(t, "mcp: picker empty library", mcpSelectOptions({ version: 1, sandboxRoot: path.join(root, "empty-sandboxes") }, []).length === 0);
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

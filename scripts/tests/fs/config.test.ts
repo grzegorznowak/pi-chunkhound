@@ -2,13 +2,17 @@ import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
 import { adoptConfigFile, foldAdoptedInto, insideChunkhoundRoot, materializeConfig, suggestWorktreeBase } from "../../../chhound/config.js";
-import type { ChhoundSettings } from "../../../chhound/types.js";
+import { sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../../chhound/sandbox.js";
+import type { ChhoundSettings, SandboxMeta } from "../../../chhound/types.js";
+import { refreshMaterializedConfigs } from "../../../setup/command.js";
 import { check } from "../lib/checks.js";
 import { makeFixtureRoot } from "../lib/isolation.js";
 
 // Inventory: 26 legacy checks moved from smoke.ts sections 6+7
 // (adoptConfigFile + materializeConfig). Security labels: api_key adoption,
 // config file 0600 at creation, secrets never materialized without settings.
+// Also holds the 3 config-refresh checks from smoke.ts section 5b (mcp bridge
+// integration) — refreshMaterializedConfigs over a handcrafted catalog.
 
 async function settingsFor(root: string): Promise<ChhoundSettings> {
 	return { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
@@ -127,6 +131,51 @@ describe("materializeConfig", () => {
 			const cfg4b = JSON.parse(fs.readFileSync(p4b, "utf8")) as Record<string, unknown>;
 			const emb4b = cfg4b.embedding as Record<string, unknown> | undefined;
 			await check(t, "no output_dims without setting", emb4b === undefined || emb4b.output_dims === undefined, JSON.stringify(cfg4b));
+		} finally {
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("refreshMaterializedConfigs", () => {
+	test("legacy mcp config refresh obligations", async (t) => {
+		const root = await makeFixtureRoot("pi-chhound-fs-config-");
+		try {
+			// Polling backend, exactly like the legacy shared settings the refresh
+			// ran under — the re-materialized config must never default to watchman.
+			const settings: ChhoundSettings = {
+				version: 1,
+				sandboxRoot: path.join(root, "sandboxes"),
+				baseRoot: path.join(root, "bases"),
+				indexing: { realtimeBackend: "polling" },
+			};
+			// Handcrafted catalog: one sandbox (meta + config path in the .state
+			// sibling shape listSandboxes expects).
+			const sandboxDir = path.join(settings.sandboxRoot!, "repo-fix-smoke-abc123");
+			const dbDir = sandboxDbDir(sandboxDir);
+			const meta: SandboxMeta = {
+				version: 1,
+				worktree: path.join(sandboxDir, "fix-smoke"),
+				repoRoot: path.join(root, "repo"),
+				branch: "fix/smoke",
+				baseRef: "main",
+				baseCommit: "0123456789abcdef0123456789abcdef01234567",
+				chhoundVersion: "test-fixture",
+				createdAt: "2026-09-07T00:00:00.000Z",
+				copiedFrom: "",
+				dbPath: dbDir,
+			};
+			writeSandboxMeta(sandboxStateDir(sandboxDir), meta);
+			const configPath = materializeConfig(sandboxDir, { settings, dbDir });
+			// Pre-existing config carries a section the plugin does not own.
+			const withCustom = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+			withCustom.research = { enabled: true };
+			fs.writeFileSync(configPath, JSON.stringify(withCustom, null, 2));
+			const refreshed = refreshMaterializedConfigs({ ...settings, llm: { provider: "openai", model: "gpt-5" } });
+			await check(t, "refresh: sandbox config re-materialized", refreshed.includes(configPath), refreshed.join(","));
+			const cfgAfter = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
+			await check(t, "refresh: llm section added", (cfgAfter.llm as Record<string, unknown>)?.provider === "openai");
+			await check(t, "refresh: custom sections preserved", (cfgAfter.research as Record<string, unknown>)?.enabled === true);
 		} finally {
 			await fs.promises.rm(root, { recursive: true, force: true });
 		}

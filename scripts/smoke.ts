@@ -6,29 +6,22 @@
 import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 
 import { ensureBaseline } from "../chhound/baseline.js";
 import { materializeConfig } from "../chhound/config.js";
-import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
+import { chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
 	dirSize,
-	listSandboxes,
 	readClaimedRoot,
 	sandboxDbDir,
 	sandboxDirFor,
 	sandboxStateDir,
 	writeSandboxMeta,
 } from "../chhound/sandbox.js";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { connectMcp, disconnectMcp, listMcpConnections, mcpFooterStatusText, mcpToolPrefix, reRegisterBridgeTools } from "../mcp/manager.js";
-import { mcpSelectOptions, mcpTargetLines } from "../mcp/command.js";
-import { mcpStatusLines } from "../status/command.js";
-import { refreshMaterializedConfigs } from "../setup/command.js";
 
 import type { ChhoundSettings } from "../chhound/types.js";
 
@@ -336,218 +329,6 @@ async function main(): Promise<void> {
 		dbPath: dbDir,
 	});
 	check("meta lives in state dir (not the index root)", fs.existsSync(path.join(sandboxStateDir(sandboxDir), "meta.json")) && !fs.existsSync(path.join(sandboxDir, "meta.json")));
-
-
-
-	// ── 5b. MCP bridge: real chunkhound mcp over stdio (SDK client) ────
-	section("mcp bridge integration");
-	{
-		const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-		const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-		const daemonRuntime = path.join(tmp, "daemon-runtime");
-		fs.mkdirSync(daemonRuntime, { recursive: true });
-		const mcpEnv = { ...process.env, CHUNKHOUND_DAEMON_RUNTIME_DIR: daemonRuntime } as Record<string, string>;
-		const isAlive = (pid: number) => {
-			try {
-				process.kill(pid, 0);
-				return true;
-			} catch {
-				return false;
-			}
-		};
-		const waitFor = async (fn: () => boolean, ms: number) => {
-			const deadline = Date.now() + ms;
-			while (Date.now() < deadline) {
-				if (fn()) return true;
-				await new Promise((r) => setTimeout(r, 200));
-			}
-			return fn();
-		};
-
-		check("mcp: tool prefix derivation", mcpToolPrefix("/home/u/wt-fix") === "chh_wt-fix", mcpToolPrefix("/home/u/wt-fix"));
-		check("mcp: tool prefix override", mcpToolPrefix("/home/u/wt-fix", "mine") === "mine");
-
-		// --no-daemon: single-process server; must exit when stdin closes.
-		const t1 = new StdioClientTransport({
-			command: chhoundBinary(),
-			args: ["mcp", sandboxDir, "--config", configPath, "--no-daemon", "--no-embeddings"],
-			cwd: sandboxDir,
-			env: mcpEnv,
-			stderr: "pipe",
-		});
-		const c1 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
-		t1.stderr?.on("data", (d: Buffer) => console.log(`    [mcp-stderr] ${d.toString("utf8").trimEnd()}`));
-		await c1.connect(t1, { timeout: 30_000 });
-		const listed = await c1.listTools();
-		check(
-			"mcp: tools listed (no-daemon)",
-			listed.tools.some((t) => t.name === "daemon_status") && listed.tools.some((t) => t.name === "search"),
-			listed.tools.map((t) => t.name).join(","),
-		);
-		const st1 = await c1.callTool({ name: "daemon_status", arguments: {} });
-		check("mcp: daemon_status callable", JSON.stringify(st1).includes("query_ready"), JSON.stringify(st1).slice(0, 160));
-		const pid1 = t1.pid;
-		await c1.close();
-		check("mcp: child exits on close (no-daemon)", await waitFor(() => pid1 !== null && !isAlive(pid1), 10_000), `pid=${pid1}`);
-
-		// Default daemonized mode: stdio proxy + background daemon. The daemon
-		// must shut itself down (delay 0) once the client disconnects.
-		const projectHash = createHash("sha256").update(path.resolve(sandboxDir)).digest("hex").slice(0, 16);
-		const lockFile = path.join(daemonRuntime, "daemon-locks", `${projectHash}.json`);
-		const t2 = new StdioClientTransport({
-			command: chhoundBinary(),
-			args: ["mcp", sandboxDir, "--config", configPath, "--no-embeddings"],
-			cwd: sandboxDir,
-			env: mcpEnv,
-			stderr: "pipe",
-		});
-		const c2 = new Client({ name: "pi-chhound-smoke", version: "0.0.0" }, { capabilities: {} });
-		t2.stderr?.on("data", (d: Buffer) => console.log(`    [mcp-stderr] ${d.toString("utf8").trimEnd()}`));
-		await c2.connect(t2, { timeout: 30_000 });
-		const st2 = await c2.callTool({ name: "daemon_status", arguments: {} });
-		check("mcp: daemonized mode callable", JSON.stringify(st2).includes("query_ready"));
-		check("mcp: daemon lock registered", await waitFor(() => fs.existsSync(lockFile), 10_000), lockFile);
-		// Design 1 core claim: daemon state lands in the SANDBOX dir, never in the
-		// checkout — daemon.log, and the root-claim sidecar (indexed root = sandbox).
-		check(
-			"mcp: daemon.log lands in the sandbox dir",
-			await waitFor(() => fs.existsSync(path.join(sandboxDir, ".chunkhound", "daemon.log")), 15_000),
-			sandboxDir,
-		);
-		check("mcp: no .chunkhound in the worktree", !fs.existsSync(path.join(wt, ".chunkhound")), "found .chunkhound in checkout");
-		check(
-			"mcp: daemon claims the sandbox dir as indexed root",
-			await waitFor(() => readClaimedRoot(dbDir) === sandboxDir, 15_000),
-			readClaimedRoot(dbDir) ?? "unclaimed",
-		);
-		const pid2 = t2.pid;
-		await c2.close();
-		check("mcp: proxy exits on close (daemonized)", await waitFor(() => pid2 !== null && !isAlive(pid2), 10_000), `pid=${pid2}`);
-		check("mcp: daemon self-shutdown removes lock", await waitFor(() => !fs.existsSync(lockFile), 15_000), lockFile);
-
-		// connectMcp + per-session replay: a child session re-runs the extension
-		// factory, so bridge tools registered at runtime in the parent's api must
-		// be re-registerable into a fresh api from the stored connection state.
-		const capturePi = (into: Map<string, unknown>) =>
-			({ registerTool(t: { name: string }) { into.set(t.name, t); } }) as unknown as ExtensionAPI;
-		const firstApi = new Map<string, unknown>();
-		process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = daemonRuntime;
-		const entry = listSandboxes(settings)[0]!;
-		const conn = await connectMcp(capturePi(firstApi), entry, { extraArgs: ["--no-embeddings"] });
-		const expected = conn.toolNames;
-		check(
-			"mcp: connectMcp registers bridge tools into session api",
-			expected.length > 0 && expected.every((n) => firstApi.has(n)),
-			expected.join(","),
-		);
-		check("mcp: connection stores replayable tool metadata", conn.tools.length === expected.length && conn.tools.every((t) => typeof t.name === "string"));
-		const childApi = new Map<string, unknown>();
-		reRegisterBridgeTools(capturePi(childApi), [conn]);
-		check(
-			"mcp: bridge tools replay into a fresh (child) session api",
-			expected.length > 0 && expected.every((n) => childApi.has(n)),
-			[...childApi.keys()].join(",") || "(none)",
-		);
-		// A replayed definition must be a live bridge: same closures, same registry.
-		const daemonTool = [...childApi.entries()].find(([n]) => n.endsWith("_daemon_status"))?.[1] as {
-			execute: (...args: unknown[]) => Promise<unknown>;
-		} | undefined;
-		const stBridge = daemonTool ? await daemonTool.execute("call-1", {}, undefined, undefined) : undefined;
-		check(
-			"bridge: replayed tool calls the live server",
-			typeof stBridge === "object" && JSON.stringify(stBridge).includes("query_ready"),
-			JSON.stringify(stBridge)?.slice(0, 160) ?? "(no daemon_status tool)",
-		);
-		await disconnectMcp(conn.id);
-		delete process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR;
-		// After disconnect the same replayed definition must fail with the clear
-		// reconnect error (registry entry gone) — the child-facing behavior.
-		const guardMessage = daemonTool
-			? await (async () => {
-					try {
-						await daemonTool.execute("call-2", {}, undefined, undefined);
-						return "no-throw";
-					} catch (e) {
-						return (e as Error).message;
-					}
-				})()
-			: "(no daemon_status tool)";
-		check("bridge: replayed execute guards disconnected registry", guardMessage.includes("not connected"), guardMessage);
-		const afterDisconnect = new Map<string, unknown>();
-		reRegisterBridgeTools(capturePi(afterDisconnect));
-		check("bridge: no live connections → replay is a no-op", afterDisconnect.size === 0, `registered ${afterDisconnect.size}`);
-
-		// Unexpected daemon death (SIGKILL): the registry entry must drop on its
-		// own — transport close → Protocol._onclose → client.onclose cleanup.
-		// Tools, /ch-status and the footer would otherwise report a corpse, and
-		// the next session's auto-restore would skip it as "already live".
-		process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = daemonRuntime;
-		const connKilled = await connectMcp(capturePi(firstApi), entry, { extraArgs: ["--no-embeddings"] });
-		check("death: reconnect registers a fresh entry", listMcpConnections().some((c) => c.id === connKilled.id));
-		const pid3 = connKilled.transport.pid;
-		if (pid3 !== null) process.kill(pid3, "SIGKILL");
-		check(
-			"death: SIGKILLed daemon drops from the registry",
-			await waitFor(() => !listMcpConnections().some((c) => c.id === connKilled.id), 10_000),
-			listMcpConnections().map((c) => c.id).join(",") || "(registry empty)",
-		);
-		delete process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR;
-
-		// No-argument target list (pure helper — same view the command shows).
-		const targetLines = mcpTargetLines(settings, []);
-		check("mcp: no-arg lists sandbox targets", targetLines.some((l) => l.includes(wt)), targetLines.join("\n"));
-		check("mcp: no-arg connect hint", targetLines.some((l) => l.startsWith("connect:")));
-		check("mcp: disconnect hint hidden when idle", !targetLines.some((l) => l.startsWith("disconnect:")));
-		const connectedLines = mcpTargetLines(settings, [
-			{ id: path.basename(sandboxDir), prefix: "chh_wt-fix", toolNames: ["chh_wt-fix_search"] },
-		]);
-		const connectedText = connectedLines.join("\n");
-		check(
-			"mcp: connected target marked",
-			connectedText.includes("●") && connectedText.includes("(connected)") && connectedText.includes("· 1 tools"),
-			connectedText,
-		);
-		check("mcp: disconnect hint when connected", connectedLines.some((l) => l.startsWith("disconnect:")));
-
-		// Interactive picker options: one per sandbox, in list order.
-		const opts = mcpSelectOptions(settings, []);
-		check("mcp: picker option per sandbox", opts.length === 1 && opts[0]!.includes(wt) && !opts[0]!.includes("●"), JSON.stringify(opts));
-		const optsConnected = mcpSelectOptions(settings, [{ id: path.basename(sandboxDir) }]);
-		check("mcp: picker marks connected", optsConnected.length === 1 && optsConnected[0]!.includes("●") && optsConnected[0]!.includes("(connected)"), JSON.stringify(optsConnected));
-		check("mcp: picker empty library", mcpSelectOptions({ version: 1, sandboxRoot: path.join(tmp, "empty-sandboxes") }, []).length === 0);
-
-		// /ch-status mcp connections section (pure helper).
-		const idleStatus = mcpStatusLines([]).join("\n");
-		check("status: mcp section idle", idleStatus.includes("mcp connections (0)") && idleStatus.includes("run /ch-mcp to connect"), idleStatus);
-		const liveStatus = mcpStatusLines([
-			{ worktree: wt, prefix: "chh_wt-fix", toolNames: ["chh_wt-fix_search", "chh_wt-fix_fetchurl"] },
-		]).join("\n");
-		check(
-			"status: mcp section live",
-			liveStatus.includes("mcp connections (1)") && liveStatus.includes("●") && liveStatus.includes("2 tools"),
-			liveStatus,
-		);
-
-		// Footer indicator text (pure helper — mirrors the mcp section above).
-		check("footer: hidden when nothing connected", mcpFooterStatusText([]) === undefined);
-		check("footer: single connection", mcpFooterStatusText([{ id: "sb-1" }]) === "🔌 ch-mcp: 1 connected");
-		check(
-			"footer: multiple connections",
-			mcpFooterStatusText([{ id: "sb-1" }, { id: "sb-2" }]) === "🔌 ch-mcp: 2 connected",
-		);
-
-		// /ch-setup refresh: existing sandbox + baseline configs get the llm
-		// section from updated settings; non-owned sections survive.
-		const withCustom = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
-		withCustom.research = { enabled: true };
-		fs.writeFileSync(configPath, JSON.stringify(withCustom, null, 2));
-		const refreshed = refreshMaterializedConfigs({ ...settings, llm: { provider: "openai", model: "gpt-5" } });
-		check("refresh: sandbox config re-materialized", refreshed.includes(configPath), refreshed.join(","));
-		const cfgAfter = JSON.parse(fs.readFileSync(configPath, "utf8")) as Record<string, unknown>;
-		check("refresh: llm section added", (cfgAfter.llm as Record<string, unknown>)?.provider === "openai");
-		check("refresh: custom sections preserved", (cfgAfter.research as Record<string, unknown>)?.enabled === true);
-	}
-
 	console.log(`\n${checks - failures}/${checks} checks passed`);
 	fs.rmSync(tmp, { recursive: true, force: true });
 	if (failures > 0) process.exit(1);

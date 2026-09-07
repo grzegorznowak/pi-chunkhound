@@ -1,42 +1,38 @@
 import { describe, test } from "node:test";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ensureBaseline } from "../../../chhound/baseline.js";
-import { chhoundVersion } from "../../../chhound/cli.js";
-import { materializeConfig } from "../../../chhound/config.js";
-import { gitWorktreeAdd, runGit } from "../../../chhound/git.js";
-import { hotStartIndex } from "../../../chhound/hotstart.js";
-import { sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../../../chhound/sandbox.js";
 import type { ChhoundSettings } from "../../../chhound/types.js";
 import { disconnectMcp, listMcpConnections } from "../../../mcp/manager.js";
 import { CONNECTION_ENTRY_TYPE, recordConnection, rehydrateConnections, restoreConnections } from "../../../mcp/persist.js";
 import type { ConnectionRecord } from "../../../mcp/persist.js";
 import { check } from "../lib/checks.js";
 import { resolveEngineBinary } from "../lib/engine.js";
+import { buildIndexedSandbox } from "../lib/fixtures.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
 // Inventory: 5 legacy checks moved from smoke.ts section 5c (mcp persistence +
 // auto-restore) — the real auto-restore against an engine-indexed fixture
 // sandbox: connect, unknown-sandbox tombstone, already-live skip,
-// disconnected-only no-op and autoReconnect-off no-op. SELF-OWNED fixture —
-// the legacy section reused the shared sandbox primed by sections 1+3; here a
-// committed repo → baseline prime → worktree → hotStartIndex reproduces the
-// indexed sandbox (claim sidecar + meta in the .state sibling). Recording
-// checks: command/setup-settings.test.ts; pure rehydrate:
+// disconnected-only no-op and autoReconnect-off no-op. SELF-OWNED fixture
+// (lib/fixtures buildIndexedSandbox) — the legacy section reused the shared
+// sandbox primed by sections 1+3. Recording checks:
+// command/setup-settings.test.ts; pure rehydrate:
 // unit/connection-records.test.ts.
 
 const fakeEntry = (customType: string, data: unknown): SessionEntry =>
 	({ type: "custom", customType, data, id: "e", parentId: "p", timestamp: "t" }) as unknown as SessionEntry;
 
 describe("mcp restore", () => {
-	test("legacy auto-restore obligations", async (t) => {
+	test("legacy auto-restore obligations", async (tc) => {
 		// Engine resolution must happen BEFORE env isolation (isolatedEnv strips
 		// CHHOUND_BINARY); the resolved binary is re-injected via overrides.
 		const engine = await resolveEngineBinary();
 		console.log(`engine: ${engine.binary} (${engine.version})`);
 		const env = snapshotEnv();
 		const root = await makeFixtureRoot("pi-chhound-engine-mcp-restore-");
+		let lockFile: string | undefined;
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_BINARY: engine.binary } }));
@@ -52,55 +48,9 @@ describe("mcp restore", () => {
 			const runtime = path.join(root, "mcp-runtime");
 			fs.mkdirSync(runtime, { recursive: true });
 			process.env.CHUNKHOUND_DAEMON_RUNTIME_DIR = runtime;
-			const git = async (args: string[], opts: { cwd?: string } = {}): Promise<void> => {
-				const r = await runGit(args, opts);
-				if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
-			};
-			const gitOk = async (args: string[], opts: { cwd?: string } = {}) => {
-				const r = await runGit(args, opts);
-				if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
-				return r.stdout;
-			};
-
-			// Indexed-sandbox fixture (the sandbox-hotstart recipe): committed
-			// repo → baseline prime → fix/smoke worktree with its own file →
-			// hotStartIndex (db copy + top-up) → meta in the .state sibling.
-			const repo = path.join(root, "repo");
-			fs.mkdirSync(repo);
-			await git(["init", "-b", "main"], { cwd: repo });
-			await git(["config", "user.email", "smoke@test"], { cwd: repo });
-			await git(["config", "user.name", "Smoke"], { cwd: repo });
-			fs.writeFileSync(path.join(repo, "a.ts"), "export const a = 1;\n");
-			fs.writeFileSync(path.join(repo, "b.md"), "# hello\n");
-			await git(["add", "-A"], { cwd: repo });
-			await git(["commit", "-qm", "init"], { cwd: repo });
-			const baseCommit = await gitOk(["rev-parse", "HEAD"], { cwd: repo });
-			const extraArgs = ["--no-embeddings"];
-			const b = await ensureBaseline({ repoRoot: repo, settings, extraArgs });
-
-			const sandboxDir = sandboxDirFor(repo, "fix/smoke", settings);
-			const wt = path.join(sandboxDir, "fix-smoke");
-			fs.mkdirSync(sandboxDir, { recursive: true });
-			await gitWorktreeAdd({ cwd: repo, path: wt, createBranch: "fix/smoke", commitIsh: "main" });
-			fs.writeFileSync(path.join(wt, "c.ts"), "export const c = 3;\n");
-			await git(["add", "-A"], { cwd: wt });
-			await git(["commit", "-qm", "add c"], { cwd: wt });
-			const dbDir = sandboxDbDir(sandboxDir);
-			const configPath = materializeConfig(sandboxDir, { settings, dbDir });
-			const r = await hotStartIndex({ sourceDbDir: b.dbDir, targetDbDir: dbDir, indexDir: sandboxDir, configPath, extraArgs, pathPrefix: "fix-smoke" });
-			if (r.code !== 0) throw new Error(`hotStartIndex failed (code ${r.code}): ${r.stderrTail}`);
-			writeSandboxMeta(sandboxStateDir(sandboxDir), {
-				version: 1,
-				worktree: wt,
-				repoRoot: repo,
-				branch: "fix/smoke",
-				baseRef: "main",
-				baseCommit,
-				chhoundVersion: await chhoundVersion(),
-				createdAt: new Date().toISOString(),
-				copiedFrom: b.dbDir,
-				dbPath: dbDir,
-			});
+			const { sandboxDir } = await buildIndexedSandbox({ root, settings, extraArgs: ["--no-embeddings"] });
+			const projectHash = createHash("sha256").update(path.resolve(sandboxDir)).digest("hex").slice(0, 16);
+			lockFile = path.join(runtime, "daemon-locks", `${projectHash}.json`);
 
 			// Auto-restore against the REAL fixture sandbox (daemonized).
 			const entryLog: Array<{ type: string; data: unknown }> = [];
@@ -116,15 +66,15 @@ describe("mcp restore", () => {
 			const realRecord = new Map<string, ConnectionRecord>();
 			realRecord.set(realId, { sandboxId: realId, state: "connected" });
 			realRecord.set("ghost-sandbox", { sandboxId: "ghost-sandbox", state: "connected" });
-			await restoreConnections(persistPi, settings, realRecord, { extraArgs });
+			await restoreConnections(persistPi, settings, realRecord, { extraArgs: ["--no-embeddings"] });
 			await check(
-				t,
+				tc,
 				"persist: restore connects recorded sandbox",
 				listMcpConnections().some((c) => c.id === realId),
 				listMcpConnections().map((c) => c.id).join(",") || "(none)",
 			);
 			await check(
-				t,
+				tc,
 				"persist: unknown sandbox forgotten (tombstone)",
 				entryLog.some((e) => {
 					const d = e.data as Record<string, unknown>;
@@ -133,29 +83,48 @@ describe("mcp restore", () => {
 				JSON.stringify(entryLog),
 			);
 			const liveCount = listMcpConnections().length;
-			await restoreConnections(persistPi, settings, realRecord, { extraArgs });
-			await check(t, "persist: restore skips already-live connections", listMcpConnections().length === liveCount);
+			await restoreConnections(persistPi, settings, realRecord, { extraArgs: ["--no-embeddings"] });
+			await check(tc, "persist: restore skips already-live connections", listMcpConnections().length === liveCount);
 			await disconnectMcp(realId);
 
 			const tombstoneOnly = rehydrateConnections([
 				fakeEntry(CONNECTION_ENTRY_TYPE, { version: 1, sandboxId: realId, state: "disconnected" }),
 			]);
-			await restoreConnections(persistPi, settings, tombstoneOnly, { extraArgs });
-			await check(t, "persist: disconnected-only records → no connect", listMcpConnections().length === 0);
+			await restoreConnections(persistPi, settings, tombstoneOnly, { extraArgs: ["--no-embeddings"] });
+			await check(tc, "persist: disconnected-only records → no connect", listMcpConnections().length === 0);
 
 			const logLen = entryLog.length;
 			await restoreConnections(persistPi, { ...settings, autoReconnect: false }, realRecord, {
-				extraArgs,
+				extraArgs: ["--no-embeddings"],
 			});
 			await check(
-				t,
+				tc,
 				"persist: autoReconnect off → no restore, no records",
 				listMcpConnections().length === 0 && entryLog.length === logLen,
 				`conns=${listMcpConnections().length} newEntries=${entryLog.length - logLen}`,
 			);
 		} finally {
+			// Tear down whatever is still open (normal path already disconnected
+			// the restored sandbox): disconnect any registry leftovers, then wait
+			// for the daemon lock to disappear before env restore + root removal.
+			for (const c of listMcpConnections()) {
+				await disconnectMcp(c.id).catch(() => undefined);
+			}
+			if (lockFile) {
+				const lf = lockFile;
+				await waitFor(() => !fs.existsSync(lf), 10_000);
+			}
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });
 		}
 	});
 });
+
+const waitFor = async (fn: () => boolean, ms: number) => {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		if (fn()) return true;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+	return fn();
+};
