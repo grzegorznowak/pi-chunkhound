@@ -15,6 +15,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },
 	"fs/git-branches.test.ts": { tier: "fs", subject: "git-branches" },
+	"fs/sandbox-catalog.test.ts": { tier: "fs", subject: "sandbox-catalog" },
 	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },

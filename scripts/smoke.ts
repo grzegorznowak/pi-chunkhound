@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
-import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
+import { ensureBaseline } from "../chhound/baseline.js";
 import { materializeConfig } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { branchCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
@@ -19,10 +19,7 @@ import { hotStartIndex } from "../chhound/hotstart.js";
 import {
 	dirSize,
 	listSandboxes,
-	pruneSandboxes,
-	claimedRootMatches,
 	readClaimedRoot,
-	sandboxConfigPath,
 	sandboxDbDir,
 	sandboxDirFor,
 	sandboxStateDir,
@@ -700,31 +697,6 @@ async function main(): Promise<void> {
 			else process.env.XDG_CACHE_HOME = xdgCache;
 		}
 	}
-
-	// ── 6. listing + prune ────────────────────────────────────────────
-	section("status: list + prune");
-	const sandboxes = listSandboxes(settings);
-	check("sandbox listed", sandboxes.length === 1 && sandboxes[0]!.meta.worktree === wt);
-	check("db size reported", sandboxes[0]!.dbSizeBytes > 0);
-	// chunkhound's root-claim sidecar (written at index time) — Design 1: it
-	// claims the SANDBOX DIR (the daemon's project dir), not the checkout.
-	const claimPath = `${dbDir}.root.json`;
-	fs.writeFileSync(claimPath, JSON.stringify({ version: 1, indexed_root_path: sandboxDir }) + "\n", "utf8");
-	check("claimed root read from sidecar", readClaimedRoot(dbDir) === sandboxDir);
-	const claimed = listSandboxes(settings);
-	check("sandbox entry carries claimed root", claimed[0]!.claimedRoot === sandboxDir);
-	check("claimed root matches sandbox dir", claimedRootMatches(claimed[0]!.claimedRoot!, sandboxDir));
-	check("mismatch detected", !claimedRootMatches(claimed[0]!.claimedRoot!, "/somewhere/else"));
-	check("trailing-slash mismatch tolerated", claimedRootMatches(`${sandboxDir}/`, sandboxDir));
-	fs.rmSync(claimPath, { force: true });
-	check("missing sidecar → unclaimed", listSandboxes(settings)[0]!.claimedRoot === undefined);
-	const baselines = listBaselines(settings);
-	check("baseline listed", baselines.length === 1 && !!baselines[0]!.meta);
-	await runGit(["worktree", "remove", "--force", wt], { cwd: repo });
-	await runGit(["branch", "-D", "fix/smoke"], { cwd: repo });
-	const removed = pruneSandboxes(settings);
-	check("prune removed orphan sandbox", removed.length === 1 && listSandboxes(settings).length === 0);
-	check("config path helper", sandboxConfigPath(sandboxDir).endsWith(path.join(sandboxDir, ".chunkhound.json")));
 
 	// ── 7b. PR sandboxes (hermetic: fake gh shim + local bare with pull refs) ──
 	section("PR resolution (hermetic)");
