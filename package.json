@@ -26,6 +26,7 @@
     "test:engine": "tsx test/run.ts --tier engine",
     "test:robustness": "tsx test/run.ts --tier robustness",
     "test:c1": "tsx test/run.ts --feature c1",
+    "test:c2": "tsx test/run.ts --feature c2",
     "test:acceptance": "tsx test/run.ts --tier acceptance",
     "verify:completions": "tsx scripts/verify-completions.mts",
     "check": "npm run typecheck && npm test"
