@@ -1,0 +1,159 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22.19.x, 24.x]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - uses: astral-sh/setup-uv@v5
+      - run: npm ci
+      - name: Provision pinned ChunkHound engine
+        env:
+          CHUNKHOUND_REPOSITORY: https://github.com/chunkhound/chunkhound.git
+          # Installed dev engine was 5.2.2.dev20+gfba92db05, built from a local-only
+          # commit (gfba92db05 exists on NO remote). Reproducible pin: upstream main
+          # @2ab77535 == the audited workspace engine checkout HEAD (v5.2.1-18-g2ab77535,
+          # "mostly byte-identical" to the installed package). Drift caveat: if a test
+          # depends on user-branch-only engine changes, CI surfaces it; re-pin when the
+          # user branch lands upstream.
+          CHUNKHOUND_COMMIT: 2ab775354d8d378bdacc8ea76b51a588362cfb99
+          UV_TOOL_BIN_DIR: ${{ github.workspace }}/.ci/bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci
+          git clone "$CHUNKHOUND_REPOSITORY" .ci/chunkhound
+          git -C .ci/chunkhound checkout "$CHUNKHOUND_COMMIT"
+          test "$(git -C .ci/chunkhound rev-parse HEAD)" = "$CHUNKHOUND_COMMIT"
+          # Pin the python MCP SDK: the engine @2ab77535 uses Server.call_tool,
+          # removed in mcp 2.x; a fresh uv resolution pulls 2.x and the engine
+          # dies at startup ("'Server' object has no attribute 'call_tool'").
+          # The developer's installed engine (5.2.2.dev20+gfba92db05) runs mcp
+          # 1.27.1; re-evaluate when the user branch lands upstream.
+          uv tool install --editable "$GITHUB_WORKSPACE/.ci/chunkhound" --with "mcp==1.27.1"
+          "$UV_TOOL_BIN_DIR/chunkhound" --version
+          echo "CHHOUND_BINARY=$UV_TOOL_BIN_DIR/chunkhound" >> "$GITHUB_ENV"
+      - name: Warm engine runtime cache outside timed tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d "${RUNNER_TEMP}/pi-chhound-engine-warm.XXXXXX")"
+          trap 'rm -rf "$scratch"' EXIT
+          printf 'export const warm = true;\n' > "$scratch/warm.ts"
+          "$CHHOUND_BINARY" index "$scratch" --db "$scratch/.chhound.db" --no-embeddings
+          test -e "$scratch/.chhound.db"
+          # Watchman runtime acquisition is NOT exercised by the suite: the
+          # smoke materializes engine configs with realtime_backend=polling
+          # (macOS Watchman socket paths exceed the platform limit under deep
+          # runner tmp dirs; daemon-status polling semantics are unaffected).
+      - name: Capability probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { constants } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+          import { randomBytes } from 'node:crypto';
+          import { copyFile, mkdtemp, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          const root = await mkdtemp(join(tmpdir(), 'pi-chhound-capability-'));
+          try {
+            const source = join(root, 'a');
+            const target = join(root, 'b');
+            await writeFile(source, 'x');
+            if (typeof constants.COPYFILE_FICLONE !== 'number') {
+              console.log('CoW clone mechanism: not probed/skipped (COPYFILE_FICLONE unavailable)');
+            } else {
+              await copyFile(source, target, constants.COPYFILE_FICLONE);
+              console.log('CoW clone mechanism: COPYFILE_FICLONE requested (the API may fall back to a normal copy)');
+            }
+            // CoW clone proof (log-only): df free-space deltas around the
+            // exact production cp invocation. Plain `cp -R` is the
+            // ground-truth control; darwin `cp -c -R` degrades per file
+            // SILENTLY (exit 0 even on fallback), linux `--reflink=always`
+            // hard-fails on an unsupported fs. delta ≈ 0 → real clone;
+            // ≈ control → full copy; middle → per-file partial.
+            try {
+              const proof = join(root, 'cow-proof');
+              const proofSrc = join(proof, 'src');
+              await mkdir(proofSrc, { recursive: true });
+              const blob = randomBytes(4 * 1024 * 1024);
+              for (let i = 0; i < 4; i++) await writeFile(join(proofSrc, `blob-${i}.bin`), blob);
+              const dfAvail = (dir) => {
+                const r = spawnSync('df', ['-P', '-k', dir], { encoding: 'utf8' });
+                if (r.status !== 0) throw new Error(`df failed: ${r.stderr}`);
+                const avail = Number(r.stdout.trim().split('\n').pop().trim().split(/\s+/)[3]);
+                if (!Number.isFinite(avail)) throw new Error(`df parse failed: ${r.stdout}`);
+                return avail;
+              };
+              const runProof = async (label, args) => {
+                const before = dfAvail(proof);
+                const r = spawnSync('cp', [...args, join(proof, 'src'), join(proof, label)], { encoding: 'utf8' });
+                const delta = before - dfAvail(proof);
+                await rm(join(proof, label), { recursive: true, force: true });
+                return { status: r.status, delta };
+              };
+              const control = await runProof('dst-control', ['-R']);
+              const cloneArgs = process.platform === 'darwin' ? ['-c', '-R'] : ['-R', '--reflink=always'];
+              const attempt = await runProof('dst-clone', cloneArgs);
+              // Exit status is primary: a refused clone (linux --reflink=always
+              // on ext4/overlayfs) copies NOTHING (delta 0) — that is not a
+              // clone. Clone-vs-full classification only applies to exit 0
+              // (darwin cp -c always exits 0; degrade is per file and silent).
+              const verdict = attempt.status !== 0
+                ? `REFUSED (exit=${attempt.status}, nothing copied — production falls back to a plain copy)`
+                : attempt.delta < control.delta / 4
+                  ? 'CLONE'
+                  : attempt.delta > control.delta * 3 / 4
+                    ? 'FULL COPY (silent fallback)'
+                    : 'PARTIAL/INCONCLUSIVE';
+              console.log(`CoW clone proof: cp ${cloneArgs.join(' ')} exit=${attempt.status} delta=${attempt.delta}KiB vs plain ${control.delta}KiB (16MiB tree) → ${verdict}`);
+              if (typeof constants.COPYFILE_FICLONE_FORCE === 'number') {
+                try {
+                  await copyFile(join(proofSrc, 'blob-0.bin'), join(proof, 'ficlone-force'), constants.COPYFILE_FICLONE_FORCE);
+                  console.log('CoW FICLONE_FORCE: succeeded (node-level clone primitive works here)');
+                } catch (forceError) {
+                  console.log(`CoW FICLONE_FORCE: refused (${forceError.code ?? forceError.message}) — diagnostic only, semantics vary by platform`);
+                }
+              }
+            } catch (proofError) {
+              console.log(`CoW clone proof: skipped (${proofError.message})`);
+            }
+            const locked = join(root, 'locked');
+            await mkdir(locked);
+            await chmod(locked, 0);
+            try {
+              await readdir(locked);
+              throw new Error('chmod-000 capability is required (runner appears privileged)');
+            } catch (error) {
+              if (error instanceof Error && error.message.includes('runner appears privileged')) throw error;
+              console.log('chmod-000 access denial: observed');
+            } finally { await chmod(locked, 0o700); }
+          } finally { await rm(root, { recursive: true, force: true }); }
+          NODE
+      - name: Typecheck and full suite
+        env:
+          CHHOUND_TEST_SUMMARY_PATH: ${{ github.workspace }}/test-summary.json
+        run: |
+          npm run check
+      - name: Upload test summary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary-${{ matrix.os }}-node${{ matrix.node }}
+          path: test-summary.json
+          if-no-files-found: warn

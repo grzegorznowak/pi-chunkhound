@@ -7,10 +7,10 @@ import * as fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
-import { parseArgs } from "../chhound/args.ts";
-import { runGit } from "../chhound/git.ts";
-import { mcpArgumentCompletions, worktreeArgumentCompletions } from "../chhound/completions.ts";
-import { ChhoundArgumentProvider } from "../chhound/provider-wrap.ts";
+import { parseArgs } from "../chhound/args.js";
+import { runGit } from "../chhound/git.js";
+import { mcpArgumentCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
+import { ChhoundArgumentProvider } from "../chhound/provider-wrap.js";
 
 let checks = 0, failures = 0;
 const check = (name: string, cond: boolean, detail = "") => {

@@ -225,8 +225,10 @@ under the global pi installation is ever modified:
 ```
 npm install
 npm run typecheck          # tsc --noEmit
-npm run smoke              # end-to-end mechanics test (real chunkhound CLI, --no-embeddings)
-npm run verify:completions # completion behavior against pristine pi-tui's public provider API
+npm run check              # typecheck plus the full headless test suite
+npm test                   # tiered unit/fs/command/engine/robustness/acceptance suite
+npm run smoke              # compatibility alias for the same full suite
+npm run verify:completions # legacy completion gate (migrated in a later phase)
 ```
 
 Typecheck requires the matching `@earendil-works/pi-coding-agent` types; the smoke

@@ -107,9 +107,20 @@ export function indexedRootSidecarPath(dbDir: string): string {
 	return `${dbDir}.root.json`;
 }
 
-/** Claim value chunkhound would compute for `indexDir` (resolve + posix). */
+/**
+ * Claim value chunkhound computes for `indexDir`. The engine canonicalizes its
+ * invocation root (Config target_dir is symlink-resolved before any sidecar
+ * compare/claim), so the claim must be resolved too — path.resolve alone
+ * keeps /var/... on macOS (where /var → /private/var) and the engine then
+ * refuses the open with DuckDBIndexedRootMismatchError. Falls back to the
+ * unresolved form only when the dir does not exist yet.
+ */
 function engineClaimValue(indexDir: string): string {
-	return path.resolve(indexDir).split(path.sep).join("/");
+	try {
+		return fs.realpathSync(indexDir).split(path.sep).join("/");
+	} catch {
+		return path.resolve(indexDir).split(path.sep).join("/");
+	}
 }
 
 /**
