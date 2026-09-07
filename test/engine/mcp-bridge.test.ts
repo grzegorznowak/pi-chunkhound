@@ -14,15 +14,16 @@ import { resolveEngineBinary } from "../lib/engine.js";
 import { buildIndexedSandbox } from "../lib/fixtures.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
-// Inventory: 21 checks — 16 legacy checks moved from smoke.ts section 5b (mcp
+// Inventory: 22 checks — 16 legacy checks moved from smoke.ts section 5b (mcp
 // bridge integration) — the live stdio protocol (--no-daemon single-process
 // server, default daemonized proxy+daemon with lock/daemon.log/root-claim
 // lifecycle) and connectMcp + per-session bridge-tool replay (registration,
-// replay into a fresh api, live call, disconnect guard, no-op replay) — plus 5
+// replay into a fresh api, live call, disconnect guard, no-op replay) — plus 6
 // description-scope obligations for bridged tools (indexLabel carried on the
 // connection; index-scoped tools name their target in description and
-// promptSnippet; shared web tools stay unscoped; pinned on the live connection
-// and with fabricated metadata). SELF-OWNED fixture (lib/fixtures
+// promptSnippet; shared web tools stay unscoped in BOTH fields; unknown tools
+// stay index-scoped (denylist semantics); pinned on the live connection and
+// with fabricated metadata). SELF-OWNED fixture (lib/fixtures
 // buildIndexedSandbox). The SIGKILL death cluster moved to
 // robustness/engine/mcp-death.test.ts; pure prefix/status/footer text to
 // unit/mcp-view.test.ts; target/picker view to fs/sandbox-catalog.test.ts;
@@ -181,7 +182,9 @@ describe("mcp bridge", () => {
 				webDefs.map(([n, tool]) => `${n}: ${(tool as { description: string }).description.slice(0, 80)}`).join("\n") || "(no web tools listed by this server)",
 			);
 			// Scope rules pinned with fabricated metadata — independent of which
-			// tools the live server happens to list.
+			// tools the live server happens to list. Covers description AND
+			// promptSnippet (review #3) and the denylist semantics: any tool other
+			// than websearch/fetchurl is index-scoped (review #6).
 			const fabApi = new Map<string, unknown>();
 			reRegisterBridgeTools(capturePi(fabApi), [
 				{
@@ -192,16 +195,35 @@ describe("mcp bridge", () => {
 						{ name: "search", description: "Pinpoint code locations" },
 						{ name: "websearch", description: "Search the web" },
 						{ name: "fetchurl", description: "Fetch a URL" },
+						{ name: "custom_tool", description: "Some future tool" },
 					],
 				},
 			]);
-			const fabDesc = (n: string) => (fabApi.get(`chh_fab_${n}`) as { description: string } | undefined)?.description ?? "";
-			await check(tc, "mcp: fabricated scoped tool names its index", fabDesc("search").includes("[chhound:sb-fab] chunkhound @ main —"), fabDesc("search"));
+			const fabDef = (n: string) =>
+				(fabApi.get(`chh_fab_${n}`) as { description: string; promptSnippet: string } | undefined) ?? { description: "", promptSnippet: "" };
+			const scoped = fabDef("search");
 			await check(
 				tc,
-				"mcp: fabricated web tools stay unscoped",
-				!fabDesc("websearch").includes("chunkhound @ main") && !fabDesc("fetchurl").includes("chunkhound @ main"),
-				`websearch: ${fabDesc("websearch")} | fetchurl: ${fabDesc("fetchurl")}`,
+				"mcp: fabricated scoped tool names its index (description + snippet)",
+				scoped.description.includes("[chhound:sb-fab] chunkhound @ main —") && scoped.promptSnippet.includes("(chunkhound @ main)"),
+				`${scoped.description} | ${scoped.promptSnippet}`,
+			);
+			const custom = fabDef("custom_tool");
+			await check(
+				tc,
+				"mcp: unknown tools stay index-scoped (denylist semantics)",
+				custom.description.includes("[chhound:sb-fab] chunkhound @ main —") && custom.promptSnippet.includes("(chunkhound @ main)"),
+				`${custom.description} | ${custom.promptSnippet}`,
+			);
+			const webUnscoped = (n: string) => {
+				const d = fabDef(n);
+				return !d.description.includes("chunkhound @ main") && !d.promptSnippet.includes("chunkhound @ main");
+			};
+			await check(
+				tc,
+				"mcp: fabricated web tools stay unscoped (description + snippet)",
+				webUnscoped("websearch") && webUnscoped("fetchurl"),
+				`websearch: ${fabDef("websearch").description} | ${fabDef("websearch").promptSnippet} || fetchurl: ${fabDef("fetchurl").description} | ${fabDef("fetchurl").promptSnippet}`,
 			);
 			const childApi = new Map<string, unknown>();
 			reRegisterBridgeTools(capturePi(childApi), [conn]);

@@ -22,7 +22,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chhoundApiKeyEnv, chhoundBinary } from "../chhound/cli.js";
-import { slugify } from "../chhound/paths.js";
+import { shortHash, slugify } from "../chhound/paths.js";
 import { sandboxBranchLabel, sandboxConfigPath } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 
@@ -103,10 +103,27 @@ export function mcpToolPrefix(worktree: string, override?: string): string {
 	return override || `chh_${slugify(path.basename(worktree))}`;
 }
 
-/** Index identity for a sandbox, e.g. "chunkhound @ main" (PR heads included). */
-function describeIndex(meta: { repoRoot?: string; branch: string; headRef?: string; headOid?: string }, dir: string): string {
+/** Uniqueness token for a repo identity — the same shortHash the sandbox dir
+ * name embeds (over repoRoot+branch), so fork/upstream clones with equal
+ * folder names stay distinguishable in labels. */
+export function indexDisambigToken(repoRoot: string, branch: string): string {
+	return shortHash(`${path.resolve(repoRoot)}\u0000${branch}`);
+}
+
+/** Index identity for a sandbox, e.g. "chunkhound @ main" (PR heads included).
+ * When another live connection already carries the same base label, the
+ * deterministic token is appended to the repo part — tool descriptions must
+ * always tell which index a namespace serves. */
+export function indexLabelFor(
+	meta: { repoRoot?: string; branch: string; headRef?: string; headOid?: string },
+	dir: string,
+	existing: readonly string[],
+): string {
 	const repo = meta.repoRoot ? path.basename(meta.repoRoot) : path.basename(dir);
-	return `${repo} @ ${sandboxBranchLabel(meta)}`;
+	const label = `${repo} @ ${sandboxBranchLabel(meta)}`;
+	if (!existing.includes(label)) return label;
+	const token = meta.repoRoot ? indexDisambigToken(meta.repoRoot, meta.branch) : shortHash(dir);
+	return `${repo}·${token} @ ${sandboxBranchLabel(meta)}`;
 }
 
 export function listMcpConnections(): McpConnection[] {
@@ -171,7 +188,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	}
 
 	const prefix = mcpToolPrefix(entry.meta.worktree, opts.prefix);
-	const indexLabel = describeIndex(entry.meta, entry.dir);
+	const indexLabel = indexLabelFor(entry.meta, entry.dir, [...connections.values()].map((c) => c.indexLabel));
 	let mcpTools: McpToolMeta[];
 	try {
 		const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
