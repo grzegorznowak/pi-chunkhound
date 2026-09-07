@@ -15,8 +15,10 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },
 	"fs/git-branches.test.ts": { tier: "fs", subject: "git-branches" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
+	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
+	"unit/worktree-intent.test.ts": { tier: "unit", subject: "worktree-intent" },
 };
 
 export const tierOrder: readonly Tier[] = [

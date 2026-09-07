@@ -17,7 +17,6 @@ import { ownerRepoFromRemoteUrl, parsePrUrl, ghPrView, ensureMirror, mirrorDir, 
 import { resolveBranchChoice } from "../worktree/command.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import {
-	findConflictingIndexed,
 	dirSize,
 	listSandboxes,
 	pruneSandboxes,
@@ -39,7 +38,7 @@ import { mcpStatusLines } from "../status/command.js";
 import { refreshMaterializedConfigs, registerSetupCommand } from "../setup/command.js";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { PathInputComponent } from "../chhound/path-input.js";
-import { isWizardInvocation, OTHER_REPO, REPO_PICKER_TITLE, resolvePrSandboxHost, resolveSandboxLocation } from "../worktree/command.js";
+import { resolvePrSandboxHost } from "../worktree/command.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings } from "../chhound/types.js";
 
@@ -74,46 +73,6 @@ async function main(): Promise<void> {
 		// semantics) opts into the engine's polling backend here.
 		indexing: { realtimeBackend: "polling" },
 	};
-
-	// ── 2b. --dest location, wizard trigger, conflict block ──────────
-	section("dest: location + wizard + conflict");
-	{
-		const repo2 = path.join(tmp, "dest-repo");
-		fs.mkdirSync(repo2);
-		const dest = path.join(tmp, "dest-parent");
-		check("wizard: bare /chworktree", isWizardInvocation([], {}), JSON.stringify(isWizardInvocation([], {})));
-		check("wizard: repo only", isWizardInvocation(["repo"], {}));
-		check("one-go: branch given", isWizardInvocation(["repo", "main"], {}) === false);
-		check("one-go: --dest given", isWizardInvocation(["repo"], { dest: "~/wt" }) === false);
-		check("one-go: -b given", isWizardInvocation([], { b: "x" }) === false);
-		check("wizard: --help is not wizard", isWizardInvocation(["repo"], { help: true }) === false);
-		check("wizard: -h is not wizard", isWizardInvocation(["repo"], { h: true }) === false);
-		check("repo picker title wording", REPO_PICKER_TITLE === "Select a repository", REPO_PICKER_TITLE);
-		check("repo picker path-option wording", OTHER_REPO === "select local repository", OTHER_REPO);
-
-		// Design 1: the checkout lives INSIDE its sandbox dir — name derived
-		// from repo + branch, folder = branch (slashes → "-").
-		const sb = resolveSandboxLocation(repo2, undefined, settings, dest);
-		check("sandbox: name from repo+branch (repo-wt default)", path.basename(sb.sandboxDir).startsWith("dest-repo-"), path.basename(sb.sandboxDir));
-		check("sandbox: worktree inside sandbox dir", sb.wtPath === path.join(sb.sandboxDir, "dest-repo-wt"), sb.wtPath);
-		const sbBranch = resolveSandboxLocation(repo2, "fix/foo", settings, dest);
-		check("sandbox: branch-named folder (slashes → dashes)", sbBranch.wtPath === path.join(sbBranch.sandboxDir, "fix-foo"), sbBranch.wtPath);
-		check("sandbox: distinct branch → distinct sandbox", sbBranch.sandboxDir !== sb.sandboxDir, `${sbBranch.sandboxDir} vs ${sb.sandboxDir}`);
-		// Branch-rename safety: the name never depends on the worktree path (no circularity).
-		const sbSame = resolveSandboxLocation(repo2, "fix/foo", settings, dest);
-		check("sandbox: stable for same (repo, branch)", sbSame.sandboxDir === sbBranch.sandboxDir && sbSame.wtPath === sbBranch.wtPath);
-		// --dest re-scoped: sandbox library root override — same (repo, branch) at a
-		// different root yields a different sandbox dir.
-		const sbOther = resolveSandboxLocation(repo2, "fix/foo", settings, path.join(tmp, "other-root"));
-		check("sandbox: --dest = library root override", sbOther.sandboxDir.startsWith(path.join(tmp, "other-root")) && sbOther.sandboxDir !== sbBranch.sandboxDir, sbOther.sandboxDir);
-		check("sandbox: folder name independent of root", path.basename(sbOther.wtPath) === "fix-foo");
-
-		const idx = [path.join(tmp, "idx-a")];
-		check("conflict: exact match", findConflictingIndexed(path.join(tmp, "idx-a"), idx) === path.join(tmp, "idx-a"));
-		check("conflict: inside indexed worktree", findConflictingIndexed(path.join(tmp, "idx-a", "sub"), idx) === path.join(tmp, "idx-a"));
-		check("conflict: contains indexed worktree", findConflictingIndexed(tmp, idx) === path.join(tmp, "idx-a"));
-		check("no conflict", findConflictingIndexed(path.join(tmp, "other"), idx) === undefined);
-	}
 
 	// ── 2c. path input component: TAB completion in dialogs ──────────
 	section("path input component");
