@@ -48,7 +48,18 @@ export interface SetupDiscoveryOptions extends DiscoveryOptions {
 	standalone?: boolean;
 }
 
-export function verdictCopy(_verdict: Verdict): string { throw new Error("RED shell (C1): verdictCopy not implemented — green next"); }
+/** S4 verdict copy, spec v1.2 §2 — exact strings (unit/c1-verdict-copy is the contract). */
+const VERDICT_COPY: Record<Verdict, string> = {
+	adoptable: "Existing index for this repo found — will be reused",
+	"layout-not-supported": "Index layout not supported (covers a different or multiple folders) — skipped",
+	"unresolved-path": "Index location unclear — needs your answer or skip",
+	busy: "Index in use by chunkhound right now — will copy when free",
+	unusable: "Config or db missing/unreadable — skipped",
+};
+
+export function verdictCopy(verdict: Verdict): string {
+	return VERDICT_COPY[verdict];
+}
 /** Re-triage an advisory catalog entry at use time; undefined means drop it. */
 export async function retriageEntry(_entry: LibraryEntry, _options: DiscoveryOptions = {}): Promise<TriageResult | undefined> { throw new Error("RED shell (C1): retriageEntry not implemented — green next"); }
 /** Only a current non-adoptable result is eligible for the tier-3 size question. */
