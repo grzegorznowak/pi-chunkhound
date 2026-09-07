@@ -13,9 +13,17 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // termination + permission denial); its truncation-limits/AbortSignal leaf
 // moved to robustness/fs/c1-discovery-bounds.test.ts (scenario "C1 deep-sweep
 // budgets/cancel bounds", leaf name verbatim) — see that file's header.
+// HARDENING (pre-green RED commit, reviewed): the draft-era checks left spec
+// obligations unpinned — the fast-pass dir-layout fixed spot was planted but
+// never required, and deep-sweep skip semantics were asserted only for
+// node_modules + the outside symlink. Added leaves pin (a) dir-layout spot
+// presence, (b) .git/dependency/cache decoy exclusion, (c) pruning of a real
+// managed subtree planted INSIDE the swept tree, and (d) path-based (never
+// name-based) containment via a same-named user-dir decoy.
 // Env: fake HOME + the three CHHOUND_*_ROOT managed-root overrides, matching
-// the smoke-era runtime env for these discovery paths. Managed roots are NOT
-// planted here (deepSweep receives them explicitly; fastPass reads env).
+// the smoke-era runtime env for these discovery paths. Managed roots are
+// siblings here (deepSweep receives the sweep-local managed subtree
+// explicitly; fastPass reads env).
 
 describe("c1 discovery fast-pass + sweep", () => {
 	test("C1 fast-pass: selected host fixed spots only and silent entry is callable", async (t) => {
@@ -44,7 +52,7 @@ describe("c1 discovery fast-pass + sweep", () => {
 			const sessionCwd = path.join(root, "session-cwd");
 			const session = plantCandidate(sessionCwd, ".chunkhound.json");
 			const file = plantCandidate(host, ".chunkhound.json");
-			plantCandidate(host, "config.json", "dir");
+			const dir = plantCandidate(host, "config.json", "dir");
 			const parentConfig = plantCandidate(parent, ".chunkhound.json");
 			fs.mkdirSync(path.join(host, ".chunkhound", "sub"), { recursive: true });
 			fs.writeFileSync(path.join(host, ".chunkhound", "sub", "deep.json"), c1ConfigText(file.dbPath));
@@ -60,6 +68,9 @@ describe("c1 discovery fast-pass + sweep", () => {
 					!found.some((x) => x.configPath.endsWith("deep.json") || x.configPath.endsWith("watchman.sock")),
 			);
 			await check(t, "C1 silent fast-pass is callable without UI", Array.isArray(found));
+			// HARDENING: the dir-layout fixed spot (repoRoot/.chunkhound/ with a
+			// config inside) was planted but never required by the draft checks.
+			await check(t, "C1 fast-pass dir-layout fixed spot is present", found.some((x) => x.configPath === dir.configPath));
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });
@@ -84,8 +95,11 @@ describe("c1 discovery fast-pass + sweep", () => {
 			);
 
 			// Real bounded tree: one allowed candidate; standard skip dirs
-			// (node_modules/.git/dependency/cache) plus a "managed-bases" decoy;
-			// a chmod-000 dir (restored in finally); a symlink cycle back to the
+			// (node_modules/.git/dependency/cache) plus a "managed-bases" decoy
+			// (same NAME as a managed root but NOT inside one — containment must
+			// be path-based); a REAL managed subtree planted inside the swept
+			// tree (sweepRoot/managed-inside, passed via managedRoots below); a
+			// chmod-000 dir (restored in finally); a symlink cycle back to the
 			// sweep root; an outside candidate reachable only via a symlinked
 			// config file (no symlink follow). Truncation/abort runs moved to
 			// robustness/fs/c1-discovery-bounds.test.ts.
@@ -94,6 +108,9 @@ describe("c1 discovery fast-pass + sweep", () => {
 			for (const d of ["node_modules/pkg", ".git/x", "dependency/x", "cache/x", "managed-bases/x"]) {
 				plantCandidate(path.join(sweepRoot, d), ".chunkhound.json");
 			}
+			const nameDecoy = path.join(sweepRoot, "managed-bases", "x", ".chunkhound.json");
+			const managedInside = plantCandidate(path.join(sweepRoot, "managed-inside", "x"), ".chunkhound.json");
+			const sweepManaged = [...managed, path.join(sweepRoot, "managed-inside")];
 			const denied = path.join(sweepRoot, "denied");
 			fs.mkdirSync(denied, { recursive: true });
 			fs.chmodSync(denied, 0o000);
@@ -101,7 +118,7 @@ describe("c1 discovery fast-pass + sweep", () => {
 			const outside = plantCandidate(path.join(root, "outside"), ".chunkhound.json");
 			fs.symlinkSync(outside.configPath, path.join(sweepRoot, "outside-link.json"));
 			try {
-				const result = await deepSweep(sweepRoot, { managedRoots: managed, limits: { maxDirs: 100, maxFiles: 100, maxMs: 5_000 } });
+				const result = await deepSweep(sweepRoot, { managedRoots: sweepManaged, limits: { maxDirs: 100, maxFiles: 100, maxMs: 5_000 } });
 				await check(
 					t,
 					"C1 sweep reports only reviewable allowed candidates",
@@ -112,6 +129,22 @@ describe("c1 discovery fast-pass + sweep", () => {
 					t,
 					"C1 sweep terminates symlink cycle and reports permission denial",
 					!result.cancelled && result.permissionErrors >= 1,
+				);
+				// HARDENING: .git/dependency/cache subtrees and REAL managed
+				// subtrees inside the swept root must never surface as candidates.
+				const decoyConfigs = [".git/x", "dependency/x", "cache/x"].map((d) => path.join(sweepRoot, d, ".chunkhound.json"));
+				await check(
+					t,
+					"C1 sweep skips .git/dependency/cache decoys and managed subtrees",
+					!result.candidates.some((x) => decoyConfigs.includes(x.configPath) || x.configPath === managedInside.configPath),
+				);
+				// HARDENING: containment is path-based — a user dir that merely
+				// SHARES a managed root's name (managed-bases decoy, not inside any
+				// managed root) is still traversed and reported.
+				await check(
+					t,
+					"C1 sweep containment is path-based, never name-based",
+					result.candidates.some((x) => x.configPath === nameDecoy),
 				);
 			} finally {
 				fs.chmodSync(denied, 0o700);

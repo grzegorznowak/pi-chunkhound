@@ -9,10 +9,11 @@ import { check } from "../lib/checks.js";
 // is a pure function over supplied candidates + parallel triage results, so
 // no fs/env is needed. Scenario title + both leaf check names verbatim. The
 // fs-backed re-triage scenario of the same section lives in
-// fs/c1-advisory.test.ts. NOTE (green-era, do not weaken silently): this
-// fixture has only ONE adoptable candidate (bad is triaged unusable), so the
-// fixed-spot-order preference cannot yet be proven — a second two-adoptable
-// case is a reviewed green addition.
+// fs/c1-advisory.test.ts. HARDENING (pre-green RED commit, reviewed): the
+// draft fixture has only ONE adoptable candidate (bad is triaged unusable),
+// so the fixed-spot-order preference was unprovable — the two extra leaves
+// below pin earliest-spot-wins with two adoptables and correlation by
+// candidate identity (never by parallel-triage array order).
 
 describe("c1 discovery policy", () => {
 	test("C1 selection order: fixed spots outrank catalog insertion and bad first does not block", async (t) => {
@@ -35,6 +36,25 @@ describe("c1 discovery policy", () => {
 			t,
 			"C1 selected candidate follows fixed-spot candidate order rather than catalog insertion",
 			selected?.repoRoot === [bad, good][1]!.repoRoot,
+		);
+		// HARDENING: with BOTH fixed spots adoptable the earlier spot must win —
+		// the draft fixture (bad unusable) could not prove order preference.
+		const bothAdoptable: TriageResult[] = [
+			{ candidate: bad, verdict: "adoptable" },
+			{ candidate: good, verdict: "adoptable" },
+		];
+		await check(
+			t,
+			"C1 earliest fixed spot wins when both are adoptable",
+			selectAdoptable([bad, good], bothAdoptable)?.repoRoot === bad.repoRoot,
+		);
+		// HARDENING: parallel triage results may arrive in any array order;
+		// selection must correlate by candidate identity and follow fixed-spot
+		// order — a naive first-adoptable-in-triage-array pick would return good.
+		await check(
+			t,
+			"C1 parallel triage order never reorders the fixed-spot pick",
+			selectAdoptable([bad, good], [{ candidate: good, verdict: "adoptable" }, { candidate: bad, verdict: "adoptable" }])?.repoRoot === bad.repoRoot,
 		);
 	});
 });

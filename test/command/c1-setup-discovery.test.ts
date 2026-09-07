@@ -20,6 +20,9 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // the runSetupDiscovery seam), and SetupDeps are injected so no UI, real
 // settings or engine state is touched. Env: fake HOME (global settings +
 // library.json live under it); catalog byte-preservation fixture per scenario.
+// HARDENING (pre-green RED commit, reviewed): added leaves pin that the
+// marker is actually CONSULTED (marker-present global run skips consent and
+// completes) and that bypass modes never record the global onboarding marker.
 
 describe("c1 setup discovery", () => {
 	test("C1 setup transaction: captured handler and SetupDeps enforce verify-first consent boundaries", async (t) => {
@@ -92,6 +95,24 @@ describe("c1 setup discovery", () => {
 					!events.slice(beforeBypasses).includes("consent") &&
 					!events.slice(beforeBypasses).includes("catalog"),
 			);
+			// HARDENING: the same three bypass runs must never record the GLOBAL
+			// onboarding marker either — none of them got the consent ask, so
+			// none may mark onboarding complete (else every later global setup
+			// would silently skip consent).
+			await check(t, "C1 bypass modes never record the global onboarding marker", !events.slice(beforeBypasses).includes("marker"));
+			// HARDENING: when the global marker is ALREADY present, a global UI
+			// run must skip the consent ask entirely and still complete — the
+			// draft checks never distinguished marker-present (consent would
+			// throw here if consulted).
+			const marked = await runSetupDiscovery(
+				{
+					...deps,
+					readGlobalMarker: async () => true,
+					consent: async () => { throw new Error("consented while marker present"); },
+				},
+				{ uiAvailable: true },
+			);
+			await check(t, "C1 marker-present setup skips consent and completes", !marked.cancelled);
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });
