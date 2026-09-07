@@ -1,7 +1,8 @@
 import { describe, test } from "node:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { copyTreeCoW } from "../../../chhound/hotstart.js";
 import { check } from "../lib/checks.js";
 import { makeFixtureRoot } from "../lib/isolation.js";
@@ -11,6 +12,9 @@ import { makeFixtureRoot } from "../lib/isolation.js";
 // forced mode survives). Deterministic on every platform: clone attempt or
 // silent fallback must both yield byte-identical trees; stale .cow-tmp /
 // .cow-bak crash residue is swept before a copy.
+// The df free-space proof test below adds 2 non-legacy checks (clone xor
+// full-copy classification) — it makes the CoW mechanism OBSERVABLE where
+// the legacy checks are deliberately agnostic.
 
 describe("copyTreeCoW", () => {
 	test("legacy copyTreeCoW obligations", async (t) => {
@@ -132,6 +136,74 @@ describe("copyTreeCoW", () => {
 			copyTreeCoW(src, sweptDst);
 			const swept = !fs.existsSync(litterA) && !fs.existsSync(litterB);
 			await check(t, "crash residue (.cow-tmp/.cow-bak) swept before copy", swept && tree(sweptDst) === srcSnap, swept ? "" : "residue survived");
+		} finally {
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	// Free-space proof (df -P -k deltas around the production primitive): the
+	// forced plain copy is the ground-truth control `a`; the normal clone
+	// attempt is `b`. Ratio classification on a 4×16MiB incompressible tree:
+	// b < a/4 → real clone; b > 3a/4 → full-copy fallback; anything between →
+	// per-file partial clone (macOS cp -c degrades PER FILE) or measurement
+	// noise → failure. This cannot flake-red on filesystem capability
+	// differences (APFS/ext4/tmpfs/overlayfs/btrfs all report a consistent
+	// verdict); it only fails on behavioral inconsistency. A transient
+	// background write on the runner may distort one measurement — one retry.
+	test("clone attempt is provably clone xor full copy (df free-space deltas)", async (t) => {
+		const kib = 64 * 1024;
+		const root = await makeFixtureRoot("pi-chhound-fs-cow-proof-");
+		try {
+			const src = path.join(root, "proof-src");
+			fs.mkdirSync(src, { recursive: true });
+			const blob = randomBytes(16 * 1024 * 1024);
+			for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(src, `blob-${i}.bin`), blob);
+			const dfAvail = (dir: string): number => {
+				const r = spawnSync("df", ["-P", "-k", dir], { encoding: "utf8" });
+				const lines = typeof r.stdout === "string" ? r.stdout.trim().split("\n") : [];
+				const avail = Number((lines[lines.length - 1] ?? "").trim().split(/\s+/)[3]);
+				if (r.status !== 0 || !Number.isFinite(avail)) throw new Error(`df parse failed (${r.status}): ${r.stderr ?? r.stdout ?? ""}`);
+				return avail;
+			};
+			const measure = (forced: boolean): number => {
+				const dst = path.join(root, forced ? "proof-dst-force" : "proof-dst");
+				const prior = process.env.CHHOUND_COPY_FORCE;
+				let delta: number;
+				try {
+					// Presence+value restoration: the normal-path measurement
+					// temporarily clears an OUTER forced mode so the clone attempt
+					// is actually exercised; both runs restore exactly.
+					if (forced) process.env.CHHOUND_COPY_FORCE = "1";
+					else if (prior === "1") delete process.env.CHHOUND_COPY_FORCE;
+					const before = dfAvail(root);
+					copyTreeCoW(src, dst);
+					delta = before - dfAvail(root);
+				} finally {
+					if (prior === undefined) delete process.env.CHHOUND_COPY_FORCE;
+					else process.env.CHHOUND_COPY_FORCE = prior;
+				}
+				fs.rmSync(dst, { recursive: true, force: true });
+				return delta;
+			};
+			const classify = (a: number, b: number): "clone" | "full" | "inconclusive" =>
+				b < a / 4 ? "clone" : b > (a * 3) / 4 ? "full" : "inconclusive";
+			let a = measure(true);
+			let b = measure(false);
+			let verdict = classify(a, b);
+			if (verdict === "inconclusive") {
+				// One retry absorbs transient background writes on the runner.
+				a = measure(true);
+				b = measure(false);
+				verdict = classify(a, b);
+			}
+			await check(t, "df control: forced plain copy consumes ≈ tree size", a > kib / 2 && a < kib * 2, `a=${a}KiB tree=${kib}KiB`);
+			if (verdict === "clone") {
+				await check(t, "copyTreeCoW clone attempt performs a REAL clone (df delta ≈ 0)", true, `a=${a}KiB b=${b}KiB → CLONE`);
+			} else if (verdict === "full") {
+				await check(t, "copyTreeCoW clone attempt provably fell back to a FULL copy (df delta ≈ control)", true, `a=${a}KiB b=${b}KiB → FULL COPY`);
+			} else {
+				await check(t, "copyTreeCoW clone attempt is clone xor full copy (df delta)", false, `a=${a}KiB b=${b}KiB → PARTIAL/INCONCLUSIVE (per-file silent degrade or measurement noise)`);
+			}
 		} finally {
 			await fs.promises.rm(root, { recursive: true, force: true });
 		}

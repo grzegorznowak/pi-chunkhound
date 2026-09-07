@@ -19,12 +19,23 @@ const errorText = (error: unknown): string => {
 	return String(error);
 };
 
-const id = (data: Record<string, unknown>): string => `${data.file ?? ""}:${data.nesting ?? 0}:${data.name ?? ""}`;
-
-/** Node's public event-stream reporter interface; no TAP/stdout scraping. */
+/**
+ * Node's public event-stream reporter interface; no TAP/stdout scraping.
+ * Parent membership is derived from a global well-nested frame stack: a
+ * test is a parent iff at least one test:start occurred strictly between
+ * its own start and its terminal event (frame.mark vs startCounter). This
+ * avoids two misclassification traps: declaration-order enqueue slots (a
+ * describe body enqueues ALL children before the first runs, so a later
+ * sibling clobbers the slot and the first sibling's pass is double-counted
+ * as an assertion leaf), and file attribution (leaf subtests created by the
+ * shared check() helper carry the HELPER's data.file, not the test file's).
+ * Per-file event sequences are well-nested, so interleaved frames from
+ * concurrent files pop in matching order; stale deeper frames (e.g. a
+ * timed-out child that never terminates) are discarded defensively.
+ */
 export default async function* reporter(source: AsyncIterable<Event>): AsyncGenerator<string> {
-	const children = new Set<string>();
-	const stack = new Map<number, string>();
+	const frames: { nesting: number; mark: number }[] = [];
+	let startCounter = 0;
 	let assertions = 0;
 	let failedAssertions = 0;
 	let failedBeforeAssertion = 0;
@@ -37,14 +48,9 @@ export default async function* reporter(source: AsyncIterable<Event>): AsyncGene
 	for await (const event of source) {
 		const data = event.data ?? {};
 		const nesting = Number(data.nesting ?? 0);
-		if (event.type === "test:enqueue") {
-			const current = id(data);
-			if (nesting > 0) children.add(stack.get(nesting - 1) ?? "");
-			stack.set(nesting, current);
-			for (const depth of [...stack.keys()]) if (depth > nesting) stack.delete(depth);
-			continue;
-		}
 		if (event.type === "test:start") {
+			frames.push({ nesting, mark: startCounter });
+			startCounter++;
 			const header = `${data.file ?? ""}/${data.name ?? ""}`;
 			if (header !== lastHeader && nesting <= 1) {
 				lastHeader = header;
@@ -53,11 +59,23 @@ export default async function* reporter(source: AsyncIterable<Event>): AsyncGene
 			continue;
 		}
 		if (event.type !== "test:pass" && event.type !== "test:fail" && event.type !== "test:skip" && event.type !== "test:cancel") continue;
-		const current = id(data);
 		const details = (data.details ?? {}) as Record<string, unknown>;
 		const failureType = String((details.error as Record<string, unknown> | undefined)?.failureType ?? "");
+		// Pop this test's frame; discard stale deeper frames from children
+		// that never terminated (timeout/kill paths) without touching
+		// shallower frames belonging to still-open ancestors or other files.
+		let frame: { nesting: number; mark: number } | undefined;
+		while (frames.length > 0) {
+			const top = frames[frames.length - 1];
+			if (top.nesting === nesting) {
+				frame = frames.pop();
+				break;
+			}
+			if (top.nesting < nesting) break;
+			frames.pop();
+		}
+		const isParent = (frame !== undefined && startCounter > frame.mark + 1) || failureType === "subtestsFailed";
 		const isFile = nesting === 0 && String(data.name ?? "") === String(data.file ?? "");
-		const isParent = children.has(current) || failureType === "subtestsFailed";
 		const isCancelled = event.type === "test:cancel" || failureType.toLowerCase().includes("cancelled");
 		if (event.type === "test:skip" || data.skip === true) { skipped++; yield `skip ${String(data.name)}\n`; continue; }
 		if (isCancelled) { cancelled++; yield `cancelled ${String(data.name)}\n`; continue; }
