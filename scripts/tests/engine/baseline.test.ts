@@ -9,13 +9,15 @@ import { resolveEngineBinary } from "../lib/engine.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
 // Inventory: 12 legacy checks moved from smoke.ts section "baseline anchor:
-// local first" (the whole independent block). Repo A: local main @ c1 while a
-// local bare origin carries a DIFFERENT main tip c2 (fetched → origin/main =
-// c2). Worktrees are cut from local state, so the baseline must anchor c1 —
-// never the origin tip. Repo B: local main renamed away → resolution falls
-// back to origin/main. opts.ref override lands in its own (repo, ref) slot.
-// Self-owned fixture and settings root; the prime/refresh half of the legacy
-// baseline section joins this file in a later commit with its own context.
+// local first" (the whole independent block) + 8 legacy checks from section
+// "baseline prime" (prime/refresh journey: repo seed, first prime, clean
+// re-run, base-move in-place refresh). Repo A: local main @ c1 while a local
+// bare origin carries a DIFFERENT main tip c2 (fetched → origin/main = c2).
+// Worktrees are cut from local state, so the baseline must anchor c1 — never
+// the origin tip. Repo B: local main renamed away → resolution falls back to
+// origin/main. opts.ref override lands in its own (repo, ref) slot. Each
+// context owns its fixture and settings root; the sandbox-hotstart file
+// primes its own baseline too (no cross-file state).
 
 async function git(args: string[], opts: { cwd?: string } = {}): Promise<void> {
 	const r = await runGit(args, opts);
@@ -110,6 +112,69 @@ describe("baseline anchor", () => {
 			await check(tc, "anchor: override lands in its own slot", dev1.dir !== b1.dir, `${dev1.dir} vs ${b1.dir}`);
 			const dev2 = await ensureBaseline({ repoRoot: repoB, settings: anchorSettings, ref: "dev", onLine, extraArgs });
 			await check(tc, "anchor: override re-run stays fresh", dev2.fresh === false, dev2.reason);
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("baseline prime", () => {
+	test("legacy prime + refresh obligations", async (tc) => {
+		// Engine resolution must happen BEFORE env isolation (isolatedEnv strips
+		// CHHOUND_BINARY); the resolved binary is re-injected via overrides.
+		const engine = await resolveEngineBinary();
+		console.log(`engine: ${engine.binary} (${engine.version})`);
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-engine-baseline-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_BINARY: engine.binary } }));
+			const settings: ChhoundSettings = {
+				version: 1,
+				sandboxRoot: path.join(root, "sandboxes"),
+				baseRoot: path.join(root, "bases"),
+				// Materialized engine configs force watchman by default (config.ts
+				// REALTIME_BACKEND_DEFAULT); the config file wins over the
+				// CHUNKHOUND_INDEXING__REALTIME_BACKEND env var, so baseline configs
+				// opt into the engine's polling backend here.
+				indexing: { realtimeBackend: "polling" },
+			};
+			const onLine = (l: string) => console.log(`    [chhound] ${l.slice(0, 110)}`);
+			const extraArgs = ["--no-embeddings"];
+
+			// Scratch repo with two seed files; the prime runs clean, re-runs fresh
+			// and refreshes in place when the base commit moves.
+			const repo = path.join(root, "repo");
+			fs.mkdirSync(repo);
+			await git(["init", "-b", "main"], { cwd: repo });
+			await git(["config", "user.email", "smoke@test"], { cwd: repo });
+			await git(["config", "user.name", "Smoke"], { cwd: repo });
+			fs.writeFileSync(path.join(repo, "a.ts"), "export const a = 1;\n");
+			fs.writeFileSync(path.join(repo, "b.md"), "# hello\n");
+			await git(["add", "-A"], { cwd: repo });
+			const commit = await runGit(["commit", "-m", "init"], { cwd: repo });
+			await check(tc, "seed commit", commit.code === 0, commit.stderr);
+			const baseCommit = await gitOk(["rev-parse", "HEAD"], { cwd: repo });
+
+			const b1 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			await check(tc, "baseline primed", b1.fresh && fs.existsSync(b1.dbDir), b1.dir);
+			await check(tc, "baseline meta commit", b1.meta.baseCommit === baseCommit);
+			await check(tc, "baseline no artifacts in repo", !fs.existsSync(path.join(repo, ".chhound")), "found .chhound in repo");
+			const wtClean1 = (await runGit(["status", "--porcelain"], { cwd: repo })).stdout;
+			await check(tc, "repo clean after prime", wtClean1 === "", wtClean1);
+
+			const b2 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			await check(tc, "baseline fresh on re-run", b2.fresh === false);
+
+			// Base moved → refresh must re-prime via in-place top-up.
+			fs.writeFileSync(path.join(repo, "b2.md"), "# more\n");
+			await git(["add", "-A"], { cwd: repo });
+			const commit2 = await runGit(["commit", "-m", "more"], { cwd: repo });
+			await check(tc, "second commit", commit2.code === 0, commit2.stderr);
+			const baseCommit2 = await gitOk(["rev-parse", "HEAD"], { cwd: repo });
+			const b3 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			await check(tc, "baseline refreshed on base move", b3.fresh === true && b3.meta.baseCommit === baseCommit2, b3.reason);
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

@@ -16,6 +16,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"engine/mcp-bridge.test.ts": { tier: "engine", subject: "mcp-bridge" },
 	"engine/mcp-restore.test.ts": { tier: "engine", subject: "mcp-restore" },
 	"engine/pr-baseline.test.ts": { tier: "engine", subject: "pr-baseline" },
+	"engine/sandbox-hotstart.test.ts": { tier: "engine", subject: "sandbox-hotstart" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
