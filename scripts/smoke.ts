@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { materializeConfig } from "../chhound/config.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
-import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
+import { branchCompletions, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { currentBranch, findRepoRoot, gitWorktreeAdd, runGit } from "../chhound/git.js";
 import { ownerRepoFromRemoteUrl, parsePrUrl, ghPrView, ensureMirror, mirrorDir, findLocalRepo } from "../chhound/pr.js";
 import { resolveBranchChoice } from "../worktree/command.js";
@@ -74,52 +74,6 @@ async function main(): Promise<void> {
 		// semantics) opts into the engine's polling backend here.
 		indexing: { realtimeBackend: "polling" },
 	};
-
-	// ── 2. completions ─────────────────────────────────────────────────
-	section("completions");
-	{
-		const proj = path.join(tmp, "comp-proj");
-		fs.mkdirSync(path.join(proj, "src", "nested"), { recursive: true });
-		fs.mkdirSync(path.join(proj, "docs"), { recursive: true });
-		fs.writeFileSync(path.join(proj, "a.txt"), "x");
-		const dirs0 = dirCompletions("", proj);
-		check("dir picker: dirs only, trailing /", dirs0.map((d) => d.label).join(",") === "docs/,src/", JSON.stringify(dirs0));
-		const dirs1 = dirCompletions("sr", proj);
-		check("dir picker: prefix filter + full value", dirs1.length === 1 && dirs1[0]!.value === "src/" && dirs1[0]!.label === "src/");
-		const dirs2 = dirCompletions("src/", proj);
-		check("dir picker: subdir navigation", dirs2.length === 1 && dirs2[0]!.value === "src/nested/", JSON.stringify(dirs2));
-		const files = dirCompletions("a", proj, { includeFiles: true });
-		check("file picker (--config): files included", files.some((f) => f.label === "a.txt" && f.description === "file"));
-		const abs = dirCompletions(proj + "/s", proj);
-		check("dir picker: absolute prefix", abs.length === 1 && abs[0]!.value === proj + "/src/", JSON.stringify(abs));
-		const tilde = dirCompletions("~/", proj);
-		check("dir picker: ~ expansion", tilde.length > 0 && tilde.every((d) => d.value.startsWith("~/")));
-		// Full-argument replacement contract (applyCompletion replaces the whole arg string).
-		const arg0 = await worktreeArgumentCompletions("", proj);
-		check("arg completions: empty → cwd dirs", arg0.some((c) => c.value === "src/"), JSON.stringify(arg0));
-		check("arg completions name the parameter", arg0.length > 0 && arg0[0]!.description === "worktree path (required)", JSON.stringify(arg0[0]));
-		const argBranch = await worktreeArgumentCompletions("wt ", proj);
-		check("arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
-		const argNoRepo = await worktreeArgumentCompletions("wt ", proj);
-		check("no repo → no branch/new-branch items", argNoRepo.length === 0, JSON.stringify(argNoRepo));
-		const argNoRepoName = await worktreeArgumentCompletions("wt something", proj);
-		check("no repo → no create-branch item", argNoRepoName.length === 0, JSON.stringify(argNoRepoName));
-		const argBDash = await worktreeArgumentCompletions("wt -b ", proj);
-		check("-b value position → no existing-branch suggestions", argBDash.length === 0, JSON.stringify(argBDash));
-		const argConfigTrailing = await worktreeArgumentCompletions("wt --config ", proj);
-		check("--config trailing space → config files", argConfigTrailing.some((c) => c.value === "wt --config a.txt" && c.label === "a.txt"), JSON.stringify(argConfigTrailing));
-		const argFlag = await worktreeArgumentCompletions("wt --f", proj);
-		check("arg completions: flag names keep base", argFlag.some((c) => c.value === "wt --force-reindex") && argFlag.some((c) => c.value === "wt --from"), JSON.stringify(argFlag));
-		const argFrom = await worktreeArgumentCompletions("wt --from ", proj);
-		check("arg completions: --from value position", argFrom.every((c) => c.value.startsWith("wt --from ")));
-		const argConfig = await worktreeArgumentCompletions("wt --config a", proj);
-		check("arg completions: --config value position keeps base", argConfig.some((c) => c.value === "wt --config a.txt" && c.label === "a.txt"), JSON.stringify(argConfig));
-		const argDestFlag = await worktreeArgumentCompletions("wt --d", proj);
-		check("arg completions: --dest flag name", argDestFlag.some((c) => c.value === "wt --dest"), JSON.stringify(argDestFlag));
-		const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
-		check("--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree library root (worktrees + indexes land there)"), JSON.stringify(argDest));
-		check("--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
-	}
 
 	// ── 2b. --dest location, wizard trigger, conflict block ──────────
 	section("dest: location + wizard + conflict");

@@ -11,6 +11,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"acceptance/legacy-smoke.test.ts": { tier: "acceptance", subject: "legacy-smoke" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
+	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },
 	"fs/git-branches.test.ts": { tier: "fs", subject: "git-branches" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
