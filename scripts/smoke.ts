@@ -813,13 +813,6 @@ async function main(): Promise<void> {
 		}
 	}
 
-	// ── 8. extension loads ────────────────────────────────────────────
-	section("extension entry loads");
-	{
-		const mod = (await import("../index.js")) as { default: unknown };
-		check("index.ts default export is a function", typeof mod.default === "function");
-	}
-
 	console.log(`\n${checks - failures}/${checks} checks passed`);
 	fs.rmSync(tmp, { recursive: true, force: true });
 	if (failures > 0) process.exit(1);

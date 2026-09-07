@@ -9,6 +9,7 @@ export interface TestClassification {
 /** Every discovered test must have exactly one entry here. */
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"acceptance/legacy-smoke.test.ts": { tier: "acceptance", subject: "legacy-smoke" },
+	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
