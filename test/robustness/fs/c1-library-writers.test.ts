@@ -20,16 +20,19 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // process.execPath --import tsx (never a guessed tsx path), barrier paths
 // passed through env. Scenario-owned catalog under fake HOME.
 //
-// KNOWN GREEN-ERA FIXTURE REPAIRS (design audit, operator-authorized fixture
-// pass — do NOT silently weaken, repair explicitly):
-// 1. The in-process `await upsertLibraryEntry(c1Entry)` RED seam below adds a
-//    THIRD root to the catalog that the final two-root assertion must not
-//    count. At green, prove the in-process seam against a throwaway catalog
-//    first, then reset the catalog to empty before the child race.
-// 2. The lock-timeout leaf runs a never-resolving critical section with NO
-//    competing lock, confusing acquisition timeout with execution timeout. At
-//    green, hold a real competing lock (parked child) and assert the bounded
-//    acquisition timeout against it; release the parked child in finally.
+// GREEN FIXTURE REPAIRS (operator-authorized, implemented in the C1 green
+// pass; the RED-era notes they replaced are recorded here):
+// 1. The RED-era in-process `await upsertLibraryEntry(c1Entry)` seam would
+//    add a THIRD root to the catalog the final two-root assertion must not
+//    count. The seam now runs against a THROWAWAY catalog under a separate
+//    fake HOME (proof leaf asserts its own merge result), then the scenario
+//    catalog is explicitly reset to empty before the child race.
+// 2. The RED-era lock-timeout leaf ran a never-resolving critical section
+//    with NO competing lock, confusing acquisition timeout with execution
+//    timeout. The leaf now holds a REAL competing lock (a parked child that
+//    parks inside its locked critical section at the "read" phase) and
+//    asserts the bounded acquisition timeout against it; the parked child
+//    is released in a finally and its park is 30 s deadline-bounded.
 
 describe("c1 library writers", () => {
 	test("C1 catalog writers: real contending processes preserve both atomic updates", async (t) => {
@@ -43,18 +46,30 @@ describe("c1 library writers", () => {
 			const barrier = path.join(root, "writer-barrier");
 			const readyFile = `${barrier}.first-ready`;
 			const worker = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../lib/workers/library-writer.ts");
-			// Children inherit these (fake HOME too): the parked first writer
-			// signals readiness here and waits for the resume file.
-			process.env.C1_WRITER_BARRIER = barrier;
-			process.env.C1_WRITER_BARRIER_READY = readyFile;
 
 			fs.mkdirSync(path.dirname(library), { recursive: true });
 			fs.writeFileSync(library, JSON.stringify({ version: 1, entries: [] }));
 			const c1Entry = c1EntryFrom(plantCandidate(path.join(root, "repo"), ".chunkhound.json"));
-			// RED seam: throws until green, which is what makes this scenario
-			// fail RED before the race below runs. See repair note 1 in the
-			// file header for the green-era handling.
-			await upsertLibraryEntry(c1Entry);
+
+			// Repair note 1: prove the in-process upsert seam against a
+			// THROWAWAY catalog under a separate fake HOME — the scenario catalog
+			// must start the child race empty so the final assertion counts
+			// exactly the two racing roots.
+			const seamHome = await makeFakeHome(root, "seam-home");
+			applyEnv(isolatedEnv({ home: seamHome }));
+			const seamCatalog = await upsertLibraryEntry(c1Entry);
+			await check(
+				t,
+				"C1 in-process upsert seam works against its own catalog",
+				seamCatalog.entries.length === 1 && seamCatalog.entries[0]!.repoRoot === c1Entry.repoRoot,
+			);
+			applyEnv(isolatedEnv({ home }));
+			fs.writeFileSync(library, JSON.stringify({ version: 1, entries: [] }));
+
+			// Children inherit these (fake HOME too): the parked first writer
+			// signals readiness here and waits for the resume file.
+			process.env.C1_WRITER_BARRIER = barrier;
+			process.env.C1_WRITER_BARRIER_READY = readyFile;
 
 			const runWriter = (entry: LibraryEntry): Promise<number> =>
 				new Promise((resolve, reject) => {
@@ -92,16 +107,33 @@ describe("c1 library writers", () => {
 				final.entries.map((e) => e.repoRoot).sort().join(",") === [one.repoRoot, two.repoRoot].sort().join(",") && JSON.parse(raw).version === 1,
 			);
 
-			// See repair note 2 in the file header: at green this leaf must run
-			// against a REAL competing held lock, not a never-resolving critical
-			// section (acquisition timeout vs execution timeout).
+			// Repair note 2: the lock-timeout leaf contends against a REAL
+			// competing lock — a parked writer child holds the lock inside its
+			// locked critical section; the in-process acquisition must time out
+			// against that holder (never against its own critical section).
+			const timeoutBarrier = path.join(root, "timeout-barrier");
+			const timeoutReady = `${timeoutBarrier}.first-ready`;
+			process.env.C1_WRITER_BARRIER = timeoutBarrier;
+			process.env.C1_WRITER_BARRIER_READY = timeoutReady;
+			const holder = runWriter({ ...c1Entry, repoRoot: path.join(root, "lock-holder-one") });
 			let timedOut = false;
 			try {
-				await withLibraryLock(async () => new Promise<void>(() => {}), { lockTimeoutMs: 15 });
-			} catch {
-				timedOut = true;
+				await waitForFile(timeoutReady);
+				try {
+					await withLibraryLock(async () => undefined, { lockTimeoutMs: 15 });
+				} catch {
+					timedOut = true;
+				}
+				await check(t, "C1 lock timeout is bounded and reported", timedOut);
+			} finally {
+				// Release the parked holder (its park is deadline-bounded at 30 s);
+				// the shared teardown below escalates TERM → KILL as a backstop.
+				try {
+					fs.writeFileSync(timeoutBarrier, "resume");
+				} catch {
+					/* root may already be gone; teardown still reaps */
+				}
 			}
-			await check(t, "C1 lock timeout is bounded and reported", timedOut);
 		} finally {
 			// Exception-safe teardown: release any parked writer first, give the
 			// children a short grace to exit naturally, then escalate TERM →

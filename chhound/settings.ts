@@ -25,7 +25,7 @@ export function mergeSettings(base: ChhoundSettings, overlay: Partial<ChhoundSet
 	};
 }
 
-function readSettingsFile(p: string): { settings: ChhoundSettings; issue?: string } {
+function readSettingsFile(p: string, backup: boolean): { settings: ChhoundSettings; issue?: string } {
 	try {
 		const raw: unknown = JSON.parse(fs.readFileSync(p, "utf8"));
 		if (typeof raw !== "object" || raw === null || (raw as { version?: unknown }).version !== SETTINGS_VERSION) {
@@ -37,38 +37,53 @@ function readSettingsFile(p: string): { settings: ChhoundSettings; issue?: strin
 		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
 			return { settings: DEFAULT_SETTINGS };
 		}
-		try {
-			fs.copyFileSync(p, `${p}.bak`);
-		} catch {
-			// no backup possible
+		if (backup) {
+			try {
+				fs.copyFileSync(p, `${p}.bak`);
+			} catch {
+				// no backup possible
+			}
 		}
 		return {
 			settings: DEFAULT_SETTINGS,
-			issue: `could not read ${p}: ${err instanceof Error ? err.message : String(err)} (backed up to .bak)`,
+			issue: backup ? `could not read ${p}: ${err instanceof Error ? err.message : String(err)} (backed up to .bak)` : `could not read ${p}: ${err instanceof Error ? err.message : String(err)}`,
 		};
 	}
 }
 
-/**
- * Load settings: global first, then project (project shadows global per-key).
- * Project root should be the git repo root when inside a repo, else cwd.
- */
-export function loadSettings(projectRoot?: string): LoadedSettings {
+function readAll(projectRoot: string | undefined, backup: boolean): LoadedSettings {
 	const globalPath = globalSettingsPath();
-	const global = readSettingsFile(globalPath);
+	const global = readSettingsFile(globalPath, backup);
 	let settings = mergeSettings(DEFAULT_SETTINGS, global.settings);
 	let projectPath: string | undefined;
 	let issue = global.issue;
 	if (projectRoot) {
 		const p = projectSettingsPath(projectRoot);
 		if (fs.existsSync(p)) {
-			const proj = readSettingsFile(p);
+			const proj = readSettingsFile(p, backup);
 			settings = mergeSettings(settings, proj.settings);
 			projectPath = p;
 			issue = issue ?? proj.issue;
 		}
 	}
 	return { settings, globalPath, projectPath, issue };
+}
+
+/**
+ * Load settings: global first, then project (project shadows global per-key).
+ * Project root should be the git repo root when inside a repo, else cwd.
+ * Malformed files are backed up to .bak before degrading to defaults.
+ */
+export function loadSettings(projectRoot?: string): LoadedSettings {
+	return readAll(projectRoot, true);
+}
+
+/**
+ * Read-only settings load for command paths that must never write (standalone
+ * discovery): malformed files degrade to defaults WITHOUT a .bak backup.
+ */
+export function loadSettingsReadOnly(projectRoot?: string): LoadedSettings {
+	return readAll(projectRoot, false);
 }
 
 /** Atomic write (temp + rename). Returns the path written. */

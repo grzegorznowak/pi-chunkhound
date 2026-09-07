@@ -1,8 +1,9 @@
 /*
  * Stream 2 discovery (spec v1.2 §2): fast-pass fixed spots, bounded
- * deep-sweep, layout triage + verdicts, managed-root containment and
- * fixed-spot selection. Advisory only — no adoption seeding happens here
- * (C2). runSetupDiscovery + the setup wiring land with setup/command.ts.
+ * deep-sweep, layout triage + verdicts, managed-root containment,
+ * fixed-spot selection and the setup-discovery transaction (verify-first
+ * consent, onboarding marker, bypass modes, standalone sweep). Advisory
+ * only — no adoption seeding happens here (C2).
  */
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -366,9 +367,30 @@ export async function deepSweep(root: string, options: DiscoveryOptions = {}): P
 }
 
 /**
- * RED-phase C1 scaffold: the setup transaction wiring lands with the
- * setup/command.ts commit (verify-first consent, marker, bypass modes).
+ * Setup discovery transaction (spec v1.2 §2 control flow): verify first,
+ * consent only after successful combined verification, record only on
+ * consent. Bypasses (headless / verify-only / project-only) never prompt
+ * and never write the global catalog or onboarding marker. The global
+ * onboarding marker skips the consent ask; standalone deep sweep needs no
+ * onboarding and has no side effects. A failed verification or a cancelled
+ * consent returns cancelled with no writes.
  */
-export async function runSetupDiscovery(_deps: SetupDeps, _options: SetupDiscoveryOptions = {}): Promise<SweepResult> {
-	throw new Error("RED shell (C1): runSetupDiscovery not implemented — green next");
+export async function runSetupDiscovery(deps: SetupDeps, options: SetupDiscoveryOptions = {}): Promise<SweepResult> {
+	const empty = (cancelled: boolean): SweepResult => ({ candidates: [], truncated: false, permissionErrors: 0, cancelled });
+	// Standalone deep sweep: explicit user intent — reachable without
+	// onboarding; no verify/consent/marker/catalog side effects.
+	if (options.standalone) return deps.discover(options);
+	const bypass = options.uiAvailable !== true || options.verifyOnly === true || options.projectOnly === true;
+	if (!(await deps.verifyCombined())) return empty(true);
+	if (bypass) return empty(false);
+	const markerPresent = (await deps.readGlobalMarker?.()) ?? false;
+	if (!markerPresent) {
+		const choice = (await deps.consent?.()) ?? "skip";
+		if (choice === "cancel") return empty(true);
+		if (choice !== "fast-pass" && choice !== "deep-sweep") return empty(false);
+	}
+	const result = await deps.discover(options);
+	if (!markerPresent) await deps.writeGlobalMarker?.();
+	await deps.writeCatalog?.(result.candidates);
+	return result;
 }

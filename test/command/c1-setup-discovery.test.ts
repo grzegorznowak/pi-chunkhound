@@ -9,7 +9,7 @@ import { runSetupDiscovery } from "../../chhound/discovery.js";
 import type { SetupDeps } from "../../chhound/discovery.js";
 import { registerSetupCommand } from "../../setup/command.js";
 import { check } from "../lib/checks.js";
-import { c1EntryFrom, plantCandidate } from "../lib/c1.js";
+import { c1EntryFrom, plantCandidate, C1_CANARY } from "../lib/c1.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
 // Inventory: both scenarios of the C1 "setup transaction + onboarding control
@@ -113,6 +113,42 @@ describe("c1 setup discovery", () => {
 				{ uiAvailable: true },
 			);
 			await check(t, "C1 marker-present setup skips consent and completes", !marked.cancelled);
+
+			// GREEN-era wiring repair (design audit, operator-authorized): invoke
+			// the CAPTURED /ch-setup handler with a scripted headless ctx so the
+			// command wiring is exercised, not only the runSetupDiscovery seam.
+			// The standalone discovery mode sweeps the fixture root through the
+			// real deepSweep and reports the planted candidate.
+			const notices: string[] = [];
+			await captured!(
+				"--discover",
+				{ cwd: root, mode: "print", hasUI: false, ui: { notify: (message: string) => { notices.push(message); } } } as never,
+			);
+			await check(
+				t,
+				"C1 captured handler standalone discovery reports the planted config",
+				notices.some((n) => n.includes(candidate.configPath)),
+				notices.join(" | "),
+			);
+
+			// Standalone discovery must never write: even a malformed global
+			// settings file (which the normal settings load backs up to .bak)
+			// is read read-only here — no backup file may appear and the sweep
+			// still reports the planted config.
+			const globalSettings = globalSettingsPath();
+			fs.mkdirSync(path.dirname(globalSettings), { recursive: true });
+			fs.writeFileSync(globalSettings, `{ broken ${C1_CANARY}`);
+			const malformedNotices: string[] = [];
+			await captured!(
+				"--discover",
+				{ cwd: root, mode: "print", hasUI: false, ui: { notify: (message: string) => { malformedNotices.push(message); } } } as never,
+			);
+			await check(
+				t,
+				"C1 standalone discovery never writes even on malformed global settings",
+				malformedNotices.some((n) => n.includes(candidate.configPath)) && !fs.existsSync(`${globalSettings}.bak`),
+				malformedNotices.join(" | "),
+			);
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

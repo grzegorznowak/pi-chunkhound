@@ -9,14 +9,16 @@ import { listBaselines } from "../chhound/baseline.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { listSandboxes, sandboxConfigPath } from "../chhound/sandbox.js";
 import { promptText, promptPath } from "../chhound/path-input.js";
-import { loadSettings, saveSettings, DEFAULT_SETTINGS } from "../chhound/settings.js";
-import { globalSettingsPath, projectSettingsPath, sandboxRoot } from "../chhound/paths.js";
+import { loadSettings, loadSettingsReadOnly, saveSettings, DEFAULT_SETTINGS } from "../chhound/settings.js";
+import { globalSettingsPath, projectSettingsPath, sandboxRoot, baseRoot, mirrorRoot } from "../chhound/paths.js";
+import { deepSweep, runSetupDiscovery } from "../chhound/discovery.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 
 const USAGE =
 	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--output-dims N] " +
 	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
-	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--auto-reconnect on|off] [--verify] [--project] [--reset]";
+	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--auto-reconnect on|off] [--verify] [--project] [--reset] " +
+	"[--discover <dir>]";
 
 /**
  * Re-materialize every sandbox + baseline config from current settings,
@@ -59,6 +61,64 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 			"Secrets passed here never reach the LLM or disk.",
 		handler: async (args, ctx) => {
 			const { flags } = parseArgs(args);
+
+			// Standalone deep-sweep discovery mode (Stream 2 spec v1.2 §2): sweep
+			// a user-picked root (default: current dir; prompted in the TUI) and
+			// report reviewable candidate configs. Standalone — no onboarding
+			// marker/consent applies and NOTHING is written, so this branch runs
+			// before the (backup-writing) settings load, on the read-only loader;
+			// managed roots (sandbox/base/mirror) come from global settings or
+			// their env overrides and are pruned path-based from the sweep.
+			if (flags["discover"] !== undefined) {
+				const settings = loadSettingsReadOnly().settings;
+				const picked = flags["discover"] === true ? undefined : String(flags["discover"]);
+				let target: string;
+				if (picked !== undefined) {
+					target = path.resolve(ctx.cwd, expandHome(picked));
+				} else if (ctx.mode === "tui" && ctx.hasUI) {
+					const raw = await promptPath(ctx.ui, {
+						title: "Sweep root (existing chunkhound configs are reported, nothing is written)",
+						cwd: ctx.cwd,
+						startValue: ctx.cwd,
+						paramLabel: "sweep root",
+					});
+					if (raw === undefined) {
+						ctx.ui.notify("/ch-setup discovery cancelled.", "info");
+						return;
+					}
+					const trimmed = raw.trim();
+					if (!trimmed) {
+						ctx.ui.notify("/ch-setup discovery cancelled.", "info");
+						return;
+					}
+					target = path.resolve(ctx.cwd, expandHome(trimmed));
+				} else {
+					target = ctx.cwd;
+				}
+				const managedRoots = [sandboxRoot(settings), baseRoot(settings), mirrorRoot(settings)];
+				const result = await runSetupDiscovery(
+					{
+						// Standalone never consults verify/consent/marker (seam contract);
+						// the engine-backed combined verification binds in the C2
+						// consent flow.
+						verifyCombined: async () => true,
+						discover: async (discoveryOptions) => deepSweep(target, discoveryOptions),
+					},
+					{ standalone: true, uiAvailable: ctx.hasUI, managedRoots },
+				);
+				if (result.cancelled) {
+					ctx.ui.notify("Discovery cancelled.", "info");
+					return;
+				}
+				const lines = [`Discovery sweep of ${target}: ${result.candidates.length} candidate config(s)`];
+				for (const candidate of result.candidates.slice(0, 10)) lines.push(`  ${candidate.configPath}`);
+				if (result.candidates.length > 10) lines.push(`  … ${result.candidates.length - 10} more`);
+				if (result.truncated) lines.push("sweep truncated by budget limits");
+				if (result.permissionErrors > 0) lines.push(`${result.permissionErrors} unreadable dir(s) skipped`);
+				ctx.ui.notify(lines.join("\n"), result.candidates.length > 0 ? "info" : "warning");
+				return;
+			}
+
 			const repoRoot = await gitRootOrNull(ctx.cwd);
 			const projectRoot = repoRoot ?? ctx.cwd;
 			const loaded = loadSettings(projectRoot);
