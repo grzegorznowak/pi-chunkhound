@@ -1,9 +1,15 @@
 import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { dirCompletions, worktreeArgumentCompletions } from "../../../chhound/completions.js";
+import { branchCompletions, dirCompletions, worktreeArgumentCompletions } from "../../../chhound/completions.js";
+import { runGit } from "../../../chhound/git.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
+
+async function git(args: string[], opts: { cwd?: string } = {}): Promise<void> {
+	const r = await runGit(args, opts);
+	if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+}
 
 // Inventory: 19 legacy checks moved from smoke.ts section 3 (completions).
 // Deterministic fake HOME, never the operator home: the ~-expansion listing
@@ -12,6 +18,9 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // deliberately NOT a git repo — branch/new-branch and --from positions must
 // yield nothing (no repo anywhere means the command cannot run). Values
 // replace the WHOLE argument text, so every value carries the typed base.
+// PLUS 7 legacy checks moved from smoke.ts section "worktree spin-up"
+// (completions half): the new-branch-first picker, branch-name filtering and
+// repo resolution from a typed path against a REAL git repo (`repo`).
 
 describe("completions", () => {
 	test("legacy dir + argument completions obligations", async (t) => {
@@ -62,6 +71,52 @@ describe("completions", () => {
 			const argDest = await worktreeArgumentCompletions("wt --dest ", proj);
 			await check(t, "--dest value → dir picker (optional label)", argDest.every((c) => c.value.startsWith("wt --dest ")) && argDest.some((c) => c.value === "wt --dest src/" && c.description === "worktree library root (worktrees + indexes land there)"), JSON.stringify(argDest));
 			await check(t, "--dest picker dirs only", !argDest.some((c) => c.label === "a.txt"), JSON.stringify(argDest));
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("repo branch + new-branch picker", () => {
+	test("legacy real-repo branch-picker obligations", async (tc) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-completions-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			// The repo dir is named `repo` on purpose: the last obligation types
+			// "repo fix" from a NON-repo cwd and the picker resolves the first
+			// positional (path) to this repo — the completed value mirrors the
+			// typed text, so the relative name must match.
+			const repo = path.join(root, "repo");
+			fs.mkdirSync(repo);
+			await git(["init", "-b", "main"], { cwd: repo });
+			await git(["config", "user.email", "smoke@test"], { cwd: repo });
+			await git(["config", "user.name", "Smoke"], { cwd: repo });
+			fs.writeFileSync(path.join(repo, "a.ts"), "export const a = 1;\n");
+			await git(["add", "-A"], { cwd: repo });
+			await git(["commit", "-qm", "init"], { cwd: repo });
+			await git(["branch", "fix/smoke", "main"], { cwd: repo });
+
+			const branches = await branchCompletions(repo);
+			await check(tc, "branch completions include new branch", branches.some((b) => b.value === "fix/smoke"), branches.map((b) => b.value).join(","));
+			const argComp = await worktreeArgumentCompletions("wt fix", repo);
+			await check(tc, "arg completions: branch position", argComp.some((b) => b.value === "wt fix/smoke"), JSON.stringify(argComp));
+
+			// NEW-BRANCH-FIRST: with a real repo, the branch picker leads with creation.
+			const argBranchRepo = await worktreeArgumentCompletions("wt ", repo);
+			await check(tc, "branch picker: new-branch item first, existing after", argBranchRepo[0]!.value === "wt -b " && argBranchRepo.some((c) => c.value === "wt main"), JSON.stringify(argBranchRepo.map((c) => c.value)));
+			const argExistingName = await worktreeArgumentCompletions("wt main", repo);
+			await check(tc, "existing branch name → no create item", !argExistingName.some((c) => c.value.startsWith("wt -b")), JSON.stringify(argExistingName));
+			const argNewName = await worktreeArgumentCompletions("wt brandnew", repo);
+			await check(tc, "typed new name → create-branch item", argNewName.some((c) => c.value === "wt -b brandnew" && c.label === "create branch: brandnew"), JSON.stringify(argNewName));
+			const argNewNamePartial = await worktreeArgumentCompletions("wt fix", repo);
+			await check(tc, "typed prefix of existing branch → create item still first", argNewNamePartial[0]!.value === "wt -b fix", JSON.stringify(argNewNamePartial[0]));
+
+			// Repo resolution from a non-repo cwd (the workspace-root scenario).
+			const argComp2 = await worktreeArgumentCompletions("repo fix", root);
+			await check(tc, "arg completions resolve repo from path (cwd not a repo)", argComp2.some((b) => b.value === "repo fix/smoke"), JSON.stringify(argComp2));
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

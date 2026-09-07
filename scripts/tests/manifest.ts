@@ -12,6 +12,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
+	"engine/baseline.test.ts": { tier: "engine", subject: "baseline" },
 	"engine/mcp-bridge.test.ts": { tier: "engine", subject: "mcp-bridge" },
 	"engine/mcp-restore.test.ts": { tier: "engine", subject: "mcp-restore" },
 	"engine/pr-baseline.test.ts": { tier: "engine", subject: "pr-baseline" },
