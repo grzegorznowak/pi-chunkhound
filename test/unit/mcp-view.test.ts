@@ -1,13 +1,16 @@
 import { describe, test } from "node:test";
 import { mcpFooterStatusText, mcpToolPrefix } from "../../mcp/manager.js";
-import { mcpStatusLines } from "../../status/command.js";
+import { mcpStatusLines, buildStatusLines } from "../../status/command.js";
 import { check } from "../lib/checks.js";
 
-// Inventory: 7 legacy checks moved from smoke.ts section 5b (mcp bridge
-// integration) — the pure text helpers over supplied values: tool-prefix
+// Inventory: 15 checks — 7 legacy checks moved from smoke.ts section 5b (mcp
+// bridge integration) — the pure text helpers over supplied values: tool-prefix
 // derivation and the /ch-status mcp section + footer text (no fs, no
-// registry: the connection lists are arguments, not global state). The
-// fs-backed target/picker lists moved to fs/sandbox-catalog.test.ts; the live
+// registry: the connection lists are arguments, not global state) — plus 8
+// rich-format and join checks for the mcp connections section (repo/branch
+// identity, tool list suffixes, listed-tools-only usage examples, buildStatus-
+// Lines sandbox-meta join and bare-format fallback). The fs-backed
+// target/picker lists moved to fs/sandbox-catalog.test.ts; the live
 // protocol/replay to engine/mcp-bridge.test.ts.
 
 describe("mcp view", () => {
@@ -28,6 +31,113 @@ describe("mcp view", () => {
 			liveStatus.includes("mcp connections (1)") && liveStatus.includes("●") && liveStatus.includes("2 tools"),
 			liveStatus,
 		);
+
+		// Rich format: with sandbox identity joined in, each connection names the
+		// source repo, the callable tools (suffixes after the first full name),
+		// a usage example derived from the LISTED tools, and the sandbox path.
+		const richStatus = mcpStatusLines([
+			{
+				worktree: wt,
+				prefix: "chh_wt-fix",
+				toolNames: ["chh_wt-fix_search", "chh_wt-fix_code_research", "chh_wt-fix_websearch"],
+				repoRoot: "/repos/chunkhound",
+				branchLabel: "main",
+			},
+		]).join("\n");
+		await check(
+			t,
+			"status: rich mcp line names repo, branch and tools",
+			richStatus.includes("chunkhound @ main · 3 tools") && richStatus.includes("tools: chh_wt-fix_search · _code_research · _websearch"),
+			richStatus,
+		);
+		await check(
+			t,
+			"status: rich mcp line shows a usage example",
+			richStatus.includes('chh_wt-fix_code_research({ query: "your question" })'),
+			richStatus,
+		);
+		await check(t, "status: rich mcp line keeps the sandbox path", richStatus.includes(wt), richStatus);
+		// The example must only ever name tools the connection actually lists
+		// (capability-gated servers may lack code_research entirely).
+		const searchOnly = mcpStatusLines([
+			{
+				worktree: "/wt/conn-b",
+				prefix: "chh_b",
+				toolNames: ["chh_b_search", "chh_b_daemon_status"],
+				repoRoot: "/repos/chunkhound",
+				branchLabel: "main",
+			},
+		]).join("\n");
+		await check(
+			t,
+			"status: search-only connection shows the search example",
+			searchOnly.includes('chh_b_search({ type: "regex", query: "your symbol" })') && !searchOnly.includes("code_research"),
+			searchOnly,
+		);
+		const daemonOnly = mcpStatusLines([
+			{
+				worktree: "/wt/conn-c",
+				prefix: "chh_c",
+				toolNames: ["chh_c_daemon_status"],
+				repoRoot: "/repos/chunkhound",
+				branchLabel: "main",
+			},
+		]).join("\n");
+		await check(t, "status: no example when only daemon_status is listed", !daemonOnly.includes("example:"), daemonOnly);
+		// Tool-list shortening only applies to real `${prefix}_<tool>` names — a
+		// name that merely starts with the prefix but lacks the separator stays full.
+		const oddNames = mcpStatusLines([
+			{
+				worktree: "/wt/conn-d",
+				prefix: "chh_wt",
+				toolNames: ["chh_wt_search", "chh_wtfoo_search", "other_x"],
+				repoRoot: "/repos/chunkhound",
+				branchLabel: "main",
+			},
+		]).join("\n");
+		await check(
+			t,
+			"status: names without the prefix separator are not shortened",
+			oddNames.includes("tools: chh_wt_search · chh_wtfoo_search · other_x"),
+			oddNames,
+		);
+		// buildStatusLines joins live connections to sandbox meta (enrichment) and
+		// falls back to the bare format for connections without a matching sandbox.
+		const joined = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [
+				{
+					dir: "/x/sandboxes/conn-a",
+					stateDir: "/x/sandboxes/conn-a.state",
+					meta: {
+						version: 1,
+						worktree: "/wt/conn-a",
+						repoRoot: "/repos/chunkhound",
+						branch: "main",
+						baseRef: "main",
+						baseCommit: "0123456789abcdef",
+						chhoundVersion: "test",
+						createdAt: "2026-01-01T00:00:00.000Z",
+						copiedFrom: "/x/bases/chunkhound",
+						dbPath: "/x/sandboxes/conn-a.state/db",
+					},
+					dbSizeBytes: 10,
+				},
+			],
+			baselines: [],
+			conns: [
+				{ worktree: "/wt/conn-a", prefix: "chh_a", toolNames: ["chh_a_search", "chh_a_code_research"] },
+				{ worktree: "/wt/gone", prefix: "chh_g", toolNames: ["chh_g_search"] },
+			],
+		}).join("\n");
+		await check(
+			t,
+			"status: buildStatusLines joins connections to sandbox meta",
+			joined.includes("mcp connections (2)") && joined.includes("chunkhound @ main · 2 tools"),
+			joined,
+		);
+		await check(t, "status: unmatched connection keeps the bare format", joined.includes("● gone · prefix chh_g · 1 tools"), joined);
 
 		// Footer indicator text (pure helper — mirrors the mcp section above).
 		await check(t, "footer: hidden when nothing connected", mcpFooterStatusText([]) === undefined);
