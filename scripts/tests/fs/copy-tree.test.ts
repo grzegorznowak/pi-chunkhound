@@ -12,9 +12,11 @@ import { makeFixtureRoot } from "../lib/isolation.js";
 // forced mode survives). Deterministic on every platform: clone attempt or
 // silent fallback must both yield byte-identical trees; stale .cow-tmp /
 // .cow-bak crash residue is swept before a copy.
-// The df free-space proof test below adds 2 non-legacy checks (clone xor
-// full-copy classification) — it makes the CoW mechanism OBSERVABLE where
-// the legacy checks are deliberately agnostic.
+// The free-space proof test below adds 4 non-legacy checks (clone xor
+// full-copy classification + write-divergence space accounting) — it makes
+// the CoW mechanism OBSERVABLE where the legacy checks are deliberately
+// agnostic. The darwin-only test adds 2 more: F_LOG2PHYS physical-block
+// sharing proves the clone at inode level and its COW divergence on write.
 
 describe("copyTreeCoW", () => {
 	test("legacy copyTreeCoW obligations", async (t) => {
@@ -204,6 +206,86 @@ describe("copyTreeCoW", () => {
 			} else {
 				await check(t, "copyTreeCoW clone attempt is clone xor full copy (df delta)", false, `a=${a}KiB b=${b}KiB → PARTIAL/INCONCLUSIVE (per-file silent degrade or measurement noise)`);
 			}
+
+			// CoW write-divergence semantics (portable, verdict-aware): a REAL
+			// clone shares extents, so rewriting one dst file must allocate fresh
+			// blocks (~file size); an independent copy rewrites its private
+			// extents in place (~0). Either way the src bytes are untouched —
+			// that is the observable copy-on-write contract.
+			const fileKib = 16 * 1024;
+			const srcHashes = (): string =>
+				["blob-0.bin", "blob-1.bin", "blob-2.bin", "blob-3.bin"]
+					.map((n) => createHash("sha256").update(fs.readFileSync(path.join(src, n))).digest("hex"))
+					.join("\n");
+			const srcBefore = srcHashes();
+			const divDst = path.join(root, "proof-div");
+			const priorForce = process.env.CHHOUND_COPY_FORCE;
+			try {
+				// The verdict was measured with force cleared; this copy must run
+				// the same clone attempt so the accounting arm stays consistent
+				// with the classification (presence+value restoration).
+				if (priorForce === "1") delete process.env.CHHOUND_COPY_FORCE;
+				copyTreeCoW(src, divDst);
+			} finally {
+				if (priorForce === undefined) delete process.env.CHHOUND_COPY_FORCE;
+				else process.env.CHHOUND_COPY_FORCE = priorForce;
+			}
+			const availBeforeMutate = dfAvail(root);
+			fs.writeFileSync(path.join(divDst, "blob-0.bin"), randomBytes(16 * 1024 * 1024));
+			const mutateDelta = availBeforeMutate - dfAvail(root);
+			const srcUntouched = srcHashes() === srcBefore;
+			await check(t, "mutating a dst file leaves src byte-identical (CoW divergence)", srcUntouched && !fs.readFileSync(path.join(divDst, "blob-0.bin")).equals(blob), "");
+			const divergenceOk = verdict === "clone" ? mutateDelta > fileKib / 2 : verdict === "full" ? mutateDelta < fileKib / 4 : false;
+			await check(t, "write-divergence space accounting matches the clone/full verdict", divergenceOk, `verdict=${verdict} mutateDelta=${mutateDelta}KiB file=${fileKib}KiB`);
+			fs.rmSync(divDst, { recursive: true, force: true });
+		} finally {
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	// macOS/APFS-only: fcntl(F_LOG2PHYS_EXT) maps logical file offsets to
+	// physical device offsets. Two files sharing EVERY block are clones;
+	// after a copy-on-write rewrite of one side the mapping diverges. The
+	// probe is a tiny C helper (scripts/tests/lib/f2p-clones.c, MIT-derived)
+	// compiled with cc at test time — macOS runners ship Xcode CLT. Skipped
+	// on other platforms with a visible skip reason (portability policy).
+	test("darwin: F_LOG2PHYS proves physical block sharing + COW divergence", { skip: process.platform === "darwin" ? false : "macOS/APFS-only probe (fcntl F_LOG2PHYS)" }, async (t) => {
+		const root = await makeFixtureRoot("pi-chhound-fs-cow-f2p-");
+		try {
+			const c = spawnSync("cc", ["-O1", "-o", path.join(root, "f2p-clones"), path.join(import.meta.dirname, "..", "lib", "f2p-clones.c")], { encoding: "utf8" });
+			if (c.status !== 0) throw new Error(`cc compile failed: ${c.error ? String(c.error) : (c.stderr ?? c.stdout)}`);
+			const probe = (a: string, b: string): string => {
+				const r = spawnSync(path.join(root, "f2p-clones"), [a, b], { encoding: "utf8" });
+				if (r.status !== 0) throw new Error(`f2p-clones failed (${r.status}): ${r.error ? String(r.error) : (r.stderr ?? r.stdout)}`);
+				return (r.stdout ?? "").trim();
+			};
+			const srcDir = path.join(root, "src");
+			fs.mkdirSync(srcDir);
+			const blobA = randomBytes(4 * 1024 * 1024);
+			fs.writeFileSync(path.join(srcDir, "blob.bin"), blobA);
+			const priorForce = process.env.CHHOUND_COPY_FORCE;
+			try {
+				// Same outer-force discipline as the divergence arm above: this
+				// copy must attempt the clone (presence+value restoration).
+				if (priorForce === "1") delete process.env.CHHOUND_COPY_FORCE;
+				copyTreeCoW(srcDir, path.join(root, "dst"));
+			} finally {
+				if (priorForce === undefined) delete process.env.CHHOUND_COPY_FORCE;
+				else process.env.CHHOUND_COPY_FORCE = priorForce;
+			}
+			const srcFile = path.join(srcDir, "blob.bin");
+			const dstFile = path.join(root, "dst", "blob.bin");
+			const shared = probe(srcFile, dstFile);
+			await check(t, "darwin: dst shares PHYSICAL blocks with src after copyTreeCoW (F_LOG2PHYS=1)", shared === "1", `probe=${shared}`);
+			const blobB = randomBytes(4 * 1024 * 1024);
+			fs.writeFileSync(dstFile, blobB);
+			const diverged = probe(srcFile, dstFile);
+			await check(
+				t,
+				"darwin: COW divergence — rewritten dst no longer shares blocks (F_LOG2PHYS=0)",
+				diverged === "0" && fs.readFileSync(srcFile).equals(blobA) && !fs.readFileSync(dstFile).equals(blobA),
+				`probe=${diverged}`,
+			);
 		} finally {
 			await fs.promises.rm(root, { recursive: true, force: true });
 		}

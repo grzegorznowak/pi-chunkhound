@@ -77,7 +77,16 @@ export default async function* reporter(source: AsyncIterable<Event>): AsyncGene
 		const isParent = (frame !== undefined && startCounter > frame.mark + 1) || failureType === "subtestsFailed";
 		const isFile = nesting === 0 && String(data.name ?? "") === String(data.file ?? "");
 		const isCancelled = event.type === "test:cancel" || failureType.toLowerCase().includes("cancelled");
-		if (event.type === "test:skip" || data.skip === true) { skipped++; yield `skip ${String(data.name)}\n`; continue; }
+		// Skip arrives as a terminal pass/fail event carrying data.skip (boolean
+		// true for test.skip(), the reason string for the { skip: reason }
+		// option) — never as a bare test:skip event on node 22/24. Both forms
+		// must count as skipped, not as assertions.
+		if (event.type === "test:skip" || data.skip === true || typeof data.skip === "string") {
+			skipped++;
+			const reason = typeof data.skip === "string" ? ` — ${data.skip}` : "";
+			yield `skip ${String(data.name)}${reason}\n`;
+			continue;
+		}
 		if (isCancelled) { cancelled++; yield `cancelled ${String(data.name)}\n`; continue; }
 		if (isFile) {
 			if (event.type === "test:fail") { fileFailures++; yield `FAIL file ${String(data.file)} — ${cap(errorText(details.error))}\n`; }
