@@ -8,6 +8,7 @@ export interface TestClassification {
 
 /** Every discovered test must have exactly one entry here. */
 export const manifest: Readonly<Record<string, TestClassification>> = {
+	"command/c1-setup-discovery.test.ts": { tier: "command", subject: "c1-setup-discovery", features: ["c1"] },
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
@@ -17,6 +18,10 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"engine/pr-baseline.test.ts": { tier: "engine", subject: "pr-baseline" },
 	"engine/sandbox-hotstart.test.ts": { tier: "engine", subject: "sandbox-hotstart" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
+	"fs/c1-advisory.test.ts": { tier: "fs", subject: "c1-advisory", features: ["c1"] },
+	"fs/c1-discovery.test.ts": { tier: "fs", subject: "c1-discovery", features: ["c1"] },
+	"fs/c1-library.test.ts": { tier: "fs", subject: "c1-library", features: ["c1"] },
+	"fs/c1-triage.test.ts": { tier: "fs", subject: "c1-triage", features: ["c1"] },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },
@@ -26,7 +31,11 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
 	"robustness/engine/mcp-death.test.ts": { tier: "robustness/engine", subject: "mcp-death" },
+	"robustness/fs/c1-discovery-bounds.test.ts": { tier: "robustness/fs", subject: "c1-discovery-bounds", features: ["c1"] },
+	"robustness/fs/c1-library-writers.test.ts": { tier: "robustness/fs", subject: "c1-library-writers", features: ["c1"] },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
+	"unit/c1-discovery-policy.test.ts": { tier: "unit", subject: "c1-discovery-policy", features: ["c1"] },
+	"unit/c1-verdict-copy.test.ts": { tier: "unit", subject: "c1-verdict-copy", features: ["c1"] },
 	"unit/connection-records.test.ts": { tier: "unit", subject: "connection-records" },
 	"unit/mcp-view.test.ts": { tier: "unit", subject: "mcp-view" },
 	"unit/pr-identity.test.ts": { tier: "unit", subject: "pr-identity" },
