@@ -9,13 +9,14 @@ export interface TestClassification {
 /** Every discovered test must have exactly one entry here. */
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"acceptance/legacy-smoke.test.ts": { tier: "acceptance", subject: "legacy-smoke" },
+	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
-	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
+	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },
 	"fs/git-branches.test.ts": { tier: "fs", subject: "git-branches" },
-	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
 	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
+	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 	"unit/worktree-intent.test.ts": { tier: "unit", subject: "worktree-intent" },
