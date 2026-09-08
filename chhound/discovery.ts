@@ -67,7 +67,7 @@ const DEFAULT_SWEEP_MAX_MS = 15_000;
 /** Name-based skip dirs for bounded recursion; containment is separate + path-based.
  * `.chunkhound` leaves are inspected only for their config.json and never descended. */
 const SWEEP_SKIP_DIRS = new Set([".git", "node_modules", "dependency", "cache", ".chunkhound"]);
-const WRITER_ARTIFACTS = [".wal", ".compact_backup", ".compact_new"] as const;
+export const WRITER_ARTIFACTS = [".wal", ".compact_backup", ".compact_new"] as const;
 
 /** S4 verdict copy, spec v1.2 §2 — exact strings (unit/c1-verdict-copy is the contract). */
 const VERDICT_COPY: Record<Verdict, string> = {
