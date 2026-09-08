@@ -74,6 +74,33 @@ function statSafe(p: string): fs.Stats | null {
 	}
 }
 
+// Swap the db for a byte-identical copy with restored atime/mtime, retrying
+// until the filesystem observably reports a new file incarnation (different
+// inode, or ctime/birthtime bumped onto a fresh clock tick), bounded by the
+// deadline. Inode reuse and coarse timestamp ticks can hide the first swap;
+// a later attempt's utimes always lands on a later tick. Performs no checks
+// and adds no leaves — it only guarantees the drift signal for the case's
+// leaf, deterministically across filesystems.
+async function swapDbIncarnation(dbPath: string, bytes: Buffer, atime: Date, mtime: Date): Promise<void> {
+	const original = statSafe(dbPath);
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		fs.rmSync(dbPath);
+		fs.writeFileSync(dbPath, bytes);
+		fs.utimesSync(dbPath, atime, mtime);
+		const after = statSafe(dbPath);
+		if (
+			after &&
+			original &&
+			(after.ino !== original.ino || after.ctimeMs !== original.ctimeMs || after.birthtimeMs !== original.birthtimeMs)
+		) {
+			return;
+		}
+		if (Date.now() >= deadline) return;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+}
+
 // Parsed claim or undefined (missing/malformed — leaf-safe).
 function readClaim(p: string): { version?: number; indexed_root_path?: string; raw: string } | undefined {
 	if (!fs.existsSync(p)) return undefined;
@@ -305,8 +332,10 @@ describe("c2 adoption copy", () => {
 				);
 			}
 
-			// Case 3: db replaced by another file with IDENTICAL bytes and mtime —
-			// only the inode differs, proving actual-file identity revalidation.
+			// Case 3: db replaced by another file with IDENTICAL bytes and restored
+			// atime/mtime (via utimes). Replacement must still be caught as drift:
+			// utimes cannot restore ctime/birthtime, and recreation changes the file
+			// incarnation even on filesystems that reuse inode numbers (ext4).
 			{
 				const source = await plantFileSource(py, path.join(root, "case-db-identity", "repo"));
 				const targetDbPath = path.join(root, "case-db-identity", "slots", "slot", ".chunkhound.db");
@@ -319,20 +348,25 @@ describe("c2 adoption copy", () => {
 						onPhase: async (phase: "beforeCopy" | "afterCopy") => {
 							if (phase !== "beforeCopy") return;
 							const bytes = fs.readFileSync(source.dbPath);
-							fs.rmSync(source.dbPath);
-							fs.writeFileSync(source.dbPath, bytes);
-							fs.utimesSync(source.dbPath, before.atime, before.mtime);
+							await swapDbIncarnation(source.dbPath, bytes, before.atime, before.mtime);
 						},
 					},
 				);
-				const sameSizeMtimeDifferentIno = (() => {
+				// The recreated file must be observably a new incarnation: same size
+				// (bytes identical) but a different inode and/or a bumped ctime or
+				// birthtime that utimes cannot restore.
+				const fileIncarnationChanged = (() => {
 					const after = statSafe(source.dbPath);
-					return !!after && after.ino !== before.ino && after.size === before.size;
+					return (
+						!!after &&
+						after.size === before.size &&
+						(after.ino !== before.ino || after.ctimeMs !== before.ctimeMs || after.birthtimeMs !== before.birthtimeMs)
+					);
 				})();
 				await check(
 					t,
 					"C2 the db replaced with identical bytes and metadata rejects fail-closed",
-					outcome.kind === "rejected" && targetResidue(targetDbPath).length === 0 && sameSizeMtimeDifferentIno,
+					outcome.kind === "rejected" && targetResidue(targetDbPath).length === 0 && fileIncarnationChanged,
 				);
 			}
 

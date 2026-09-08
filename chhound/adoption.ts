@@ -24,11 +24,17 @@ type Options = {
 
 type Outcome = { kind: "copied"; warnings: string[] } | { kind: "rejected"; reason: string };
 
+// Identity fields compared for drift. ctimeMs/birthtimeMs are incarnation
+// signals userland cannot restore: utimes rewrites atime/mtime but bumps
+// ctime, and a recreated file gets a fresh birthtime. They keep replacement
+// detectable even on filesystems that reuse inode numbers after delete.
 type FileIdentity = {
 	dev: number;
 	ino: number;
 	size: number;
 	mtimeMs: number;
+	ctimeMs: number;
+	birthtimeMs: number;
 };
 
 type MetadataIdentity = FileIdentity & { sha256: string };
@@ -49,7 +55,9 @@ function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
 		left.dev === right.dev &&
 		left.ino === right.ino &&
 		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs &&
+		left.birthtimeMs === right.birthtimeMs
 	);
 }
 
@@ -75,6 +83,8 @@ function readBounded(pathname: string, capBytes: number): { identity: MetadataId
 			ino: after.ino,
 			size: after.size,
 			mtimeMs: after.mtimeMs,
+			ctimeMs: after.ctimeMs,
+			birthtimeMs: after.birthtimeMs,
 			sha256: digest(Buffer.concat(chunks, total)),
 		};
 		if (!sameFileIdentity(before, after) || total !== after.size) {
@@ -89,7 +99,7 @@ function readBounded(pathname: string, capBytes: number): { identity: MetadataId
 function statIdentity(pathname: string): FileIdentity {
 	const stat = fs.statSync(pathname);
 	if (!stat.isFile()) throw new Error(`${pathname} is not a regular file`);
-	return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs };
+	return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, birthtimeMs: stat.birthtimeMs };
 }
 
 function sameMetadataIdentity(left: MetadataIdentity, right: MetadataIdentity): boolean {
