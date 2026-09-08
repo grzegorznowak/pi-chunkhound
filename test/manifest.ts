@@ -22,6 +22,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/c1-discovery.test.ts": { tier: "fs", subject: "c1-discovery", features: ["c1"] },
 	"fs/c1-library.test.ts": { tier: "fs", subject: "c1-library", features: ["c1"] },
 	"fs/c1-triage.test.ts": { tier: "fs", subject: "c1-triage", features: ["c1"] },
+	"fs/c2-adoption-copy.test.ts": { tier: "fs", subject: "c2-adoption-copy", features: ["c2"] },
 	"fs/c2-ro-lease.test.ts": { tier: "fs", subject: "c2-ro-lease", features: ["c2"] },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
