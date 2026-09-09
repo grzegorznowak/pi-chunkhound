@@ -25,6 +25,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/sandbox-catalog.test.ts": { tier: "fs", subject: "sandbox-catalog" },
 	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
+	"fs/worktree-manage.test.ts": { tier: "fs", subject: "worktree-manage" },
 	"robustness/engine/mcp-death.test.ts": { tier: "robustness/engine", subject: "mcp-death" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
 	"unit/connection-records.test.ts": { tier: "unit", subject: "connection-records" },
@@ -32,6 +33,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"unit/pr-identity.test.ts": { tier: "unit", subject: "pr-identity" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 	"unit/worktree-intent.test.ts": { tier: "unit", subject: "worktree-intent" },
+	"unit/worktree-manage.test.ts": { tier: "unit", subject: "worktree-manage" },
 };
 
 export const tierOrder: readonly Tier[] = [

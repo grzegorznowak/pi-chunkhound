@@ -113,6 +113,57 @@ export function dirSize(p: string): number {
 	}
 }
 
+/**
+ * Total bytes under a path (files only; symlinks to FILES counted via stat,
+ * symlinks to DIRECTORIES skipped — following them could loop/duplicate on
+ * npm-style link trees). Fully SEQUENTIAL async walk: never blocks the event
+ * loop (unlike the synchronous dirSize), yet issues one syscall at a time —
+ * parallel stat/readdir streams return wrong metadata on flaky container
+ * filesystems (observed: overlayfs under concurrent load reports stale
+ * sizes), while sequential walks are deterministic everywhere.
+ * Returns 0 on any error (missing path, unreadable subtree).
+ */
+export async function dirSizeAsync(p: string): Promise<number> {
+	const fsp = fs.promises;
+	try {
+		const st = await fsp.stat(p);
+		if (st.isFile()) return st.size;
+	} catch {
+		return 0;
+	}
+	const walk = async (dir: string): Promise<number> => {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fsp.readdir(dir, { withFileTypes: true });
+		} catch {
+			return 0; // unreadable subtree — counted as 0, like dirSize
+		}
+		let total = 0;
+		for (const e of entries) {
+			const full = path.join(dir, e.name);
+			if (e.isDirectory()) {
+				total += await walk(full);
+			} else if (e.isSymbolicLink()) {
+				// One-level follow: count file symlinks, skip dir symlinks (npm
+				// link trees would otherwise be counted repeatedly / loop).
+				try {
+					const st = await fsp.stat(full);
+					total += st.isFile() ? st.size : 0;
+				} catch {
+					// dangling link — counts 0
+				}
+			} else if (e.isFile()) {
+				try {
+					total += (await fsp.stat(full)).size;
+				} catch {
+					// raced away — counts 0
+				}
+			}
+		}
+		return total;
+	};
+	return walk(p);
+}
 /** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
 export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
 	const root = sandboxRoot(settings);

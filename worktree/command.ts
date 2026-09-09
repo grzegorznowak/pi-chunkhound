@@ -17,9 +17,13 @@ import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxCon
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
 import { connectEntry } from "../mcp/command.js";
+import { rehydrateConnections } from "../mcp/persist.js";
+import type { ConnectionRecord } from "../mcp/persist.js";
+import { buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, parseListInvocation, worktreeVerb } from "./manage.js";
 
 const HELP = [
-	"/chworktree [repo] [branch] [options]",
+	"/chworktree [repo] [branch] [options]     — create a worktree sandbox",
+	"/chworktree ls [<query>] [--search <t>] [--sort <k>]  — manage: list sandboxes",
 	"",
 	"required:",
 	"  [repo]              a git repository: a path inside one, the repo's own",
@@ -41,7 +45,7 @@ const HELP = [
 	"  --force-reindex    full re-index instead of baseline top-up",
 	"  --refresh-baseline force baseline re-prime",
 	"",
-	"Two ways to invoke:",
+	"Two ways to create:",
 	"  wizard:  /chworktree [repo] with no other arguments — asks for the branch name",
 	"           and the worktree library root interactively (with no argument at all",
 	"           it also lets you pick the repo). Path prompts support TAB completion",
@@ -50,11 +54,24 @@ const HELP = [
 	"           on one line, non-interactive (agents). The first argument is always",
 	"           the repo.",
 	"",
+	"Manage (ls):",
+	"  ls lists every worktree sandbox in the library, grouped by project, with",
+	"  space columns (db first, then checkout, then total), git state (branch vs",
+	"  detached, dirty, ahead/behind vs the branch upstream or the recorded base",
+	"  ref, last commit), liveness (● connected via MCP, ↻ recorded for reconnect,",
+	"  ✗ gone) and — for pull-request sandboxes — the PR state via gh.",
+	"  <query>             shorthand for --search (the first argument after ls)",
+	"  --search <text>     case-insensitive filter over repo, branch, id and paths",
+	"  --sort <key>        created (default, newest first) | name | db | checkout | total",
+	"                      (numeric keys: largest first; name: A→Z)",
+	"  examples: /chworktree ls — /chworktree ls fix — /chworktree ls --search mcp --sort db",
+	"",
 	"Each worktree gets its own chunkhound index (baseline copy + top-up at the",
 	"branch point). The checkout lives INSIDE its storage dir in the worktree",
 	"library — config, index db, daemon state and checkout together, mirroring the",
 	"'/workspaces' pattern. Nothing is ever written into the worktree checkout or",
 	"the source repo (no .chunkhound/, no git-exclude edits).",
+	"Removal of sandboxes is coming as a follow-up slice (/chworktree rm).",
 ].join("\n");
 
 /**
@@ -156,11 +173,12 @@ async function freeBranchName(repoRoot: string, base: string): Promise<string> {
 export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("chworktree", {
 		description:
-			"Create a git worktree with its own chunkhound index. Bare /chworktree [repo] " +
-			"runs an interactive wizard (repo/PR, branch, destination); one-go for agents: " +
-			"/chworktree [repo] [-b <branch>] [--dest <dir>] [--from <ref>] [--config <file>] " +
+			"Create a git worktree with its own chunkhound index, or manage the worktree library. " +
+			"Creation: /chworktree [repo] [-b <branch>] [--dest <dir>] [--from <ref>] [--config <file>] " +
 			"[--no-index] [--force-reindex] [--refresh-baseline], or /chworktree <PR-URL> for a " +
-			"pull request sandbox — /chworktree --help for details",
+			"pull request sandbox — bare /chworktree [repo] runs an interactive wizard. " +
+			"Manage: /chworktree ls [<query>] [--search <text>] [--sort <key>] lists every sandbox " +
+			"grouped by project with space/git-state/liveness columns — /chworktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
@@ -169,6 +187,35 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 			if (flags["help"] || flags["h"]) {
 				notify(HELP, "info");
+				return;
+			}
+
+			// ── Manager verbs: /chworktree ls … (removal verbs reserved) — the
+			// first positional names the VERB only when it is one; anything else
+			// falls through to the creation flows below (repo paths, PR URLs,
+			// branches and the bare wizard keep their existing meanings). ──
+			const verb = worktreeVerb(positionals[0]);
+			if (verb) {
+				const rest = positionals.slice(1);
+				if (verb === "remove") {
+					notify(
+						"/chworktree rm is not available yet — the removal flow (disconnect, storage, " +
+							"worktree, branch) lands in the next slice. /chworktree ls lists what it will remove.",
+						"warning",
+					);
+				return;
+				}
+				await runWorktreeList(ctx, rest, flags);
+				return;
+			}
+
+			// List-only flags without the verb name the manager surface — refuse
+			// instead of silently creating (or mis-parsing) a worktree.
+			if (listFlagIn(flags)) {
+				notify(
+					`--${listFlagIn(flags)} manages the worktree LIST — creation ignores it: /chworktree ls [--search <text>] [--sort <key>].`,
+					"error",
+				);
 				return;
 			}
 
@@ -958,4 +1005,73 @@ async function oneGoLocation(
 		return undefined;
 	}
 	return { sandboxDir, wtPath };
+}
+
+// ── Manager: /chworktree ls ─────────────────────────────────────────────────
+
+/**
+ * /chworktree ls — list the worktree library. Pure render (headless AND
+ * interactive — the notify dialog shows the same text; /ch-status precedent)
+ * assembled from the collectors in manage.ts: async checkout sizing, git
+ * probes, gh PR-state lookups (all degrading, never throwing).
+ */
+async function runWorktreeList(
+	ctx: {
+		cwd: string;
+		ui: { notify(msg: string, type?: "info" | "warning" | "error"): void };
+		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
+	},
+	rest: string[],
+	flags: Record<string, string | true>,
+): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const repoRoot = await gitRootOrNull(ctx.cwd);
+	const loaded = loadSettings(repoRoot ?? ctx.cwd);
+	if (loaded.issue) notify(loaded.issue, "warning");
+	const settings = loaded.settings;
+
+	const parsed = parseListInvocation(rest, flags);
+	if (!parsed.ok) {
+		notify(parsed.error, "error");
+		return;
+	}
+	const { search, sort } = parsed.options;
+
+	const entries = listSandboxes(settings);
+	if (entries.length === 0) {
+		notify(
+			buildWorktreeListLines({
+				libraryRoot: sandboxRoot(settings),
+				groups: [],
+				total: 0,
+				ghFailed: 0,
+				ghAttempted: 0,
+			}).join("\n"),
+			"info",
+		);
+		return;
+	}
+	// Session-log records (branch-scoped) drive the "recorded for reconnect"
+	// marker; a missing session manager degrades to no records (live MCP
+	// connections are always visible — they come from the manager singleton).
+	let records: Map<string, ConnectionRecord> = new Map();
+	try {
+		if (ctx.sessionManager) records = rehydrateConnections(ctx.sessionManager.getBranch());
+	} catch {
+		// no session log available — liveness columns degrade gracefully
+	}
+
+	const result = await collectWorktreeList({ entries, settings, records });
+	const groups = groupListInfos(result.infos, { search: search.length > 0 ? search : undefined, sort });
+	notify(
+		buildWorktreeListLines({
+			libraryRoot: sandboxRoot(settings),
+			groups: groups.groups,
+			total: result.infos.length,
+			search: search.length > 0 ? search : undefined,
+			ghFailed: result.ghFailed,
+			ghAttempted: result.ghAttempted,
+		}).join("\n"),
+		"info",
+	);
 }

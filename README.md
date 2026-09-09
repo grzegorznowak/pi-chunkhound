@@ -48,6 +48,7 @@ Don't use both install paths at once — the commands would register twice. Conf
 | Command | Purpose |
 |---|---|
 | `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. A PR URL (`https://github.com/<owner>/<repo>/pull/<n>`) in the repo slot creates a pull-request sandbox (wizard: pick "a pull request" and paste the URL). |
+| `/chworktree ls [<query>] [--search <text>] [--sort <key>]` | Manage: list every worktree sandbox in the library, grouped by project, with space (db/checkout/total), git-state and liveness columns. |
 | `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
 | `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
@@ -72,6 +73,39 @@ Don't use both install paths at once — the commands would register twice. Conf
   tip** (a remote-tracking ref can't be checked out as a branch; a missing
   tracking ref is best-effort fetched first). The baseline anchors at the
   remote ref itself.
+
+### /chworktree ls — manage the worktree library
+
+`ls` lists every worktree sandbox in the library **grouped by project**
+(meta `repoRoot`), one row per sandbox with the space columns
+(**db first**, then checkout, then total), its git state and its liveness:
+
+- identity: the branch slot (`pull/N · head <branch> @ <sha>` for PR sandboxes)
+- git state: on-branch vs detached, `dirty`, `+N/-M vs <ref>` ahead/behind
+  (compared against the branch's upstream when it has one, else the recorded
+  base ref — for pull/`N` sandboxes that is the PR's base branch), `last commit`
+- liveness: `●` = live MCP connection now, `↻` = recorded for auto-reconnect
+  (connected at the last session, not live yet), `✗ gone` = the checkout dir
+  no longer exists, `runs this extension` = the code you are running, claim
+  warnings when the index root sidecar is missing or mismatched
+- PR sandboxes additionally show their gh state: `PR #12 OPEN` / `DRAFT` /
+  `MERGED` / `CLOSED` (hidden when gh is unavailable — the list says so)
+
+Each project group carries a rollup of its db/checkout/total bytes; each row
+ends with its worktree path relative to the library root. Nothing is mutated:
+`ls` only reads (async checkout sizing, git probes, gh lookups).
+
+```
+/chworktree ls                     # everything, newest first, grouped by repo
+/chworktree ls fix                 # shorthand filter (--search)
+/chworktree ls --search mcp --sort db      # biggest indexes first
+/chworktree ls --sort name         # A→Z by branch identity
+```
+
+`<query>`/`--search` filters case-insensitively over repo, branch, head ref,
+storage id and paths. `--sort` keys: `created` (default, newest first),
+`name`, `db`, `checkout`, `total` (numeric keys: largest first).
+Removal (`/chworktree rm`) is planned on the same verb surface.
 
 In all modes the location must not overlap another chunkhound worktree or index —
 the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
