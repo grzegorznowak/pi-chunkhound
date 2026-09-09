@@ -48,8 +48,17 @@ describe("completions", () => {
 			await check(t, "dir picker: ~ expansion", tilde.length > 0 && tilde.every((d) => d.value.startsWith("~/")));
 			// Full-argument replacement contract (applyCompletion replaces the whole arg string).
 			const arg0 = await worktreeArgumentCompletions("", proj);
-			await check(t, "arg completions: empty → cwd dirs", arg0.some((c) => c.value === "src/"), JSON.stringify(arg0));
-			await check(t, "arg completions name the parameter", arg0.length > 0 && arg0[0]!.description === "worktree path (required)", JSON.stringify(arg0[0]));
+			await check(t, "arg completions: empty → manager verbs lead", arg0[0]!.value === "ls" && arg0[1]!.value === "list" && arg0[2]!.value === "rm", JSON.stringify(arg0.slice(0, 4)));
+			await check(t, "arg completions: empty → cwd dirs follow", arg0.some((c) => c.value === "src/"), JSON.stringify(arg0));
+			await check(t, "arg completions name the parameter", arg0.some((c) => c.value === "src/" && c.description === "worktree path (required)"), JSON.stringify(arg0[0]));
+			const argLs = await worktreeArgumentCompletions("l", proj);
+			await check(t, "arg completions: 'l' suggests the ls verb", argLs.some((c) => c.value === "ls") && argLs.some((c) => c.value === "list"), JSON.stringify(argLs));
+			const argRmFlags = await worktreeArgumentCompletions("rm --", proj);
+			await check(t, "arg completions: rm --force", argRmFlags.some((c) => c.value === "rm --force"), JSON.stringify(argRmFlags));
+			const argLsSort = await worktreeArgumentCompletions("ls --sort ", proj);
+			await check(t, "arg completions: ls --sort keys", argLsSort.some((c) => c.value === "ls --sort db") && argLsSort.some((c) => c.value === "ls --sort created"), JSON.stringify(argLsSort));
+			const argLsQuery = await worktreeArgumentCompletions("ls fix", proj);
+			await check(t, "arg completions: ls query is free text", argLsQuery.length === 0, JSON.stringify(argLsQuery));
 			const argBranch = await worktreeArgumentCompletions("wt ", proj);
 			await check(t, "arg completions: trailing space → branch position, full values", argBranch.every((c) => c.value.startsWith("wt ")));
 			const argNoRepo = await worktreeArgumentCompletions("wt ", proj);

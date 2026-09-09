@@ -49,6 +49,7 @@ Don't use both install paths at once — the commands would register twice. Conf
 |---|---|
 | `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. A PR URL (`https://github.com/<owner>/<repo>/pull/<n>`) in the repo slot creates a pull-request sandbox (wizard: pick "a pull request" and paste the URL). |
 | `/chworktree ls [<query>] [--search <text>] [--sort <key>]` | Manage: list every worktree sandbox in the library, grouped by project, with space (db/checkout/total), git-state and liveness columns. |
+| `/chworktree rm [<target>] [--force]` | Manage: remove a worktree sandbox — storage, worktree registration, and (for -b-created branches) the branch; disconnects live MCP first. |
 | `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
 | `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
