@@ -22,8 +22,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chhoundApiKeyEnv, chhoundBinary } from "../chhound/cli.js";
-import { slugify } from "../chhound/paths.js";
-import { sandboxConfigPath } from "../chhound/sandbox.js";
+import { shortHash, slugify } from "../chhound/paths.js";
+import { sandboxBranchLabel, sandboxConfigPath } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 
 const CONNECT_TIMEOUT_MS = 30_000;
@@ -44,6 +44,8 @@ export interface McpConnection {
 	worktree: string;
 	/** Tool-name prefix, e.g. "chh_wt-fix" → tools "chh_wt-fix_search". */
 	prefix: string;
+	/** Human-readable index identity for tool descriptions, e.g. "chunkhound @ main". */
+	indexLabel: string;
 	client: Client;
 	transport: StdioClientTransport;
 	toolNames: string[];
@@ -99,6 +101,29 @@ export function refreshMcpStatus(): void {
 /** Default tool prefix: `chh_<worktree basename slug>` (overrideable). */
 export function mcpToolPrefix(worktree: string, override?: string): string {
 	return override || `chh_${slugify(path.basename(worktree))}`;
+}
+
+/** Uniqueness token for a repo identity — the same shortHash the sandbox dir
+ * name embeds (over repoRoot+branch), so fork/upstream clones with equal
+ * folder names stay distinguishable in labels. */
+export function indexDisambigToken(repoRoot: string, branch: string): string {
+	return shortHash(`${path.resolve(repoRoot)}\u0000${branch}`);
+}
+
+/** Index identity for a sandbox, e.g. "chunkhound @ main" (PR heads included).
+ * When another live connection already carries the same base label, the
+ * deterministic token is appended to the repo part — tool descriptions must
+ * always tell which index a namespace serves. */
+export function indexLabelFor(
+	meta: { repoRoot?: string; branch: string; headRef?: string; headOid?: string },
+	dir: string,
+	existing: readonly string[],
+): string {
+	const repo = meta.repoRoot ? path.basename(meta.repoRoot) : path.basename(dir);
+	const label = `${repo} @ ${sandboxBranchLabel(meta)}`;
+	if (!existing.includes(label)) return label;
+	const token = meta.repoRoot ? indexDisambigToken(meta.repoRoot, meta.branch) : shortHash(dir);
+	return `${repo}·${token} @ ${sandboxBranchLabel(meta)}`;
 }
 
 export function listMcpConnections(): McpConnection[] {
@@ -163,6 +188,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	}
 
 	const prefix = mcpToolPrefix(entry.meta.worktree, opts.prefix);
+	const indexLabel = indexLabelFor(entry.meta, entry.dir, [...connections.values()].map((c) => c.indexLabel));
 	let mcpTools: McpToolMeta[];
 	try {
 		const listed = await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS });
@@ -184,7 +210,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	const toolNames: string[] = [];
 	for (const tool of mcpTools) {
 		const piName = `${prefix}_${tool.name}`;
-		registerBridgeTool(pi, id, piName, tool);
+		registerBridgeTool(pi, id, piName, tool, indexLabel);
 		toolNames.push(piName);
 	}
 
@@ -192,6 +218,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 		id,
 		worktree: entry.meta.worktree,
 		prefix,
+		indexLabel,
 		client,
 		transport,
 		toolNames,
@@ -250,11 +277,11 @@ export async function closeAllMcp(): Promise<void> {
  */
 export function reRegisterBridgeTools(
 	pi: ExtensionAPI,
-	conns: readonly Pick<McpConnection, "id" | "prefix" | "tools">[] = [...connections.values()],
+	conns: readonly Pick<McpConnection, "id" | "prefix" | "tools" | "indexLabel">[] = [...connections.values()],
 ): void {
 	for (const conn of conns) {
 		for (const tool of conn.tools) {
-			registerBridgeTool(pi, conn.id, `${conn.prefix}_${tool.name}`, tool);
+			registerBridgeTool(pi, conn.id, `${conn.prefix}_${tool.name}`, tool, conn.indexLabel);
 		}
 	}
 }
@@ -275,12 +302,17 @@ function registerBridgeTool(
 	id: string,
 	piName: string,
 	tool: { name: string; description?: string; inputSchema?: unknown },
+	indexLabel: string,
 ): void {
+	// Index-scoped tools name their target index right after the id so the
+	// model can pick the right namespace without decoding opaque ids.
+	// websearch/fetchurl are shared web tools — deliberately unscoped.
+	const scoped = tool.name !== "websearch" && tool.name !== "fetchurl";
 	pi.registerTool({
 		name: piName,
 		label: piName,
-		description: `[chhound:${id}] ${tool.description || tool.name}`,
-		promptSnippet: `Call chhound MCP tool ${id}/${tool.name}`,
+		description: `[chhound:${id}]${scoped ? ` ${indexLabel} —` : ""} ${tool.description || tool.name}`,
+		promptSnippet: `Call chhound MCP tool ${id}/${tool.name}${scoped ? ` (${indexLabel})` : ""}`,
 		parameters: objectSchemaOrEmpty(tool.inputSchema) as any,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, onUpdate) {
