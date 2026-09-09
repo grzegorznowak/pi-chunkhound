@@ -4,12 +4,15 @@ import {
 	LS_VERBS,
 	RM_VERBS,
 	LIST_SORT_KEYS,
+	branchDeleteIntent,
 	buildWorktreeListLines,
 	displayWorktreePath,
 	entryBadges,
 	groupListInfos,
 	lifeMarker,
 	parseListInvocation,
+	parseRemoveInvocation,
+	removePreviewLines,
 	searchTextOf,
 	worktreeVerb,
 } from "../../worktree/manage.js";
@@ -383,5 +386,72 @@ describe("renderer", () => {
 		await check(t, "inside root → relative", displayWorktreePath("/x/sandboxes", "/x/sandboxes/sb-a/fix") === "sb-a/fix");
 		await check(t, "outside root → absolute", displayWorktreePath("/x/sandboxes", "/elsewhere/wt") === "/elsewhere/wt");
 		await check(t, "empty path", displayWorktreePath("/x/sandboxes", "") === "");
+	});
+});
+
+describe("removal (rm): arg validation + guards (pure)", () => {
+	const parse = (p: string[], f: Record<string, string | true> = {}) => parseRemoveInvocation(p, f);
+
+	test("rm invocation parsing", async (t) => {
+		let r = parse([]);
+		await check(t, "no target is ok (interactive)", r.ok && r.options.target === undefined && r.options.force === false, JSON.stringify(r));
+		r = parse(["sb-abc12345"]);
+		await check(t, "target positional", r.ok && r.options.target === "sb-abc12345", JSON.stringify(r));
+		r = parse(["sb-x"], { force: true });
+		await check(t, "force accepted", r.ok && r.options.force === true, JSON.stringify(r));
+		r = parse(["sb-x"], { force: "yes" });
+		await check(t, "force with a value rejected", !r.ok && r.ok === false && r.error.includes("--force"), JSON.stringify(r));
+		r = parse(["a", "b"]);
+		await check(t, "two targets rejected", !r.ok && r.ok === false && r.error.includes("at most one"), JSON.stringify(r));
+		for (const f of ["b", "config", "dest", "from", "no-index", "force-reindex", "refresh-baseline"]) {
+			const x = parse([], { [f]: true });
+			await check(t, `creation flag rejected on rm: --${f}`, !x.ok && x.ok === false, JSON.stringify(x));
+		}
+		for (const f of ["search", "sort"]) {
+			const x = parse([], { [f]: "x" });
+			await check(t, `ls flag rejected on rm: --${f}`, !x.ok && x.ok === false && x.error.includes("ls"), JSON.stringify(x));
+		}
+		const unknown = parse([], { xyz: true });
+		await check(t, "unknown flag rejected", !unknown.ok && unknown.ok === false && unknown.error.includes("xyz"), JSON.stringify(unknown));
+	});
+
+	test("branch-delete intent protects pre-existing branches", async (t) => {
+		// -b created / wizard / derived branches anchor the baseline on the
+		// source repo's head branch — baseRef !== branch → deletable.
+		await check(t, "created branch (baseRef=main)", branchDeleteIntent({ branch: "fix", baseRef: "main" }) === true);
+		await check(t, "derived branch (baseRef=main)", branchDeleteIntent({ branch: "repo-wt", baseRef: "main" }) === true);
+		await check(t, "slashed created branch", branchDeleteIntent({ branch: "feat/x", baseRef: "main" }) === true);
+		// An EXISTING branch checked out into the sandbox anchors on ITSELF —
+		// it predates the sandbox and must never be deleted.
+		await check(t, "existing branch (baseRef===branch)", branchDeleteIntent({ branch: "fix", baseRef: "fix" }) === false);
+		// pull/N slots are never local branches — excluded up front (the
+		// runtime show-ref check would also refuse).
+		await check(t, "pull/N slot", branchDeleteIntent({ branch: "pull/9", baseRef: "main" }) === false);
+		await check(t, "no branch", branchDeleteIntent({ branch: "", baseRef: "main" }) === false);
+	});
+});
+
+describe("removal: impact preview lines", () => {
+	test("preview covers identity, spaces, notices, not-touched", async (t) => {
+		const row = mkInfo({
+			entry: mkSandbox({ dir: "/x/sandboxes/sb-a-11111111", worktree: "/x/sandboxes/sb-a-11111111/fix", repoRoot: "/repos/chunkhound", branch: "fix" }),
+			liveMcpPrefix: "chh_fix",
+			recordedConnected: true,
+			git: cleanGit({ dirty: true }),
+		});
+		const preview = removePreviewLines(row, { branchDelete: true }).join("\n");
+		await check(t, "identity + worktree + id", preview.includes("chunkhound/fix") && preview.includes("/x/sandboxes/sb-a-11111111/fix") && preview.includes("storage id: sb-a-11111111"), preview);
+		await check(t, "spaces db-first + base + created", preview.includes("db 1.0 KB · checkout 2.0 KB · total 3.0 KB") && preview.includes("base: main @ 01234567") && preview.includes("created 2026-01-02"), preview);
+		await check(t, "live MCP notice", preview.includes("WILL BE DISCONNECTED"), preview);
+		await check(t, "record tombstone notice", preview.includes("tombstoned"), preview);
+		await check(t, "dirty note", preview.includes("uncommitted changes"), preview);
+		await check(t, "branch-delete note", preview.includes("git branch -d fix"), preview);
+		await check(t, "not-touched", preview.includes("NOT touched") && preview.includes("baselines"), preview);
+		const ext = mkInfo({ entry: mkSandbox({ dir: "/x/sandboxes/sb-b-22222222", branch: "other" }), runsThisExtension: true });
+		const p2 = removePreviewLines(ext, { branchDelete: false }).join("\n");
+		await check(t, "extension-source warning", p2.includes("runs THIS extension"), p2);
+		await check(t, "no branch note when not a candidate", !p2.includes("git branch -d"), p2);
+		const calm = removePreviewLines(mkInfo(), { branchDelete: false }).join("\n");
+		await check(t, "calm preview has no notices", !calm.includes("WILL BE DISCONNECTED") && !calm.includes("uncommitted"), calm);
 	});
 });

@@ -20,7 +20,7 @@ import * as fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { remoteOrigin, runGit } from "../chhound/git.js";
+import { checkedOutBranches, remoteOrigin, runGit } from "../chhound/git.js";
 import { mirrorRoot, shortHash } from "../chhound/paths.js";
 import { ownerRepoFromRemoteUrl } from "../chhound/pr.js";
 import { claimedRootMatches, dirSizeAsync, fmtSize, sandboxBranchLabel } from "../chhound/sandbox.js";
@@ -622,5 +622,244 @@ export function buildWorktreeListLines(opts: ListRenderInput): string[] {
 			`(gh PR lookup failed for ${ghFailed} of ${ghAttempted} pull sandbox${ghAttempted === 1 ? "" : "es"} — PR states hidden; check: gh auth status)`,
 		);
 	}
+	return lines;
+}
+
+// ── Removal (rm) ─────────────────────────────────────────────────────────────
+
+export interface RemoveOptions {
+	/** Explicit target (worktree path / storage id / basename) — undefined
+	 * means "pick interactively" (UI) or an error (headless). */
+	target?: string;
+	/** Bypass the runs-this-extension guard (one-go path). */
+	force: boolean;
+}
+
+export type RemoveInvocationResult = { ok: true; options: RemoveOptions } | { ok: false; error: string };
+
+/**
+ * Validate the arguments AFTER the verb: /chworktree rm [<target>]
+ * [--force]. One positional at most; creation and list flags are rejected
+ * (they steer other flows — silently ignoring them would mislead).
+ */
+export function parseRemoveInvocation(
+	positionals: string[],
+	flags: Record<string, string | true>,
+): RemoveInvocationResult {
+	const creationFlag = creationFlagIn(flags);
+	if (creationFlag) {
+		return { ok: false, error: `--${creationFlag} is a creation option — not applicable to rm.` };
+	}
+	const listFlag = listFlagIn(flags);
+	if (listFlag) {
+		return { ok: false, error: `--${listFlag} belongs to ls — rm takes [<target>] [--force].` };
+	}
+	if (positionals.length > 1) {
+		return { ok: false, error: `rm takes at most one <target> (a worktree path or storage id) — got: ${positionals.join(" ")}.` };
+	}
+	for (const key of Object.keys(flags)) {
+		if (key === "force") continue;
+		return { ok: false, error: `Unknown option --${key} — rm takes [<target>] [--force].` };
+	}
+	if (flags["force"] !== undefined && flags["force"] !== true) {
+		return { ok: false, error: "--force takes no value." };
+	}
+	return { ok: true, options: { target: positionals[0]?.trim() || undefined, force: flags["force"] === true } };
+}
+
+/**
+ * Whether removing this sandbox should ALSO try `git branch -d <branch>`.
+ * Pure intent rule — the recorded base ref is the anchor: when the sandbox
+ * checked out an EXISTING branch (positional branch), the baseline anchored
+ * at that branch itself (baseRef === branch), so the branch predates the
+ * sandbox and must never be deleted. Branches CREATED for the sandbox (-b,
+ * wizard-typed, derived) anchor on the source repo's head branch instead
+ * (baseRef !== branch) — those are candidates. pull/N and <remote>/<branch>
+ * slots never pass (their identity is not a local branch; runtime ref
+ * existence is verified separately).
+ */
+export function branchDeleteIntent(meta: { branch?: string; baseRef?: string }): boolean {
+	const { branch, baseRef } = meta;
+	if (!branch || branch.length === 0 || !baseRef) return false;
+	if (/^pull\/\d+$/.test(branch)) return false; // PR slots are never local branches
+	return branch !== baseRef;
+}
+
+export interface RemoveSeams {
+	/** Disconnect a LIVE MCP connection by sandbox id. Never throws. */
+	disconnect?: (id: string) => Promise<void>;
+	/** Tombstone a `connected` session record (append-only log). Never throws. */
+	tombstone?: (sandboxId: string) => Promise<void> | void;
+}
+
+export interface RemoveOutcome {
+	/** Storage id (sandbox dir basename). */
+	id: string;
+	worktree: string;
+	/** Pre-removal worktree state. */
+	hadUncommitted: boolean;
+	gone: boolean;
+	wasLive: boolean;
+	/** Live connection disconnected (daemon exits on its own). */
+	mcpDisconnected: boolean;
+	/** `connected` session record tombstoned. */
+	tombstoned: boolean;
+	/** Storage halves removed (may already be gone). */
+	stateDirRemoved: boolean;
+	sandboxDirRemoved: boolean;
+	/** git worktree remove ran and the checkout is unregistered. */
+	worktreeRemoved: boolean;
+	/** `git worktree prune` ran as a fallback (cleanup note). */
+	pruned: boolean;
+	/** Branch deletion outcome for -b-created branches (never forced). */
+	branchDeleted?: string;
+	/** Branch kept — human reason (unmerged, missing, still checked out). */
+	branchKept?: string;
+	/** Human-readable per-step problems (removal continues past them). */
+	warnings: string[];
+}
+
+/**
+ * Remove one sandbox: live-MCP disconnect + record tombstone FIRST (the
+ * chunkhound daemon self-exits when its client detaches; the tombstone stops
+ * auto-restore), then `git worktree remove --force` in the host repo
+ * (meta.repoRoot — bare mirror hosts work the same way as when they added
+ * the worktree), then the storage halves (sandbox dir + .state sibling),
+ * then a best-effort `git branch -d` when the branch was created FOR this
+ * sandbox (branchDeleteIntent; NEVER forced; never for pull/N or
+ * pre-existing branches). Shared baselines are never touched, and neither
+ * is anything else in the host repo beyond the sandbox's own registration.
+ *
+ * Never throws: per-step failures land in `warnings` and the outcome so the
+ * caller can report what was and was not done. `mcp` seams keep the flow
+ * testable headless (fs tests inject counting fakes).
+ */
+export async function removeWorktreeEntry(opts: {
+	row: WtListInfo;
+	settings: ChhoundSettings;
+	mcp?: RemoveSeams;
+	force?: boolean;
+}): Promise<RemoveOutcome> {
+	const { row, mcp } = opts;
+	const entry = row.entry;
+	const meta = entry.meta;
+	const id = path.basename(entry.dir);
+	const outcome: RemoveOutcome = {
+		id,
+		worktree: meta.worktree,
+		hadUncommitted: row.git?.dirty === true,
+		gone: row.gone,
+		wasLive: row.liveMcpPrefix !== undefined,
+		mcpDisconnected: false,
+		tombstoned: false,
+		stateDirRemoved: false,
+		sandboxDirRemoved: false,
+		worktreeRemoved: false,
+		pruned: false,
+		warnings: [],
+	};
+
+	// 1) Live MCP connection → disconnect (daemon self-exits) + tombstone the
+	//    session record so auto-restore cannot resurrect the sandbox.
+	if (row.liveMcpPrefix !== undefined) {
+		try {
+			await mcp?.disconnect?.(id);
+			outcome.mcpDisconnected = true;
+		} catch (e) {
+			outcome.warnings.push(`MCP disconnect failed: ${(e as Error).message}`);
+		}
+	}
+	if (row.recordedConnected || row.liveMcpPrefix !== undefined) {
+		try {
+			await mcp?.tombstone?.(id);
+			outcome.tombstoned = true;
+		} catch (e) {
+			outcome.warnings.push(`session-record tombstone failed: ${(e as Error).message}`);
+		}
+	}
+
+	// 2) git worktree remove --force in the host repo — while the checkout
+	//    still exists. On any failure the storage halves are still removed
+	//    and a `git worktree prune` sweep cleans the admin metadata.
+	const hostRoot = typeof meta.repoRoot === "string" && meta.repoRoot.length > 0 ? meta.repoRoot : undefined;
+	const hostAlive = hostRoot !== undefined && fs.existsSync(hostRoot);
+	if (hostAlive && meta.worktree.length > 0 && fs.existsSync(meta.worktree)) {
+		const r = await runGit(["worktree", "remove", "--force", meta.worktree], { cwd: hostRoot });
+		if (r.code === 0) outcome.worktreeRemoved = true;
+		else {
+			outcome.warnings.push(`git worktree remove failed: ${r.stderr || r.stdout || "unknown error"}`);
+			const p = await runGit(["worktree", "prune"], { cwd: hostRoot });
+			if (p.code === 0) outcome.pruned = true;
+		}
+	} else if (hostAlive && meta.worktree.length > 0) {
+		// Checkout already gone — sweep the stale admin registration so the
+		// branch (if deletable) is not seen as "still checked out".
+		const p = await runGit(["worktree", "prune"], { cwd: hostRoot });
+		if (p.code === 0) outcome.pruned = true;
+	}
+
+	// 3) Storage halves: sandbox dir (checkout + config + engine dir) and the
+	//    hidden .state sibling (db + meta) — never the baselines.
+	if (fs.existsSync(entry.stateDir)) {
+		fs.rmSync(entry.stateDir, { recursive: true, force: true });
+		outcome.stateDirRemoved = true;
+	}
+	if (fs.existsSync(entry.dir)) {
+		fs.rmSync(entry.dir, { recursive: true, force: true });
+		outcome.sandboxDirRemoved = true;
+	}
+
+	// 4) Optional branch delete — candidates only (branchDeleteIntent), never
+	//    forced, verified against the live repo.
+	if (branchDeleteIntent(meta)) {
+		if (!hostAlive) {
+			outcome.branchKept = "host repo gone — branch left alone";
+		} else {
+			const branchName = meta.branch!;
+			const exists = await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd: hostRoot });
+			if (exists.code !== 0) {
+				outcome.branchKept = "no local branch of that name";
+			} else {
+				const checkedOut = await checkedOutBranches(hostRoot!);
+				if (checkedOut.has(branchName)) {
+					outcome.branchKept = "still checked out somewhere else";
+				} else {
+					const d = await runGit(["branch", "-d", branchName], { cwd: hostRoot });
+					if (d.code === 0) outcome.branchDeleted = branchName;
+					else outcome.branchKept = `git branch -d refused (${d.stderr || d.stdout || "unmerged?"})`;
+				}
+			}
+		}
+	}
+	return outcome;
+}
+
+/** Rows used by the removal dialog. */
+export function removePreviewLines(row: WtListInfo, opts: { branchDelete: boolean }): string[] {
+	const meta = row.entry.meta;
+	const repo = meta.repoRoot ? path.basename(meta.repoRoot) : path.basename(row.entry.dir);
+	const lines = [
+		`${repo}/${sandboxBranchLabel(meta)}`,
+		`worktree: ${meta.worktree}`,
+		`storage id: ${path.basename(row.entry.dir)}`,
+		`db ${fmtSize(row.entry.dbSizeBytes)} · checkout ${fmtSize(row.checkoutBytes)} · total ${fmtSize(row.entry.dbSizeBytes + row.checkoutBytes)}`,
+		`base: ${meta.baseRef} @ ${meta.baseCommit.slice(0, 8)} · created ${meta.createdAt.slice(0, 10)}`,
+	];
+	if (row.liveMcpPrefix !== undefined) {
+		lines.push(`live MCP connection (${row.liveMcpPrefix}) WILL BE DISCONNECTED — the chunkhound daemon exits on its own`);
+	}
+	if (row.recordedConnected) {
+		lines.push("recorded for auto-reconnect — the session record will be tombstoned");
+	}
+	if ((row.git?.dirty === true) && !row.gone) {
+		lines.push("⚠ the checkout has uncommitted changes — they will be lost");
+	}
+	if (row.runsThisExtension) {
+		lines.push("⚠ this sandbox runs THIS extension — removing it breaks the plugin until the extension symlink is repointed");
+	}
+	if (opts.branchDelete && typeof meta.branch === "string") {
+		lines.push(`branch: will try 'git branch -d ${meta.branch}' (only when it is merged elsewhere; never forced)`);
+	}
+	lines.push("NOT touched: shared baselines, other sandboxes, the host repo beyond this sandbox's own worktree registration.");
 	return lines;
 }

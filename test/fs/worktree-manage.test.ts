@@ -3,8 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { runGit } from "../../chhound/git.js";
 import { dirSize, dirSizeAsync } from "../../chhound/sandbox.js";
+import type { SandboxEntry } from "../../chhound/sandbox.js";
 import type { ChhoundSettings } from "../../chhound/types.js";
-import { buildWorktreeListLines, collectWorktreeList, entryBadges, groupListInfos, probeWorktreeGit } from "../../worktree/manage.js";
+import { buildWorktreeListLines, collectWorktreeList, entryBadges, groupListInfos, probeWorktreeGit, removeWorktreeEntry } from "../../worktree/manage.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
@@ -168,6 +169,163 @@ describe("worktree manager (fs)", () => {
 			// gone checkout has no git date — and the size column is 0.
 			const goneLine = lines.split("\n").find((l) => l.includes("checkout 0 B"));
 			await check(t, "render: gone row sizes 0", goneLine !== undefined && goneLine.includes("created 2026-09-07"), goneLine ?? "");
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("removal flow over a fixture library (throwaway)", () => {
+	test("rm removes storage + worktree registration, deletes -b branches safely", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-wt-rm-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
+			const git = async (args: string[], opts: { cwd: string }): Promise<string> => {
+				const r = await runGit(args, opts);
+				if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+				return r.stdout;
+			};
+			const cfg = async (cwd: string): Promise<void> => {
+				await git(["config", "user.name", "wt-rm"], { cwd });
+				await git(["config", "user.email", "wt-rm@test"], { cwd });
+			};
+
+			// Repo: main (m1); sandbox branches:
+			//  - merged: created at main's tip, no own commits → branch -d OK
+			//  - unmerged: created at m1 with a commit on top → -d refuses
+			//  - preexisting: a branch that existed before the sandbox
+			//    (baseRef === branch in meta) → never deleted
+			const repo = path.join(root, "rm-repo");
+			fs.mkdirSync(repo);
+			await git(["init", "-b", "main"], { cwd: repo });
+			await cfg(repo);
+			fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+			await git(["add", "a.txt"], { cwd: repo });
+			await git(["commit", "-m", "m1"], { cwd: repo });
+			const m1 = (await git(["rev-parse", "HEAD"], { cwd: repo })).trim();
+			// merged branch (created later, at main tip)
+			const wtMerged = path.join(root, "sandboxes", "merged-wt");
+			await git(["worktree", "add", "-b", "merged-b", wtMerged, "main"], { cwd: repo });
+			// unmerged branch with a commit of its own
+			const wtUnmerged = path.join(root, "sandboxes", "unmerged-wt");
+			await git(["worktree", "add", "-b", "unmerged-b", wtUnmerged, m1], { cwd: repo });
+			fs.writeFileSync(path.join(wtUnmerged, "own.txt"), "own\n");
+			await git(["add", "own.txt"], { cwd: wtUnmerged });
+			await git(["commit", "-m", "u1"], { cwd: wtUnmerged });
+			// pre-existing branch (created BEFORE the sandbox, checked out into it)
+			const wtPre = path.join(root, "sandboxes", "pre-wt");
+			await git(["branch", "preexisting-b", "main"], { cwd: repo });
+			await git(["worktree", "add", wtPre, "preexisting-b"], { cwd: repo });
+			// pull/N-shaped sandbox: detached at m1, no local branch
+			const wtPr = path.join(root, "sandboxes", "pr-wt");
+			await git(["worktree", "add", "--detach", wtPr, m1], { cwd: repo });
+
+			const sandboxDir = (id: string) => path.join(settings.sandboxRoot!, id);
+			const stateDir = (id: string) => path.join(settings.sandboxRoot!, ".state", id);
+			const mkEntry = (over: { id: string; wt: string; branch: string; baseRef: string; dbBytes?: string }): SandboxEntry => {
+				fs.mkdirSync(stateDir(over.id), { recursive: true });
+				fs.writeFileSync(path.join(stateDir(over.id), ".chhound.db"), over.dbBytes ?? "db-bytes\n");
+				fs.writeFileSync(path.join(stateDir(over.id), "meta.json"), JSON.stringify({ version: 1 }) + "\n", "utf8");
+				fs.mkdirSync(sandboxDir(over.id), { recursive: true });
+				return {
+					dir: sandboxDir(over.id),
+					stateDir: stateDir(over.id),
+					meta: {
+						version: 1,
+						worktree: over.wt,
+						repoRoot: repo,
+						branch: over.branch,
+						baseRef: over.baseRef,
+						baseCommit: m1,
+						chhoundVersion: "test-fixture",
+						createdAt: "2026-09-07T00:00:00.000Z",
+						copiedFrom: "",
+						dbPath: path.join(stateDir(over.id), ".chhound.db"),
+					},
+					dbSizeBytes: 10,
+				};
+			};
+			const rowFor = async (entry: SandboxEntry) => {
+				const res = await collectWorktreeList({ entries: [entry], settings, records: new Map(), livePrefixFor: () => undefined });
+				return res.infos[0]!;
+			};
+
+			const disconnected: string[] = [];
+			const tombstoned: string[] = [];
+			const seams = {
+				disconnect: async (id: string) => {
+					disconnected.push(id);
+				},
+				tombstone: (id: string) => {
+					tombstoned.push(id);
+				},
+			};
+
+			// ── 1) merged-b: everything removed, branch deleted ──
+			const merged = mkEntry({ id: "sb-merged-00000001", wt: wtMerged, branch: "merged-b", baseRef: "main" });
+			const outcome1 = await removeWorktreeEntry({ row: await rowFor(merged), settings, mcp: seams });
+			await check(t, "merged: worktree removed + storage gone", outcome1.worktreeRemoved === true && outcome1.stateDirRemoved === true && outcome1.sandboxDirRemoved === true, JSON.stringify(outcome1));
+			await check(t, "merged: branch deleted", outcome1.branchDeleted === "merged-b", JSON.stringify(outcome1));
+			await check(t, "merged: dirs are really gone", !fs.existsSync(wtMerged) && !fs.existsSync(stateDir("sb-merged-00000001")) && !fs.existsSync(sandboxDir("sb-merged-00000001")));
+			await check(t, "merged: host branch gone", (await runGit(["show-ref", "--verify", "--quiet", "refs/heads/merged-b"], { cwd: repo })).code !== 0);
+			await check(t, "merged: worktree unregistered", (await git(["worktree", "list", "--porcelain"], { cwd: repo })).includes(wtMerged) === false);
+			await check(t, "merged: no warnings", outcome1.warnings.length === 0, JSON.stringify(outcome1.warnings));
+
+			// ── 2) unmerged-b: storage + worktree removed, branch KEPT ──
+			const unmerged = mkEntry({ id: "sb-unmerged-00000002", wt: wtUnmerged, branch: "unmerged-b", baseRef: "main" });
+			const outcome2 = await removeWorktreeEntry({ row: await rowFor(unmerged), settings, mcp: seams });
+			await check(t, "unmerged: storage + worktree removed", outcome2.worktreeRemoved === true && outcome2.stateDirRemoved === true && outcome2.sandboxDirRemoved === true, JSON.stringify(outcome2));
+			await check(t, "unmerged: branch kept (refused, not forced)", outcome2.branchDeleted === undefined && (outcome2.branchKept ?? "").includes("refused"), JSON.stringify(outcome2));
+			await check(t, "unmerged: branch still exists", (await runGit(["show-ref", "--verify", "--quiet", "refs/heads/unmerged-b"], { cwd: repo })).code === 0);
+
+			// ── 3) pre-existing branch: sandbox removed, branch untouched ──
+			const pre = mkEntry({ id: "sb-pre-00000003", wt: wtPre, branch: "preexisting-b", baseRef: "preexisting-b" });
+			const outcome3 = await removeWorktreeEntry({ row: await rowFor(pre), settings, mcp: seams });
+			await check(t, "pre: storage removed", outcome3.stateDirRemoved === true && outcome3.sandboxDirRemoved === true, JSON.stringify(outcome3));
+			await check(t, "pre: no delete attempt", outcome3.branchDeleted === undefined && outcome3.branchKept === undefined, JSON.stringify(outcome3));
+			await check(t, "pre: branch survives", (await runGit(["show-ref", "--verify", "--quiet", "refs/heads/preexisting-b"], { cwd: repo })).code === 0);
+
+			// ── 4) pull/N-shaped: detached, storage removed, no branch notes ──
+			const pr = mkEntry({ id: "sb-pr-00000004", wt: wtPr, branch: "pull/7", baseRef: "main" });
+			const outcome4 = await removeWorktreeEntry({ row: await rowFor(pr), settings, mcp: seams });
+			await check(t, "pr: storage + worktree removed", outcome4.worktreeRemoved === true && outcome4.stateDirRemoved === true, JSON.stringify(outcome4));
+			await check(t, "pr: no branch delete intent", outcome4.branchDeleted === undefined && outcome4.branchKept === undefined, JSON.stringify(outcome4));
+
+			// ── 5) live + recorded seams fire on a dirty checkout ──
+			const wtLive = path.join(root, "sandboxes", "live-wt");
+			await git(["worktree", "add", "-b", "live-b", wtLive, "main"], { cwd: repo });
+			fs.writeFileSync(path.join(wtLive, "scratch.txt"), "scratch\n");
+			const live = mkEntry({ id: "sb-live-00000005", wt: wtLive, branch: "live-b", baseRef: "main" });
+			const liveRes = await collectWorktreeList({
+				entries: [live],
+				settings,
+				records: new Map([["sb-live-00000005", { sandboxId: "sb-live-00000005", state: "connected" }]]),
+				livePrefixFor: () => "chh_live",
+			});
+			const outcome5 = await removeWorktreeEntry({ row: liveRes.infos[0]!, settings, mcp: seams });
+			await check(t, "live: disconnect + tombstone fired", disconnected.includes("sb-live-00000005") && tombstoned.includes("sb-live-00000005"), JSON.stringify({ disconnected, tombstoned }));
+			await check(t, "live: outcome flags", outcome5.mcpDisconnected === true && outcome5.tombstoned === true && outcome5.wasLive === true, JSON.stringify(outcome5));
+			await check(t, "live: dirty noted", outcome5.hadUncommitted === true, JSON.stringify(outcome5));
+			await check(t, "live: dirty checkout removed anyway (--force semantics of git worktree remove)", !fs.existsSync(wtLive));
+
+			// ── 6) gone sandbox: state removed, stale registration pruned ──
+			const goneId = "sb-gone-00000006";
+			const wtGone = path.join(root, "sandboxes", "gone-wt");
+			await git(["worktree", "add", "-b", "gone-b", wtGone, "main"], { cwd: repo });
+			fs.rmSync(wtGone, { recursive: true, force: true }); // simulate the checkout disappearing on its own
+			const gone = mkEntry({ id: goneId, wt: wtGone, branch: "gone-b", baseRef: "main" });
+			const goneRes = await collectWorktreeList({ entries: [gone], settings, records: new Map(), livePrefixFor: () => undefined });
+			await check(t, "gone row flagged", goneRes.infos[0]!.gone === true);
+			const outcome6 = await removeWorktreeEntry({ row: goneRes.infos[0]!, settings, mcp: seams });
+			await check(t, "gone: state removed + stale admin pruned", outcome6.stateDirRemoved === true && outcome6.pruned === true, JSON.stringify(outcome6));
+			await check(t, "gone: branch deleted after prune", outcome6.branchDeleted === "gone-b", JSON.stringify(outcome6));
+			await check(t, "gone: no stale registration left", (await git(["worktree", "list", "--porcelain"], { cwd: repo })).includes(wtGone) === false);
+
+			await check(t, "main untouched", (await runGit(["show-ref", "--verify", "--quiet", "refs/heads/main"], { cwd: repo })).code === 0);
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

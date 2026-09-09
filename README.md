@@ -105,7 +105,33 @@ ends with its worktree path relative to the library root. Nothing is mutated:
 `<query>`/`--search` filters case-insensitively over repo, branch, head ref,
 storage id and paths. `--sort` keys: `created` (default, newest first),
 `name`, `db`, `checkout`, `total` (numeric keys: largest first).
-Removal (`/chworktree rm`) is planned on the same verb surface.
+
+### /chworktree rm — remove a worktree sandbox
+
+Removes one sandbox completely: its storage (sandbox dir + the hidden
+`.state` sibling with the index db and meta), its worktree registration in
+the host repo (`git worktree remove --force`, with a `prune` sweep for stale
+registrations), and — for branches **created for the sandbox** only — the
+branch itself via `git branch -d` (never forced: a branch with commits not
+merged elsewhere is kept and reported). Live MCP connections are
+disconnected **first** (the chunkhound daemon exits on its own) and the
+session record is tombstoned so auto-restore cannot resurrect the sandbox.
+
+```
+/chworktree rm                # interactive: pick a sandbox, review the impact
+                              #   preview, confirm (headless: usage + hint)
+/chworktree rm <id-or-path>   # one-go removal (no confirm — assumed default)
+/chworktree rm <id> --force   # one-go removal of the sandbox that runs THIS
+                              #   extension (the interactive dialog warns too)
+```
+
+Guards: pre-existing branches are never deleted (a sandbox that checked out
+an existing branch anchors its baseline on that branch — `meta.baseRef ==
+branch` — and is left alone); pull/`N` and `<remote>/<branch>` slots never
+are (no local branch). The sandbox running this extension needs `--force`
+on the one-go path. The impact preview states what will be disconnected,
+lost (uncommitted checkout changes) and deleted — and what is **NOT**
+touched: shared baselines, other sandboxes, anything else in the host repo.
 
 In all modes the location must not overlap another chunkhound worktree or index —
 the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout

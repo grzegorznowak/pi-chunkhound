@@ -13,13 +13,14 @@ import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
-import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, readClaimedRoot } from "../chhound/sandbox.js";
+import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxBranchLabel, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, readClaimedRoot } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
-import { connectEntry } from "../mcp/command.js";
-import { rehydrateConnections } from "../mcp/persist.js";
+import { connectEntry, resolveSandboxMatches } from "../mcp/command.js";
+import { disconnectMcp } from "../mcp/manager.js";
+import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
-import { buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, parseListInvocation, worktreeVerb } from "./manage.js";
+import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb } from "./manage.js";
 
 const HELP = [
 	"/chworktree [repo] [branch] [options]     — create a worktree sandbox",
@@ -65,6 +66,22 @@ const HELP = [
 	"  --sort <key>        created (default, newest first) | name | db | checkout | total",
 	"                      (numeric keys: largest first; name: A→Z)",
 	"  examples: /chworktree ls — /chworktree ls fix — /chworktree ls --search mcp --sort db",
+	"",
+	"Manage (rm):",
+	"  rm removes a worktree sandbox: its storage (sandbox dir + .state index),",
+	"  its worktree registration in the host repo, and — for branches created",
+	"  for the sandbox only — the branch (git branch -d, NEVER forced, never",
+	"  for pull/N or pre-existing branches). A live MCP connection is",
+	"  disconnected first (the daemon exits on its own) and the session record",
+	"  tombstoned. Shared baselines and the rest of the host repo are never",
+	"  touched.",
+	"  /chworktree rm                 interactive: pick a sandbox, then confirm",
+	"                                 the impact preview (headless: shows usage)",
+	"  /chworktree rm <target>        one-go removal of one sandbox — <target> is",
+	"                                 a worktree path, storage id, or basename",
+	"                                 (no confirm; guards still apply)",
+	"  --force                        remove the sandbox that runs THIS extension",
+	"                                 (one-go path; interactive confirms anyway)",
 	"",
 	"Each worktree gets its own chunkhound index (baseline copy + top-up at the",
 	"branch point). The checkout lives INSIDE its storage dir in the worktree",
@@ -178,7 +195,8 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			"[--no-index] [--force-reindex] [--refresh-baseline], or /chworktree <PR-URL> for a " +
 			"pull request sandbox — bare /chworktree [repo] runs an interactive wizard. " +
 			"Manage: /chworktree ls [<query>] [--search <text>] [--sort <key>] lists every sandbox " +
-			"grouped by project with space/git-state/liveness columns — /chworktree --help for details",
+			"grouped by project with space/git-state/liveness columns; /chworktree rm [<target>] [--force] " +
+			"removes a sandbox (disconnect, storage, worktree registration, -b branch) — /chworktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
@@ -198,12 +216,8 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			if (verb) {
 				const rest = positionals.slice(1);
 				if (verb === "remove") {
-					notify(
-						"/chworktree rm is not available yet — the removal flow (disconnect, storage, " +
-							"worktree, branch) lands in the next slice. /chworktree ls lists what it will remove.",
-						"warning",
-					);
-				return;
+					await runWorktreeRemove(pi, ctx, rest, flags);
+					return;
 				}
 				await runWorktreeList(ctx, rest, flags);
 				return;
@@ -1074,4 +1088,196 @@ async function runWorktreeList(
 		}).join("\n"),
 		"info",
 	);
+}
+
+// ── Manager: /chworktree rm ─────────────────────────────────────────────────
+
+/**
+ * /chworktree rm — remove one worktree sandbox (storage, worktree
+ * registration, optional -b-created branch), with the guards from the
+ * planning: live MCP connections are disconnected first (daemon self-exits)
+ * and session records tombstoned; the extension-source sandbox needs an
+ * explicit --force on the one-go path; pre-existing branches are never
+ * deleted (branchDeleteIntent); pull/N and remote-ref slots never are.
+ *
+ * Interactive (no target, UI present): pick from the sandbox list
+ * (ui.select), then a confirm dialog with the full impact preview
+ * (removePreviewLines) — including what is NOT touched. Headless without a
+ * target: usage + hint. One-go (explicit target): no confirm (assumed
+ * default the operator accepted) — the outcome summary reports each step.
+ */
+async function runWorktreeRemove(
+	pi: ExtensionAPI,
+	ctx: {
+		cwd: string;
+		hasUI: boolean;
+		ui: {
+			notify(msg: string, type?: "info" | "warning" | "error"): void;
+			select?(title: string, options: string[]): Promise<string | undefined>;
+			confirm?(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean>;
+		};
+		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
+	},
+	rest: string[],
+	flags: Record<string, string | true>,
+): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const repoRoot = await gitRootOrNull(ctx.cwd);
+	const loaded = loadSettings(repoRoot ?? ctx.cwd);
+	if (loaded.issue) notify(loaded.issue, "warning");
+	const settings = loaded.settings;
+
+	const parsed = parseRemoveInvocation(rest, flags);
+	if (!parsed.ok) {
+		notify(parsed.error, "error");
+		return;
+	}
+	const { target, force } = parsed.options;
+	if (target === undefined) {
+		// Interactive: pick a sandbox (numbered selectable list) then confirm
+		// with the impact preview. Headless: show what would be removable.
+		if (typeof ctx.ui.select === "function" && typeof ctx.ui.confirm === "function") {
+			const entries = listSandboxes(settings);
+			if (entries.length === 0) {
+				notify("No worktrees to remove — /chworktree creates them.", "info");
+				return;
+			}
+			const { infos } = await collectWorktreeList({ entries, settings, records: sessionRecords(ctx) });
+			const options = infos.map(
+				(info) =>
+					`${lifeMarker(info)} ${info.entry.meta.repoRoot ? path.basename(info.entry.meta.repoRoot) + "/" : ""}${sandboxBranchLabel(info.entry.meta)}` +
+					(info.gone ? " (gone)" : info.git?.dirty ? " (dirty)" : "") +
+					` — ${path.basename(info.entry.dir)}`,
+			);
+			const choice = await ctx.ui.select("Remove which worktree sandbox?", options);
+			if (choice === undefined) {
+				notify("Cancelled.", "info");
+				return;
+			}
+			const info = infos[options.indexOf(choice)];
+			if (!info) {
+				notify("Selection did not match a sandbox — cancelling.", "error");
+				return;
+			}
+			const confirmed = await ctx.ui.confirm(
+				`Remove sandbox ${path.basename(info.entry.dir)}?`,
+				removePreviewLines(info, { branchDelete: branchDeleteIntent(info.entry.meta) }).join("\n"),
+			);
+			if (!confirmed) {
+				notify("Cancelled — nothing was removed.", "info");
+				return;
+			}
+			await performRemoval(pi, ctx, settings, info, { force: true });
+			return;
+		}
+		notify(
+			[
+				"rm needs a target when no interactive picker is available: /chworktree rm <worktree path|storage id>.",
+				"/chworktree ls lists every sandbox with its storage id.",
+			].join("\n"),
+			"error",
+		);
+		return;
+	}
+
+	// One-go: resolve the target (worktree path | storage id | basename).
+	const matches = resolveSandboxMatches(target, settings, ctx.cwd);
+	if (matches.length === 0) {
+		notify(
+			[
+				`No worktree or storage id matches '${target}'.`,
+				"/chworktree ls lists every sandbox with its storage id; remove by id: /chworktree rm <id>.",
+			].join("\n"),
+			"error",
+		);
+		return;
+	}
+	if (matches.length > 1) {
+		notify(
+			`'${target}' matches ${matches.length} sandboxes:\n` +
+				matches.map((m) => `  ${path.basename(m.dir)} → ${m.meta.worktree}`).join("\n") +
+				"\nUse the full storage id or worktree path.",
+			"error",
+		);
+		return;
+	}
+	const entry = matches[0]!;
+	// The extension-source guard: removing the sandbox the loaded extension
+	// runs from breaks the plugin until the symlink is repointed — the
+	// interactive confirm carries the warning, the one-go path refuses
+	// without --force.
+	const { infos } = await collectWorktreeList({ entries: [entry], settings, records: sessionRecords(ctx) });
+	const info = infos[0]!;
+	if (info.runsThisExtension && !force) {
+		notify(
+			[
+				`${path.basename(entry.dir)} runs THIS extension (the loaded code lives in its checkout).`,
+				"Removing it breaks the plugin until ~/.pi/agent/extensions/pi-chhound is repointed to another checkout.",
+				"Re-run with --force to remove it anyway: /chworktree rm " + target + " --force",
+			].join("\n"),
+			"error",
+		);
+		return;
+	}
+	await performRemoval(pi, ctx, settings, info, { force });
+}
+
+/** Session-log records for this session branch (empty when unavailable). */
+function sessionRecords(
+	ctx: { sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] } },
+): Map<string, ConnectionRecord> {
+	try {
+		if (ctx.sessionManager) return rehydrateConnections(ctx.sessionManager.getBranch());
+	} catch {
+		// no session log — liveness degrades gracefully
+	}
+	return new Map();
+}
+
+/**
+ * Shared removal tail: impact preview already confirmed (or one-go accepted
+ * by default) — run removeWorktreeEntry with the real MCP seams and report
+ * the outcome per step.
+ */
+async function performRemoval(
+	pi: ExtensionAPI,
+	ctx: { ui: { notify(msg: string, type?: "info" | "warning" | "error"): void } },
+	settings: ChhoundSettings,
+	info: Awaited<ReturnType<typeof collectWorktreeList>>["infos"][number],
+	opts: { force: boolean },
+): Promise<void> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const id = path.basename(info.entry.dir);
+	notify(`Removing ${id} — disconnect first, then storage + worktree registration…`, "info");
+	const outcome = await removeWorktreeEntry({
+		row: info,
+		settings,
+		mcp: {
+			disconnect: async (sandboxId) => {
+				await disconnectMcp(sandboxId);
+			},
+			tombstone: (sandboxId) => recordConnection(pi, { sandboxId, state: "disconnected" }),
+		},
+		force: opts.force,
+	});
+	const lines = [
+		`✓ Removed ${outcome.id}${info.entry.meta.repoRoot ? " (" + path.basename(info.entry.meta.repoRoot) + "/" + sandboxBranchLabel(info.entry.meta) + ")" : ""}`,
+		`  storage: ${outcome.stateDirRemoved ? "state dir removed" : "state dir already gone"} · ${outcome.sandboxDirRemoved ? "sandbox dir removed" : "sandbox dir already gone"}`,
+		outcome.worktreeRemoved
+			? `  worktree: ${outcome.worktree} unregistered`
+			: outcome.gone
+				? `  worktree: ${outcome.worktree} was already gone`
+				: `  worktree: ${outcome.worktree} NOT unregistered${outcome.pruned ? " (admin entry pruned)" : ""}`,
+	];
+	if (outcome.mcpDisconnected) lines.push("  mcp: disconnected (the chunkhound daemon exits on its own)");
+	if (outcome.tombstoned) lines.push("  mcp: session record tombstoned (no auto-restore)");
+	if (outcome.branchDeleted) lines.push(`  branch: deleted '${outcome.branchDeleted}' (git branch -d)`);
+	if (outcome.branchKept) lines.push(`  branch: kept — ${outcome.branchKept}`);
+	if (outcome.hadUncommitted && !outcome.gone) lines.push("  note: the checkout had uncommitted changes — they are gone");
+	for (const w of outcome.warnings) lines.push(`  ⚠ ${w}`);
+	if (outcome.branchKept === undefined && outcome.branchDeleted === undefined && branchDeleteIntent(info.entry.meta)) {
+		lines.push(`  branch: not applicable (pre-existing/remote branch — never deleted)`);
+	}
+	lines.push("  baselines and the host repo's other worktrees are untouched.");
+	notify(lines.join("\n"), outcome.warnings.length > 0 ? "warning" : "info");
 }
