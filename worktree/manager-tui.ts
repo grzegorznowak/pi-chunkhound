@@ -173,21 +173,43 @@ export function createWorktreeManagerTuiPresenter(
 							? paint("dim", tab === "baselines" ? "(no cached baselines — the create wizard primes them)" : "(no projects yet — n starts a worktree in a repo)")
 							: undefined;
 						// Justified columns: labels and status badges share a width across
-						// rows so the badges (and then the size breakdown) line up visually.
+						// rows, then measured rows line up under a dim DB/CHECKOUT/TOTAL
+						// header with right-aligned numeric cells (the labelled
+						// `db … · checkout … · total …` one-liner lives in the details).
 						const badgeText = (item: ManagerRow): string => item.kind !== "create" && item.badges.length ? item.badges.join(" ") : "";
 						const labelWidth = rows.reduce((max, item) => Math.max(max, item.label.length), 0);
 						const badgeWidth = rows.reduce((max, item) => Math.max(max, badgeText(item).length), 0);
+						const sizeColumnKeys = ["db", "checkout", "total"] as const;
+						const sizeHeader: Record<(typeof sizeColumnKeys)[number], string> = { db: "DB", checkout: "CHECKOUT", total: "TOTAL" };
+						// A column exists only when a visible row measured it: baselines carry db
+						// alone, projects carry none, and unmeasured fixtures carry no cells.
+						const sizeColumnWidths = new Map<(typeof sizeColumnKeys)[number], number>();
+						for (const key of sizeColumnKeys) {
+							const width = rows.reduce((max, item) => Math.max(max, item.sizeCells?.[key]?.length ?? 0), 0);
+							if (width > 0) sizeColumnWidths.set(key, Math.max(width, sizeHeader[key].length));
+						}
+						const sizeColumns = sizeColumnKeys.filter((key) => sizeColumnWidths.has(key));
+						const sizeSegment = (item: ManagerRow): string | undefined => {
+							if (!item.sizeCells || sizeColumns.length === 0) return undefined;
+							return sizeColumns.map((key) => (item.sizeCells?.[key] ?? "").padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
+						};
+						// The header shares the row prefix (marker · padded label · padded
+						// badges) so its labels sit exactly over the numeric columns.
+						const rowPrefix = (marker: string, label: string, badges: string): string => `${marker}${label.padEnd(labelWidth)}${badgeWidth > 0 ? `  ${badges}` : ""}`;
+						const headerSegment = sizeColumns.map((key) => sizeHeader[key].padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
+						const headerLine = sizeColumns.length > 0 ? paint("dim", `${rowPrefix("  ", "", " ".repeat(badgeWidth))}  ${headerSegment}`) : undefined;
 						const rowLine = (item: ManagerRow, index: number): string => {
 							const marker = index === row ? paint("accent", "→ ") : "  ";
 							if (item.kind === "create") return `${marker}${item.label}`;
-							let line = `${marker}${item.label.padEnd(labelWidth)}`;
-							if (badgeWidth > 0) line += `  ${paint("dim", badgeText(item).padEnd(badgeWidth))}`;
-							if (item.sizeLabel) line += `  ${paint("dim", item.sizeLabel)}`;
+							let line = rowPrefix(marker, item.label, paint("dim", badgeText(item).padEnd(badgeWidth)));
+							const segment = sizeSegment(item);
+							if (segment) line += `  ${paint("dim", segment)}`;
 							return line;
 						};
 						return [
 							TABS.map((name) => tabName(name)).join("  "), "",
 							...(filterLine ? [filterLine, ""] : []),
+							...(headerLine ? [headerLine] : []),
 							...rows.map(rowLine),
 							...(emptyLine ? ["", emptyLine] : []),
 							...(loadingLine ? ["", loadingLine] : []),

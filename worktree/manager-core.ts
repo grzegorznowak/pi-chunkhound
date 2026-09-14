@@ -45,8 +45,14 @@ export interface ManagerRow {
 	baselineDir?: string;
 	label: string;
 	badges: string[];
-	/** Sandbox/baseline rows: the same size breakdown the details show. */
-	sizeLabel?: string;
+	/** Sandbox/baseline rows: cells for the list's size columns (details reuse the same values). */
+	sizeCells?: ManagerSizeCells;
+}
+
+export interface ManagerSizeCells {
+	db: string;
+	checkout?: string;
+	total?: string;
 }
 
 export interface ManagerSession {
@@ -154,16 +160,31 @@ export function createManagerSession(initial: Partial<ManagerSession> = {}): Man
 }
 
 /**
- * Shared size text: `db … · checkout … · total …` for sandboxes, `db …` for
+ * List size cells: `{ db, checkout, total }` for sandboxes, `{ db }` for
  * baselines (no checkout copy exists). Undefined only when neither side was
  * measured (fixtures/partial data), so the row stays blank; a measured but
- * missing db file is a real 0 B.
+ * missing db file is a real 0 B. The TUI renders these under its DB/CHECKOUT/
+ * TOTAL header with right-aligned numeric columns.
  */
-export function formatSizeBreakdown(dbBytes?: number, checkoutBytes?: number): string | undefined {
+export function formatSizeCells(dbBytes?: number, checkoutBytes?: number): ManagerSizeCells | undefined {
 	if (dbBytes === undefined && checkoutBytes === undefined) return undefined;
 	const db = dbBytes ?? 0;
-	if (checkoutBytes === undefined) return `db ${fmtSize(db)}`;
-	return `db ${fmtSize(db)} · checkout ${fmtSize(checkoutBytes)} · total ${fmtSize(db + checkoutBytes)}`;
+	if (checkoutBytes === undefined) return { db: fmtSize(db) };
+	return { db: fmtSize(db), checkout: fmtSize(checkoutBytes), total: fmtSize(db + checkoutBytes) };
+}
+
+/**
+ * Shared size text for details: `db … · checkout … · total …` for sandboxes,
+ * `db …` for baselines. Derived from the same cells the list columns show, so
+ * list and details cannot drift.
+ */
+export function formatSizeBreakdown(dbBytes?: number, checkoutBytes?: number): string | undefined {
+	const cells = formatSizeCells(dbBytes, checkoutBytes);
+	if (!cells) return undefined;
+	const parts = [`db ${cells.db}`];
+	if (cells.checkout !== undefined) parts.push(`checkout ${cells.checkout}`);
+	if (cells.total !== undefined) parts.push(`total ${cells.total}`);
+	return parts.join(" · ");
 }
 
 export function buildManagerRows(session: ManagerSession, items: readonly ManagerItem[]): ManagerRow[] {
@@ -188,14 +209,14 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 		const rows: ManagerRow[] = [];
 		for (const item of matching) {
 			if (item.kind !== "baseline") continue;
-			const sizeLabel = formatSizeBreakdown(item.dbBytes);
+			const sizeCells = formatSizeCells(item.dbBytes);
 			rows.push({
 				kind: "baseline",
 				baselineDir: item.baselineDir,
 				projectKey: item.projectKey,
 				label: `${item.projectLabel} · ${item.ref}`,
 				badges: [],
-				...(sizeLabel ? { sizeLabel } : {}),
+				...(sizeCells ? { sizeCells } : {}),
 			});
 		}
 		return rows;
@@ -209,13 +230,13 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 			...(item.live ? ["live"] : []),
 			...(item.pr ? ["pr"] : []),
 		];
-		const sizeLabel = formatSizeBreakdown(item.dbBytes, item.sizeBytes);
+		const sizeCells = formatSizeCells(item.dbBytes, item.sizeBytes);
 		rows.push({
 			kind: "sandbox",
 			sandboxId: item.sandboxId,
 			label: `${item.projectLabel} · ${item.branch}${item.pr ? ` · #${item.pr.number}` : ""}`,
 			badges,
-			...(sizeLabel ? { sizeLabel } : {}),
+			...(sizeCells ? { sizeCells } : {}),
 		});
 	}
 	if (session.preselect) {

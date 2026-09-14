@@ -332,7 +332,7 @@ describe("worktree manager TUI presenter", () => {
 		} finally { setKeybindings(original); }
 	});
 
-	test("sandbox rows justify status labels and show checkout size", async (t) => {
+	test("sandbox rows justify status labels and align size columns", async (t) => {
 		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
 		const original = getKeybindings();
 		try {
@@ -350,9 +350,12 @@ describe("worktree manager TUI presenter", () => {
 			const frame = component!.render(100).join("\n");
 			const first = frame.split("\n").find((line) => line.includes("repo · feature"))!;
 			const second = frame.split("\n").find((line) => line.includes("beta-tools · bugfix/longer"))!;
-			await check(t, "every sandbox row shows its db/checkout/total before drilling in", first.includes("db 1.0 MB") && first.includes("checkout 2.0 KB") && first.includes("total 1.0 MB") && second.includes("db 2.0 MB") && second.includes("checkout 3.0 MB") && second.includes("total 5.0 MB"), frame);
+			const header = frame.split("\n").find((line) => line.includes("CHECKOUT"))!;
+			await check(t, "one DB/CHECKOUT/TOTAL header replaces the per-row labels", header.includes("DB") && header.includes("TOTAL") && !first.includes("db ") && !second.includes("checkout ") && frame.indexOf(header) < frame.indexOf(first), frame);
+			await check(t, "every measured row keeps its values", first.includes("1.0 MB") && first.includes("2.0 KB") && second.includes("2.0 MB") && second.includes("3.0 MB") && second.includes("5.0 MB"), frame);
 			await check(t, "status labels share a justified column", first.indexOf("indexed") === second.indexOf("indexed") && first.indexOf("indexed") > 0, `${first}\n${second}`);
-			await check(t, "the size column lines up after the badges", first.indexOf("checkout") === second.indexOf("checkout"), `${first}\n${second}`);
+			const end = (line: string, value: string): number => line.indexOf(value) + value.length;
+			await check(t, "numeric cells right-align under their header columns", end(first, "2.0 KB") === end(second, "3.0 MB") && end(first, "1.0 MB") === end(second, "2.0 MB") && end(header, "DB") === end(first, "1.0 MB") && end(header, "CHECKOUT") === end(first, "2.0 KB") && end(header, "TOTAL") === end(second, "5.0 MB"), `${header}\n${first}\n${second}`);
 			component!.handleInput("q");
 			await pending;
 		} finally { setKeybindings(original); }
@@ -371,7 +374,7 @@ describe("worktree manager TUI presenter", () => {
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [...items, baseline]).next(session);
 			component!.handleInput("3");
 			let frame = component!.render(100).join("\n");
-			await check(t, "digit 3 opens the baselines tab with db-only rows", frame.includes("[baselines]") && frame.includes("repo · main") && frame.includes("db 7.0 MB") && !frame.includes("+ new worktree"), frame);
+			await check(t, "digit 3 opens the baselines tab with a DB-only column", frame.includes("[baselines]") && frame.includes("repo · main") && frame.includes("DB") && frame.includes("7.0 MB") && !frame.includes("CHECKOUT") && !frame.includes("+ new worktree"), frame);
 			component!.handleInput("\n");
 			frame = component!.render(100).join("\n");
 			await check(t, "baseline details explain the index and absence of a checkout", frame.includes("baseline index (no checkout copy)") && frame.includes("commit c9698c47bb16") && frame.includes("updated 2026-09-06"), frame);

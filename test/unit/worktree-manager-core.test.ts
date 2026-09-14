@@ -123,16 +123,16 @@ describe("worktree manager core", () => {
 		const row = buildManagerRows(createManagerSession(), [sized]).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
 		const details = describeManagerItem(sized).join("\n");
 		const expected = "db 1.0 MB · checkout 2.0 KB · total 1.0 MB";
-		await check(t, "row size text is the shared db/checkout/total breakdown", row?.sizeLabel === expected && details.includes(expected), JSON.stringify({ row, details }));
+		await check(t, "row size cells are the shared db/checkout/total breakdown", row?.sizeCells?.db === "1.0 MB" && row?.sizeCells?.checkout === "2.0 KB" && row?.sizeCells?.total === "1.0 MB" && details.includes(expected), JSON.stringify({ row, details }));
 		const unmeasured = buildManagerRows(createManagerSession(), [items[0]!]).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
-		await check(t, "unmeasured items stay blank rather than claiming 0 B", unmeasured?.sizeLabel === undefined && !describeManagerItem(items[0]!).join("\n").includes("0 B"), JSON.stringify(unmeasured));
+		await check(t, "unmeasured items stay blank rather than claiming 0 B", unmeasured?.sizeCells === undefined && !describeManagerItem(items[0]!).join("\n").includes("0 B"), JSON.stringify(unmeasured));
 	});
 
 	test("baselines render on their own tab with db-only size and details", async (t) => {
 		const { buildManagerRows, createManagerSession, describeManagerItem } = await import("../../worktree/manager-core.js");
 		const rows = buildManagerRows(createManagerSession({ tab: "baselines" }), [...items, ...baselines]);
 		await check(t, "baseline tab has no create row and only baseline rows", rows.length === 1 && rows[0]?.kind === "baseline" && rows[0]?.baselineDir === "/cache/bases/alpha/main", JSON.stringify(rows));
-		await check(t, "baseline rows carry label, repo key, and db-only size", rows[0]?.label === "alpha · main" && rows[0]?.projectKey === "/repos/alpha" && rows[0]?.sizeLabel === "db 7.0 MB", JSON.stringify(rows[0]));
+		await check(t, "baseline rows carry label, repo key, and a db-only size cell", rows[0]?.label === "alpha · main" && rows[0]?.projectKey === "/repos/alpha" && rows[0]?.sizeCells?.db === "7.0 MB" && rows[0]?.sizeCells?.checkout === undefined && rows[0]?.sizeCells?.total === undefined, JSON.stringify(rows[0]));
 		const details = describeManagerItem(baselines[0]!).join("\n");
 		await check(t, "baseline details explain the db-only nature", details.includes("alpha · main") && details.includes("/repos/alpha") && details.includes("baseline index (no checkout copy)") && details.includes("db 7.0 MB") && details.includes("commit c9698c47bb16") && details.includes("updated 2026-09-06"), details);
 		const worktrees = buildManagerRows(createManagerSession(), [...items, ...baselines]);
