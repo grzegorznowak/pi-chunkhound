@@ -104,16 +104,21 @@ describe("worktree manager TUI presenter", () => {
 		const original = getKeybindings();
 		try {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
-			const allItems = [items[0]!, { ...items[0]!, sandboxId: "two", branch: "other", path: "/worktrees/two", searchText: "repo other" }];
+			const allItems = [items[0]!, { ...items[0]!, sandboxId: "two", branch: "other", path: "/worktrees/two", searchText: "repo other" }, { ...items[0]!, sandboxId: "tools", projectKey: "/repos/repo-tools", projectLabel: "repo-tools", branch: "tooling", path: "/worktrees/tools", searchText: "/repos/repo-tools repo-tools tooling repo" }];
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => allItems).next(session);
 			await new Promise((resolve) => setImmediate(resolve));
 			component!.handleInput("\t");
-			await check(t, "projects render grouped count", component!.render(100).join("\n").includes("repo  2 worktrees"), component!.render(100).join("\n"));
+			let frame = component!.render(100).join("\n");
+			await check(t, "projects render grouped count", /repo\s+2 worktrees/.test(frame) && frame.includes("repo-tools"), frame);
 			component!.handleInput("\n");
-			await check(t, "project Enter drills into anchored filtered worktrees", session.tab === "worktrees" && session.filter === "repo" && session.row === 0 && component!.render(100).join("\n").includes("→ + new worktree"), JSON.stringify(session));
+			frame = component!.render(100).join("\n");
+			await check(t, "project Enter scopes worktrees by project key", session.tab === "worktrees" && session.project?.key === "/repo" && session.filter === "" && session.row === 0 && frame.includes('project "repo"') && frame.includes("repo · feature") && !frame.includes("repo-tools"), frame);
+			component!.handleInput("\x1b");
+			frame = component!.render(100).join("\n");
+			await check(t, "Esc backs out of the project scope without closing", session.project === undefined && frame.includes("repo-tools · tooling") && frame.includes("→ + new worktree"), frame);
 			component!.handleInput("\x1b[B"); component!.handleInput("\n");
 			const detail = component!.render(100).join("\n");
 			await check(t, "sandbox Enter renders details without resolving", detail.includes("feature") && detail.includes("/worktrees/one") && detail.includes("read-only"), detail);
@@ -127,10 +132,10 @@ describe("worktree manager TUI presenter", () => {
 		const original = getKeybindings();
 		try {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
-			for (const mode of ["create", "sandbox", "project"] as const) {
+			for (const mode of ["create", "sandbox", "project", "scoped"] as const) {
 				let component: { handleInput(data: string): void } | undefined;
 				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
-				const session: ManagerSession = { tab: mode === "project" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "" };
+				const session: ManagerSession = { tab: mode === "project" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "", ...(mode === "scoped" ? { project: { key: "/repo", label: "repo" } } : {}) };
 				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
 				await new Promise((resolve) => setImmediate(resolve)); component!.handleInput("n");
 				const action = await pending as { kind: string; positional?: string };

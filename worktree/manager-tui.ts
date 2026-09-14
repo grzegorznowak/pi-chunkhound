@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, decodeKittyPrintable, matchesKey } from "@earendil-works/pi-tui";
-import { buildManagerRows, describeManagerItem, type ManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSession, type PanelAction } from "./manager-core.js";
+import { buildManagerRows, describeManagerItem, scopedManagerItems, type ManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSession, type PanelAction } from "./manager-core.js";
 
 /**
  * pi-tui negotiates the terminal keyboard protocol at startup (Kitty CSI-u
@@ -105,6 +105,7 @@ export function createWorktreeManagerTuiPresenter(
 					tab = next;
 					row = 0;
 					status = [];
+					session.project = undefined;
 					rebuild();
 					tui.requestRender();
 				};
@@ -163,9 +164,15 @@ export function createWorktreeManagerTuiPresenter(
 					render(_width: number): string[] {
 						const tabName = (name: ManagerSession["tab"]) => tab === name ? theme.bold(paint("accent", `[${name}]`)) : name;
 						const footer = paint("dim", "Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close");
+						const scope = session.project;
+						const visibleItems = items ? scopedManagerItems(items, scope?.key) : undefined;
 						const filterLine = filterDraft !== undefined
 							? `${theme.bold(paint("accent", "filter>"))} ${filterDraft}▮   ${paint("dim", "⏎ keep · Esc clear")}`
-							: session.filter ? paint("dim", `(showing ${items?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${items?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
+							: session.filter ? paint("dim", `(showing ${visibleItems?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${visibleItems?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
+						const scopeLine = scope
+							? paint("dim", `(project "${scope.label}" — showing ${rows.filter((item) => item.kind === "sandbox").length} of ${visibleItems?.filter((item) => item.kind === "sandbox").length ?? 0} worktrees · Esc back to all)`)
+							: undefined;
+						const notices = [filterLine, scopeLine].filter((line): line is string => line !== undefined);
 						const loadingLine = loading
 							? `${paint("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!)} ${paint("dim", `Loading ${tab}…${progress ? ` ${progress.done}/${progress.total}` : ""} ${((Date.now() - loadingStartedAt) / 1000).toFixed(1)}s${tab === "worktrees" ? " — Enter on “+ new worktree…” creates without waiting" : ""}`)}`
 							: failed ? paint("error", "Unable to load the worktree library — Esc closes, reopen the manager to retry.") : undefined;
@@ -208,7 +215,7 @@ export function createWorktreeManagerTuiPresenter(
 						};
 						return [
 							TABS.map((name) => tabName(name)).join("  "), "",
-							...(filterLine ? [filterLine, ""] : []),
+							...(notices.length ? [...notices, ""] : []),
 							...(headerLine ? [headerLine] : []),
 							...rows.map(rowLine),
 							...(emptyLine ? ["", emptyLine] : []),
@@ -228,6 +235,14 @@ export function createWorktreeManagerTuiPresenter(
 								else { filterDraft = undefined; session.filter = ""; row = 0; rebuild(); }
 							} else if (text !== undefined) filterDraft += text;
 							tui.requestRender(); return;
+						}
+						if (matchesKey(data, Key.escape) && session.project) {
+							session.project = undefined;
+							row = 0;
+							status = [];
+							rebuild();
+							tui.requestRender();
+							return;
 						}
 						if (text === "/") { filterDraft = session.filter; status = []; tui.requestRender(); return; }
 						if (text === "1" || text === "2" || text === "3") { showTab(TABS[Number(text) - 1]!); return; }
@@ -250,13 +265,19 @@ export function createWorktreeManagerTuiPresenter(
 							const positional = selected?.kind === "project" ? selected.projectKey
 								: selected?.kind === "sandbox" ? items?.find((item) => item.kind === "sandbox" && item.sandboxId === selected.sandboxId)?.projectKey
 									: selected?.kind === "baseline" ? items?.find((item) => item.kind === "baseline" && item.baselineDir === selected.baselineDir)?.projectKey
-										: undefined;
+										: session.project?.key;
 							finish({ kind: "create", positional }); return;
 						}
 						if (!isEnter(data)) return;
-						if (selected?.kind === "create") { finish({ kind: "create" }); return; }
+						if (selected?.kind === "create") { finish({ kind: "create", positional: session.project?.key }); return; }
 						if (selected?.kind === "project") {
-							tab = "worktrees"; session.filter = selected.label; row = 0; status = [paint("dim", `Showing worktrees for ${selected.label}.`)]; rebuild(); tui.requestRender(); return;
+							if (selected.projectKey) session.project = { key: selected.projectKey, label: selected.label };
+							tab = "worktrees";
+							session.filter = "";
+							row = 0;
+							status = [];
+							rebuild();
+							tui.requestRender(); return;
 						}
 						if (selected?.kind === "sandbox" || selected?.kind === "baseline") {
 							const item = selected.kind === "sandbox"

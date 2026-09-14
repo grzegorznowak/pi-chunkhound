@@ -10,9 +10,10 @@ export function createWorktreeManagerRpcPresenter(
 			const rows = buildManagerRows(session, items);
 			const count = session.tab === "worktrees" ? rows.filter((row) => row.kind === "sandbox").length : rows.length;
 			const noun = session.tab === "worktrees" ? (count === 1 ? "worktree" : "worktrees") : session.tab === "projects" ? (count === 1 ? "project" : "projects") : (count === 1 ? "baseline" : "baselines");
+			const scope = session.tab === "worktrees" ? session.project : undefined;
 			const title = [
 				`Worktree manager — ${session.tab}`,
-				`${count} ${noun}${session.filter ? ` matching “${session.filter}”` : ""}`,
+				`${count} ${noun}${session.filter ? ` matching “${session.filter}”` : ""}${scope ? ` in “${scope.label}”` : ""}`,
 				"Select a row, create a worktree, or close. Cancel returns to this view.",
 			].join("\n");
 
@@ -32,12 +33,18 @@ export function createWorktreeManagerRpcPresenter(
 			};
 
 			addOption("+ new worktree…", () => ({ kind: "create" }), true);
+			if (session.project) addOption("back to all worktrees", () => {
+				session.project = undefined; session.filter = ""; session.row = 0;
+				return { kind: "back" };
+			});
 			for (const row of rows) {
 				if (row.kind === "create") continue;
 				const label = `${row.label}${row.badges.length ? ` (${row.badges.join(", ")})` : ""}`;
 				if (row.kind === "project") {
+					const projectKey = row.projectKey;
 					addOption(label, () => {
-						session.tab = "worktrees"; session.filter = row.label; session.row = 0;
+						session.tab = "worktrees"; session.filter = ""; session.row = 0;
+						session.project = projectKey ? { key: projectKey, label: row.label } : undefined;
 						return { kind: "back" };
 					});
 					continue;
@@ -53,7 +60,7 @@ export function createWorktreeManagerRpcPresenter(
 				});
 			}
 			addOption(viewLabel, () => {
-				session.tab = nextView; session.row = 0;
+				session.tab = nextView; session.row = 0; session.project = undefined;
 				return { kind: "back" };
 			}, true);
 			addOption("close", () => ({ kind: "close" }), true);

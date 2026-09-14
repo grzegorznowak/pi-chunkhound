@@ -59,6 +59,8 @@ export interface ManagerSession {
 	tab: "worktrees" | "projects" | "baselines";
 	row: number;
 	filter: string;
+	/** Project drill-down scope: the worktrees list is narrowed to this repo until Esc. */
+	project?: { key: string; label: string };
 	preselect?: string;
 }
 
@@ -187,9 +189,20 @@ export function formatSizeBreakdown(dbBytes?: number, checkoutBytes?: number): s
 	return parts.join(" · ");
 }
 
+/**
+ * Project scope for the worktrees view. Keyed on projectKey, never on the
+ * label: every searchText carries the shared library root, so a label filter
+ * matches unrelated projects (pi-chhound vs chunkhound, repo vs repo-tools).
+ * Non-sandbox items pass through untouched.
+ */
+export function scopedManagerItems(items: readonly ManagerItem[], projectKey?: string): readonly ManagerItem[] {
+	if (!projectKey) return items;
+	return items.filter((item) => item.kind !== "sandbox" || item.projectKey === projectKey);
+}
+
 export function buildManagerRows(session: ManagerSession, items: readonly ManagerItem[]): ManagerRow[] {
 	const filter = session.filter.toLowerCase();
-	const matching = items.filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
+	const matching = scopedManagerItems(items, session.project?.key).filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
 	if (session.tab === "projects") {
 		const projects = new Map<string, { label: string; count: number }>();
 		for (const item of matching) {

@@ -110,6 +110,19 @@ describe("worktree manager core", () => {
 		await check(t, "filter applies before grouping", filtered.length === 1 && filtered[0]?.label === "beta", JSON.stringify(filtered));
 	});
 
+	test("project scope keys on projectKey, not label substrings", async (t) => {
+		const { buildManagerRows, createManagerSession, scopedManagerItems } = await import("../../worktree/manager-core.js");
+		// Live bug: every searchText carries the shared library root, so a label
+		// filter matched unrelated projects (chunkhound/pi-chhound, repo/repo-tools).
+		const lookalike: ManagerSandboxItem = { ...items[0]!, sandboxId: "alpha-tools-1", projectKey: "/repos/alpha-tools", projectLabel: "alpha-tools", branch: "main", path: "/worktrees/alpha-tools-1/main", searchText: "/repos/alpha-tools alpha-tools main /worktrees/alpha-tools-1/main alpha" };
+		const scoped = buildManagerRows(createManagerSession({ project: { key: "/repos/alpha", label: "alpha" } }), [...items, lookalike]).filter((row) => row.kind === "sandbox");
+		await check(t, "scoped worktrees contain only the project key", scoped.length === 1 && scoped[0]?.sandboxId === "alpha-123", JSON.stringify(scoped));
+		const textFiltered = buildManagerRows(createManagerSession({ project: { key: "/repos/alpha", label: "alpha" }, filter: "feature" }), [...items, lookalike]).filter((row) => row.kind === "sandbox");
+		await check(t, "text filter still applies within the scope", textFiltered.length === 1 && textFiltered[0]?.sandboxId === "alpha-123", JSON.stringify(textFiltered));
+		await check(t, "without scope the lookalike stays visible", buildManagerRows(createManagerSession(), [...items, lookalike]).filter((row) => row.kind === "sandbox").length === 4, "");
+		await check(t, "scope passes baselines through untouched", scopedManagerItems([...items, ...baselines], "/repos/alpha").filter((item) => item.kind === "baseline").length === 1, "");
+	});
+
 	test("sandbox details include identity, path, and optional facts", async (t) => {
 		const { describeManagerItem } = await import("../../worktree/manager-core.js");
 		const lines = describeManagerItem({ ...items[1]!, sizeBytes: 2048, createdAt: "2026-09-14T12:00:00Z" });
