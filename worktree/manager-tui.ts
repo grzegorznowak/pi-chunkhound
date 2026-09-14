@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Key, decodeKittyPrintable, matchesKey } from "@earendil-works/pi-tui";
+import { Key, decodeKittyPrintable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { buildManagerRows, describeManagerItem, scopedManagerItems, type ManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSession, type PanelAction } from "./manager-core.js";
 
 /**
@@ -161,7 +161,7 @@ export function createWorktreeManagerTuiPresenter(
 						finished = true;
 						stopSpinner();
 					},
-					render(_width: number): string[] {
+					render(width: number): string[] {
 						const tabName = (name: ManagerSession["tab"]) => tab === name ? theme.bold(paint("accent", `[${name}]`)) : name;
 						const footer = paint("dim", `Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · ${session.project ? "Esc back" : "Esc close"}`);
 						const scope = session.project;
@@ -213,6 +213,9 @@ export function createWorktreeManagerTuiPresenter(
 							if (segment) line += `  ${paint("dim", segment)}`;
 							return line;
 						};
+						// pi-tui aborts the whole TUI when a custom component renders a line
+						// wider than the terminal: details lines and long paths overflow, so every
+						// line is clipped to the width pi hands us (ANSI-safe, ellipsis on cut).
 						return [
 							TABS.map((name) => tabName(name)).join("  "), "",
 							...(notices.length ? [...notices, ""] : []),
@@ -221,7 +224,7 @@ export function createWorktreeManagerTuiPresenter(
 							...(emptyLine ? ["", emptyLine] : []),
 							...(loadingLine ? ["", loadingLine] : []),
 							...(status.length ? ["", ...status] : []), "", footer,
-						];
+						].map((line) => truncateToWidth(line, width, "…"));
 					},
 					handleInput(data: string): void {
 						if (finished) return;

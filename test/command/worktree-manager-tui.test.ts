@@ -1,5 +1,5 @@
 import { describe, test } from "node:test";
-import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import type { ManagerBaselineItem, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
 import { check } from "../lib/checks.js";
 
@@ -381,7 +381,7 @@ describe("worktree manager TUI presenter", () => {
 			let frame = component!.render(100).join("\n");
 			await check(t, "digit 3 opens the baselines tab with a DB-only column", frame.includes("[baselines]") && frame.includes("repo · main") && frame.includes("DB") && frame.includes("7.0 MB") && !frame.includes("CHECKOUT") && !frame.includes("+ new worktree"), frame);
 			component!.handleInput("\n");
-			frame = component!.render(100).join("\n");
+			frame = component!.render(200).join("\n");
 			await check(t, "baseline details explain the index and absence of a checkout", frame.includes("baseline index (no checkout copy)") && frame.includes("commit c9698c47bb16") && frame.includes("updated 2026-09-06"), frame);
 			component!.handleInput("\t");
 			frame = component!.render(100).join("\n");
@@ -390,6 +390,32 @@ describe("worktree manager TUI presenter", () => {
 			component!.handleInput("n");
 			const action = await pending as { kind: string; positional?: string };
 			await check(t, "n on a baseline starts a create in its repo", action.kind === "create" && action.positional === "/repos/repo", JSON.stringify(action));
+		} finally { setKeybindings(original); }
+	});
+
+	test("every rendered line is clipped to the terminal width", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const longSandbox = { ...items[0]!, branch: "feature/a-very-long-branch-name-that-keeps-going-and-going", path: "/worktrees/one/a-very-long-worktree-path-that-keeps-going-and-going/beyond" };
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [longSandbox, baseline]).next({ tab: "worktrees", row: 1, filter: "" });
+			await new Promise((resolve) => setImmediate(resolve));
+			const width = 64;
+			const fits = (lines: string[]): string | undefined => lines.find((line) => visibleWidth(line) > width);
+			await check(t, "worktree rows clip to the width", fits(component!.render(width)) === undefined, JSON.stringify(component!.render(width)));
+			component!.handleInput("\n");
+			await check(t, "long worktree details clip to the width", fits(component!.render(width)) === undefined, JSON.stringify(component!.render(width)));
+			component!.handleInput("3");
+			await check(t, "baseline rows clip to the width", fits(component!.render(width)) === undefined, JSON.stringify(component!.render(width)));
+			component!.handleInput("\n");
+			await check(t, "long baseline details clip to the width", fits(component!.render(width)) === undefined, JSON.stringify(component!.render(width)));
+			component!.handleInput("q");
+			await pending;
 		} finally { setKeybindings(original); }
 	});
 
