@@ -22,7 +22,7 @@ describe("worktree manager TUI presenter", () => {
 		try {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			const tui = { requestRender() {} };
-			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory(tui, theme, getKeybindings(), resolve); }) } };
 			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => items);
@@ -79,7 +79,7 @@ describe("worktree manager TUI presenter", () => {
 			let providerCalls = 0;
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => { providerCalls++; return allItems; });
 			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "beta" };
@@ -109,7 +109,7 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			const allItems = [items[0]!, { ...items[0]!, sandboxId: "two", branch: "other", path: "/worktrees/two", searchText: "repo other" }, { ...items[0]!, sandboxId: "tools", projectKey: "/repos/repo-tools", projectLabel: "repo-tools", branch: "tooling", path: "/worktrees/tools", searchText: "/repos/repo-tools repo-tools tooling repo" }];
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
-			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve); }) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => allItems).next(session);
 			await new Promise((resolve) => setImmediate(resolve));
@@ -137,7 +137,7 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			for (const mode of ["create", "sandbox", "project", "scoped"] as const) {
 				let component: { handleInput(data: string): void } | undefined;
-				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve); }) } };
 				const session: ManagerSession = { tab: mode === "project" || mode === "scoped" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "", ...(mode === "scoped" ? { project: { key: "/repo", label: "repo" } } : {}) };
 				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
 				await new Promise((resolve) => setImmediate(resolve)); component!.handleInput("n");
@@ -156,7 +156,7 @@ describe("worktree manager TUI presenter", () => {
 			const rows = new Promise<typeof items>((resolve) => { resolveRows = resolve; });
 			let renders = 0;
 			const tui = { requestRender: () => { renders++; } };
-			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory(tui, theme, getKeybindings(), resolve); }) } };
 			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => rows);
@@ -185,7 +185,7 @@ describe("worktree manager TUI presenter", () => {
 			const twoItems = [items[0]!, { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" }];
 			const mount = async (row = 0) => {
 				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
-				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve); }) } };
 				const session: ManagerSession = { tab: "worktrees", row, filter: "" };
 				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => twoItems).next(session);
 				await new Promise((resolve) => setImmediate(resolve));
@@ -235,7 +235,7 @@ describe("worktree manager TUI presenter", () => {
 			let resolveRows: ((value: typeof items) => void) | undefined;
 			const rows = new Promise<typeof items>((resolve) => { resolveRows = resolve; });
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
-			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve); }) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => rows).next(session);
 			const firstFrame = component!.render(100).join("\n");
@@ -260,7 +260,7 @@ describe("worktree manager TUI presenter", () => {
 			const twoItems = [items[0]!, { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" }];
 			let finishLoad: ((value: typeof twoItems) => void) | undefined;
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
-			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve); }) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => {
 				onProgress?.({ done: 0, total: 2, items: [] });
@@ -289,7 +289,7 @@ describe("worktree manager TUI presenter", () => {
 			let finishLoad: ((value: readonly ManagerSandboxItem[]) => void) | undefined;
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => {
@@ -322,7 +322,7 @@ describe("worktree manager TUI presenter", () => {
 			const mount = () => {
 				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-					component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+					component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 				}) } };
 				const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
 				const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }).next(session);
@@ -356,7 +356,7 @@ describe("worktree manager TUI presenter", () => {
 			const store = createManagerItemStore(async () => { calls++; return calls === 1 ? items : [...items, extra]; });
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }).next(session);
@@ -384,7 +384,7 @@ describe("worktree manager TUI presenter", () => {
 			];
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => sized).next(session);
@@ -396,9 +396,42 @@ describe("worktree manager TUI presenter", () => {
 			await check(t, "every measured row keeps its values", first.includes("1.0 MB") && first.includes("2.0 KB") && second.includes("2.0 MB") && second.includes("3.0 MB") && second.includes("5.0 MB"), frame);
 			await check(t, "status labels share a justified column", first.indexOf("indexed") === second.indexOf("indexed") && first.indexOf("indexed") > 0, `${first}\n${second}`);
 			await check(t, "the live badge is the plug glyph in indexed → plug → pr order", second.includes("🔌") && !second.includes("live") && second.indexOf("indexed") < second.indexOf("🔌") && second.indexOf("🔌") < second.indexOf("pr"), second);
-			await check(t, "the glyph keeps both rows visually aligned", visibleWidth(first) === visibleWidth(second), `${visibleWidth(first)} vs ${visibleWidth(second)}\n${first}\n${second}`);
+			const after = (line: string, value: string): number => visibleWidth(line.slice(0, line.indexOf(value) + value.length));
+			await check(t, "the glyph keeps the trailing badges and cells visually in place", after(second, "pr") === second.indexOf("pr") + "pr".length && after(second, "5.0 MB") === second.indexOf("5.0 MB") + "5.0 MB".length, `${second}\nplug column ${after(second, "pr")} vs ${second.indexOf("pr") + 2}`);
 			const end = (line: string, value: string): number => line.indexOf(value) + value.length;
 			await check(t, "numeric cells right-align under their header columns", end(first, "2.0 KB") === end(second, "3.0 MB") && end(first, "1.0 MB") === end(second, "2.0 MB") && end(header, "DB") === end(first, "1.0 MB") && end(header, "CHECKOUT") === end(first, "2.0 KB") && end(header, "TOTAL") === end(second, "5.0 MB"), `${header}\n${first}\n${second}`);
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
+
+	test("the selected row is highlighted with a full-width band", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const bands: string[] = [];
+			const bolds: string[] = [];
+			const theme = {
+				fg: (_color: string, text: string) => text,
+				bold: (text: string) => { bolds.push(text); return text; },
+				bg: (color: string, text: string) => { if (color === "selectedBg") bands.push(text); return text; },
+			};
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, theme, getKeybindings(), resolve);
+			}) } };
+			const sized = [
+				{ ...items[0]!, sizeBytes: 2048, dbBytes: 1024 * 1024 },
+				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta-tools", branch: "bugfix/longer", path: "/worktrees/two", searchText: "beta bugfix", live: true, pr: { number: 7, state: "OPEN" }, sizeBytes: 3 * 1024 * 1024, dbBytes: 2 * 1024 * 1024 },
+			];
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => sized).next({ tab: "worktrees", row: 1, filter: "" });
+			component!.render(100);
+			const band = bands.join("\n");
+			await check(t, "the selected row is banded across label, badges and sizes", band.includes("repo · feature") && band.includes("indexed") && band.includes("2.0 KB"), band);
+			await check(t, "the band reaches the panel width", bands.some((text) => visibleWidth(text) === 100), bands.map((text) => visibleWidth(text)).join(","));
+			await check(t, "unselected rows are never banded", bands.length === 1 && !band.includes("beta-tools"), `${bands.length}: ${band}`);
+			await check(t, "the selected label is bolded so the band has an anchor", bolds.some((text) => text.includes("repo · feature")), JSON.stringify(bolds));
 			component!.handleInput("q");
 			await pending;
 		} finally { setKeybindings(original); }
@@ -411,7 +444,7 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [...items, baseline]).next(session);
@@ -439,7 +472,7 @@ describe("worktree manager TUI presenter", () => {
 			const longSandbox = { ...items[0]!, branch: "feature/a-very-long-branch-name-that-keeps-going-and-going", path: "/worktrees/one/a-very-long-worktree-path-that-keeps-going-and-going/beyond" };
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [longSandbox, baseline]).next({ tab: "worktrees", row: 1, filter: "" });
 			await new Promise((resolve) => setImmediate(resolve));
@@ -464,7 +497,7 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 			}) } };
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
@@ -509,7 +542,7 @@ describe("worktree manager TUI presenter", () => {
 					ui: {
 						notify() {},
 						custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
-							component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+							component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
 						}),
 					},
 				};

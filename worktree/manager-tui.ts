@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Key, decodeKittyPrintable, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { buildManagerRows, describeManagerItem, scopedManagerItems, type ManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSession, type PanelAction } from "./manager-core.js";
 
 /**
@@ -202,16 +202,28 @@ export function createWorktreeManagerTuiPresenter(
 						};
 						// The header shares the row prefix (marker · padded label · padded
 						// badges) so its labels sit exactly over the numeric columns.
-						const rowPrefix = (marker: string, label: string, badges: string): string => `${marker}${label.padEnd(labelWidth)}${badgeWidth > 0 ? `  ${badges}` : ""}`;
+						// Callers pad; padding happens before any styling so the badge column
+						// still measures in code units and stays aligned.
+						const rowPrefix = (marker: string, label: string, badges: string): string => `${marker}${label}${badgeWidth > 0 ? `  ${badges}` : ""}`;
 						const headerSegment = sizeColumns.map((key) => sizeHeader[key].padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
-						const headerLine = sizeColumns.length > 0 ? paint("dim", `${rowPrefix("  ", "", " ".repeat(badgeWidth))}  ${headerSegment}`) : undefined;
+						const headerLine = sizeColumns.length > 0 ? paint("dim", `${rowPrefix("  ", " ".repeat(labelWidth), " ".repeat(badgeWidth))}  ${headerSegment}`) : undefined;
+						// Selected rows get pi's own list-selection treatment (session/tree
+						// pickers): the label goes bold and the whole line is painted with the
+						// theme's selectedBg, extended to the full panel width so the cursor
+						// reads as a band rather than a lone arrow.
+						const selectedBand = (line: string): string => theme.bg("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))));
 						const rowLine = (item: ManagerRow, index: number): string => {
-							const marker = index === row ? paint("accent", "→ ") : "  ";
-							if (item.kind === "create") return `${marker}${item.label}`;
-							let line = rowPrefix(marker, item.label, paint("dim", badgeText(item).padEnd(badgeWidth)));
+							const selected = index === row;
+							const marker = selected ? paint("accent", "→ ") : "  ";
+							if (item.kind === "create") {
+								const label = selected ? theme.bold(item.label) : item.label;
+								return selected ? selectedBand(`${marker}${label}`) : `${marker}${label}`;
+							}
+							const label = item.label.padEnd(labelWidth);
+							let line = rowPrefix(marker, selected ? theme.bold(label) : label, paint("dim", badgeText(item).padEnd(badgeWidth)));
 							const segment = sizeSegment(item);
 							if (segment) line += `  ${paint("dim", segment)}`;
-							return line;
+							return selected ? selectedBand(line) : line;
 						};
 						// pi-tui aborts the whole TUI when a custom component renders a line
 						// wider than the terminal: details lines and long paths overflow, so every
