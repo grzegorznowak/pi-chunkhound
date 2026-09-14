@@ -267,4 +267,66 @@ describe("worktree manager TUI presenter", () => {
 			await check(t, "loaded session still closes", (await pending as { kind?: string })?.kind === "close", JSON.stringify(session));
 		} finally { setKeybindings(original); }
 	});
+
+	test("a store-backed remount reuses cached rows without recollecting", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let calls = 0;
+			const store = createManagerItemStore(async () => { calls++; return items; });
+			const mount = () => {
+				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+					component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+				}) } };
+				const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }).next(session);
+				return { component: component!, pending, session };
+			};
+
+			const first = mount();
+			await check(t, "the first mount paints the loading frame", /loading worktrees/i.test(first.component.render(100).join("\n")), first.component.render(100).join("\n"));
+			await new Promise((resolve) => setImmediate(resolve));
+			await check(t, "the collect lands once and paints the row", calls === 1 && first.component.render(100).join("\n").includes("repo · feature"), `calls=${calls}`);
+			first.component.handleInput("q");
+			await first.pending;
+
+			const second = mount();
+			const frame = second.component.render(100).join("\n");
+			await check(t, "the remount paints cached rows on its first frame without a spinner", frame.includes("repo · feature") && !/loading worktrees/i.test(frame), frame);
+			await check(t, "the remount starts no second collect", calls === 1, `calls=${calls}`);
+			second.component.handleInput("q");
+			await check(t, "the cached panel still closes", (await second.pending as { kind?: string })?.kind === "close", "");
+		} finally { setKeybindings(original); }
+	});
+
+	test("r invalidates the cache and reloads the panel", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let calls = 0;
+			const extra = { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" };
+			const store = createManagerItemStore(async () => { calls++; return calls === 1 ? items : [...items, extra]; });
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }).next(session);
+			await new Promise((resolve) => setImmediate(resolve));
+			await check(t, "initial load shows the cached row", calls === 1 && component!.render(100).join("\n").includes("repo · feature"), `calls=${calls}`);
+			component!.handleInput("r");
+			const refreshing = component!.render(100).join("\n");
+			await check(t, "refresh re-enters the loading state while rows stay visible", /loading worktrees/i.test(refreshing) && refreshing.includes("repo · feature"), refreshing);
+			await new Promise((resolve) => setImmediate(resolve));
+			const refreshed = component!.render(100).join("\n");
+			await check(t, "refresh recollects and paints the new row", calls === 2 && refreshed.includes("beta · bugfix") && !/loading worktrees/i.test(refreshed), `${refreshed}\ncalls=${calls}`);
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
 });

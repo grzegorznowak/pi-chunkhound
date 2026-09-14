@@ -21,7 +21,7 @@ import { disconnectMcp } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
-import { createManagerSession, runManagerSession, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createManagerItemStore, createManagerSession, runManagerSession, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
 import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
@@ -236,12 +236,15 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				return;
 			}
 
-			// ── TUI manager: the bare command owns one session across remounts. ──
+			// ── TUI manager: the bare command owns one session across remounts. The
+			// item store lives in this closure, so wizard cancel/failure returns to
+			// the cached list without recomputing; create success invalidates it. ──
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
 				const session = createManagerSession();
-				const provider = (_session: unknown, onProgress?: (progress: ManagerLoadProgress) => void) => collectManagerItems(ctx, onProgress);
-				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, provider), {
+				const store = createManagerItemStore((onProgress) => collectManagerItems(ctx, onProgress));
+				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }), {
 					session,
+					onCreated: () => store.invalidate(),
 					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
 				});
 				return;

@@ -34,12 +34,20 @@ function printableText(data: string): string | undefined {
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const CREATE_ROW: ManagerRow = { kind: "create", label: "+ new worktree…", badges: [] };
 
+/** Cache hits arrive synchronously; misses arrive as a shared promise. */
+function isLoadedRows(
+	value: readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
+): value is readonly ManagerSandboxItem[] {
+	return Array.isArray(value);
+}
+
 export function createWorktreeManagerTuiPresenter(
 	ctx: { ui: Pick<ExtensionCommandContext["ui"], "custom"> },
 	getRows: (
 		session: ManagerSession,
 		onProgress?: (progress: ManagerLoadProgress) => void,
 	) => readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
+	options: { onRefresh?: () => void } = {},
 ): { next(session: ManagerSession): Promise<PanelAction | undefined> } {
 	return {
 		next(session) {
@@ -56,7 +64,7 @@ export function createWorktreeManagerTuiPresenter(
 				let filterDraft: string | undefined;
 				let status: string[] = [];
 				let spinnerFrame = 0;
-				const loadingStartedAt = Date.now();
+				let loadingStartedAt = Date.now();
 				let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 				let finished = false;
 				const stopSpinner = () => {
@@ -65,12 +73,16 @@ export function createWorktreeManagerTuiPresenter(
 						spinnerTimer = undefined;
 					}
 				};
-				spinnerTimer = setInterval(() => {
-					if (finished || !loading) return;
-					spinnerFrame++;
-					tui.requestRender();
-				}, 100);
-				spinnerTimer.unref?.();
+				const startSpinner = () => {
+					if (spinnerTimer !== undefined || finished) return;
+					loadingStartedAt = Date.now();
+					spinnerTimer = setInterval(() => {
+						if (finished || !loading) return;
+						spinnerFrame++;
+						tui.requestRender();
+					}, 100);
+					spinnerTimer.unref?.();
+				};
 				const finish = (action: PanelAction) => {
 					if (finished) return;
 					finished = true;
@@ -88,32 +100,50 @@ export function createWorktreeManagerTuiPresenter(
 					session.row = row;
 				};
 				const paint = (color: Parameters<typeof theme.fg>[0], text: string) => theme.fg(color, text);
-				void Promise.resolve(getRows(session, (update) => {
+				const settle = (loaded: readonly ManagerSandboxItem[]): void => {
 					if (finished) return;
-					items = update.items;
-					progress = { done: update.done, total: update.total };
-					loading = update.done < update.total;
-					if (!loading) stopSpinner();
+					items = loaded;
+					progress = { done: loaded.length, total: loaded.length };
+					loading = false;
+					stopSpinner();
 					rebuild();
 					tui.requestRender();
-				})).then(
-					(loaded) => {
+				};
+				const failLoad = (): void => {
+					if (finished) return;
+					loading = false;
+					failed = true;
+					stopSpinner();
+					tui.requestRender();
+				};
+				/** Initial mount and `r` refresh share this path: a cache hit — the
+				 * store's synchronous return — paints rows on the first frame, with no
+				 * spinner; a miss streams progress into whichever mount is live. */
+				const beginLoad = (): void => {
+					progress = undefined;
+					const applyProgress = (update: ManagerLoadProgress): void => {
 						if (finished) return;
-						items = loaded;
-						progress = { done: loaded.length, total: loaded.length };
-						loading = false;
-						stopSpinner();
+						items = update.items;
+						progress = { done: update.done, total: update.total };
+						loading = update.done < update.total;
+						if (!loading) stopSpinner();
 						rebuild();
 						tui.requestRender();
-					},
-					() => {
-						if (finished) return;
-						loading = false;
-						failed = true;
-						stopSpinner();
-						tui.requestRender();
-					},
-				);
+					};
+					let loaded: readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>;
+					try {
+						loaded = getRows(session, applyProgress);
+					} catch {
+						failLoad();
+						return;
+					}
+					if (isLoadedRows(loaded)) { settle(loaded); return; }
+					loading = true;
+					startSpinner();
+					tui.requestRender();
+					void loaded.then(settle, failLoad);
+				};
+				beginLoad();
 				return {
 					invalidate(): void {},
 					dispose(): void {
@@ -122,7 +152,7 @@ export function createWorktreeManagerTuiPresenter(
 					},
 					render(_width: number): string[] {
 						const tabName = (name: ManagerSession["tab"]) => tab === name ? theme.bold(paint("accent", `[${name}]`)) : name;
-						const footer = paint("dim", "Tab switch views · ↑/↓ navigate · Enter select · / filter · n new · Esc close");
+						const footer = paint("dim", "Tab switch views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close");
 						const filterLine = filterDraft !== undefined
 							? `${theme.bold(paint("accent", "filter>"))} ${filterDraft}▮   ${paint("dim", "⏎ keep · Esc clear")}`
 							: session.filter ? paint("dim", `(showing ${items?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${items?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
@@ -155,6 +185,15 @@ export function createWorktreeManagerTuiPresenter(
 							tui.requestRender(); return;
 						}
 						if (text === "/") { filterDraft = session.filter; status = []; tui.requestRender(); return; }
+						if (text === "r") {
+							if (loading) return; // a collect is already running
+							options.onRefresh?.();
+							failed = false;
+							status = [];
+							beginLoad();
+							tui.requestRender();
+							return;
+						}
 						if (matchesKey(data, Key.tab) || data === "\x1b[Z") {
 							tab = tab === "worktrees" ? "projects" : "worktrees"; row = 0; status = []; rebuild(); tui.requestRender(); return;
 						}

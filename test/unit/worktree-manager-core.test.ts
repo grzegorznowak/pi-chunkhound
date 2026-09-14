@@ -109,12 +109,97 @@ describe("worktree manager core", () => {
 		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "fresh" }) });
 	});
 
-	test("close and an absent action terminate", async (t) => {
-		const { runManagerSession } = await import("../../worktree/manager-core.js");
-		for (const finalAction of [{ kind: "close" } as const, undefined]) {
+	test("only a created outcome invalidates loaded items", async (t) => {
+		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
+		for (const outcome of [{ kind: "created", sandboxId: "new-sandbox" } as const, { kind: "cancelled" } as const, { kind: "failed" } as const]) {
+			const session = createManagerSession();
 			let calls = 0;
-			await runManagerSession({}, { next: async () => { calls++; return finalAction; } });
-			await check(t, `${finalAction ? "close" : "undefined"} stops`, calls === 1, `next=${calls}`);
+			let invalidations = 0;
+			await runManagerSession({}, { next: async () => {
+				calls++;
+				return calls === 1 ? { kind: "create" } as const : { kind: "close" } as const;
+			} }, { session, runCreate: async () => outcome, onCreated: () => { invalidations++; } });
+			await check(t, `${outcome.kind} ${outcome.kind === "created" ? "invalidates once" : "reuses the cache"}`, invalidations === (outcome.kind === "created" ? 1 : 0), `invalidations=${invalidations}`);
 		}
+	});
+
+	test("a completed load is cached and the in-flight collect is shared", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		let calls = 0;
+		let resolveLoad: ((value: typeof items) => void) | undefined;
+		const store = createManagerItemStore((onProgress) => {
+			calls++;
+			onProgress?.({ done: 0, total: 2, items: [] });
+			onProgress?.({ done: 1, total: 2, items: [items[0]!] });
+			return new Promise<typeof items>((resolve) => { resolveLoad = resolve; });
+		});
+		const streamed: number[] = [];
+		const first = store.load((update) => streamed.push(update.done));
+		const late: number[] = [];
+		const second = store.load((update) => late.push(update.done));
+		await check(t, "a rapid remount shares the in-flight collect", calls === 1 && first === second, `calls=${calls}`);
+		await check(t, "a late subscriber receives the latest streamed progress", late.join(",") === "1", JSON.stringify(late));
+		resolveLoad!(items);
+		await check(t, "the first subscriber saw every streamed step", (await first) === items && streamed.join(",") === "0,1", JSON.stringify(streamed));
+		const hit = store.load();
+		await check(t, "a cache hit returns synchronously without a new collect", Array.isArray(hit) && hit === items && calls === 1, `calls=${calls}`);
+	});
+
+	test("invalidate drops the cache and expires an in-flight result", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		let calls = 0;
+		const resolvers: Array<(value: typeof items) => void> = [];
+		const store = createManagerItemStore(() => {
+			calls++;
+			return new Promise<typeof items>((resolve) => { resolvers.push(resolve); });
+		});
+		const stale = store.load();
+		store.invalidate();
+		const recollect = store.load();
+		await check(t, "the next load starts a fresh collect instead of joining the expired one", calls === 2 && !Array.isArray(recollect), `calls=${calls}`);
+		resolvers[0]!(items);
+		await stale;
+		await check(t, "the expired result is neither cached nor clobbers the fresh load", !Array.isArray(store.load()) && calls === 2, `calls=${calls}`);
+		const fresh = [items[1]!];
+		resolvers[1]!(fresh);
+		await check(t, "the recollected result is cached", (await recollect) === fresh && calls === 2 && store.load() === fresh, `calls=${calls}`);
+	});
+
+	test("a subscriber that joined an in-flight load is released when it settles", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		const resolvers: Array<(value: typeof items) => void> = [];
+		const store = createManagerItemStore((onProgress) => {
+			onProgress?.({ done: 0, total: 1, items: [] });
+			return new Promise<typeof items>((resolve) => { resolvers.push(resolve); });
+		});
+		const joined: number[] = [];
+		const first = store.load();
+		const shared = store.load((update) => joined.push(update.done));
+		resolvers[0]!(items);
+		await first;
+		await shared;
+		store.invalidate();
+		const published: number[] = [];
+		const fresh = store.load((update) => published.push(update.done));
+		resolvers[1]!(items);
+		await fresh;
+		await check(t, "progress from the later collect never reaches the settled subscriber", joined.join(",") === "0", JSON.stringify(joined));
+		await check(t, "the live subscriber still receives progress", published.join(",") === "0", JSON.stringify(published));
+	});
+
+	test("a failed collect is not cached and the next load retries", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		let calls = 0;
+		const store = createManagerItemStore(async () => {
+			calls++;
+			if (calls === 1) throw new Error("collect failed");
+			return items;
+		});
+		let message = "";
+		try { await store.load(); } catch (error) { message = String(error); }
+		await check(t, "the failure reaches the caller", message.includes("collect failed"), message);
+		const retry = store.load();
+		await check(t, "the retry starts a new collect rather than reusing the rejection", !Array.isArray(retry) && calls === 2, `calls=${calls}`);
+		await check(t, "a successful retry is cached", (await retry) === items && Array.isArray(store.load()) && calls === 2, `calls=${calls}`);
 	});
 });
