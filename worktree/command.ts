@@ -442,9 +442,9 @@ export async function createIndexedWorktree(
 		baseRef?: string;
 		/** Logical branch recorded in meta + summary when the checkout is detached (remote refs, PRs) — otherwise the checkout's branch. */
 		branchLabel?: string;
-		/** PR head branch name — recorded in sandbox meta for /ch-status display. */
+		/** PR head branch name — recorded in sandbox meta for /chworktree display. */
 		headRef?: string;
-		/** PR head commit — recorded in sandbox meta for /ch-status display. */
+		/** PR head commit — recorded in sandbox meta for /chworktree display. */
 		headOid?: string;
 		flags: Record<string, string | true>;
 	},
@@ -485,7 +485,7 @@ export async function createIndexedWorktree(
 			notify(
 				`Worktree created (no index): ${wtPath} @ ${branchNow}\n` +
 					`The storage dir has no index yet (nothing is written into the checkout). Re-indexing an\n` +
-					`existing worktree is not wired up yet — /ch-status --reindex is the pending path for it.`,
+					`existing worktree is not wired up yet — remove it and re-create with /chworktree instead.`,
 				"info",
 			);
 			return { ok: true, sandboxId };
@@ -882,7 +882,7 @@ async function promptLibraryRoot(
 		({ sandboxDir, wtPath, conflict } = compute(dest));
 	}
 	if (conflict) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-status lists worktrees.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /chworktree ls lists worktrees.`, "error");
 		return { kind: "blocked" };
 	}
 	return { kind: "picked", value: { dest, sandboxDir, wtPath } };
@@ -1022,7 +1022,7 @@ async function oneGoLocation(
 	if (conflict) {
 		notify(
 			`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
-				"Pick a different destination (/ch-status lists indexed worktrees).",
+				"Pick a different destination (/chworktree ls lists indexed worktrees).",
 			"error",
 		);
 		return undefined;
@@ -1031,7 +1031,7 @@ async function oneGoLocation(
 	if (sandboxConflict) {
 		notify(
 			`Refusing: the storage dir ${sandboxDir} would overlap worktree ${sandboxConflict}. ` +
-				"Pick a different destination (/ch-status lists worktrees).",
+				"Pick a different destination (/chworktree ls lists worktrees).",
 			"error",
 		);
 		return undefined;

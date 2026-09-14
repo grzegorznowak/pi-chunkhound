@@ -162,7 +162,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			const matches = resolveSandboxMatches(positionals[0]!, settings, ctx.cwd);
 			if (matches.length === 0) {
 				ctx.ui.notify(
-					`No worktree or storage ID matches '${positionals[0]}' — run /ch-status to list worktrees.`,
+					`No worktree or storage ID matches '${positionals[0]}' — run /chworktree ls to list worktrees.`,
 					"error",
 				);
 				return;

@@ -51,7 +51,7 @@ Don't use both install paths at once — the commands would register twice. Conf
 | `/chworktree ls [<query>] [--search <text>] [--sort <key>]` | Manage: list every worktree sandbox in the library, grouped by project, with space (db/checkout/total), git-state and liveness columns. |
 | `/chworktree rm [<target>] [--force]` | Manage: remove a worktree sandbox — storage, worktree registration, and (for -b-created branches) the branch; disconnects live MCP first. |
 | `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
-| `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
+| `/ch-status [--prune]` | Show chunkhound config, index-root claim health, and live MCP connections; `--prune` removes storage for gone worktrees and garbage baselines. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
 
 ### /chworktree — three ways to invoke
@@ -213,21 +213,14 @@ explicit `--disconnect` does not.
 ### /ch-status
 
 Shows chunkhound's version, worktree/baseline library roots, embedding and LLM
-config, API-key status, every worktree (alive?, repo/branch, base commit, index
-size, claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
-live MCP connections. PR sandboxes show as `add/pull/29 · head recovery/pr27-pr-b @ 0c645ce`.
-`--prune` removes storage for gone worktrees and
+config, API-key status, index-root claim health, and live MCP connections. The
+health section checks that every sandbox's index is claimed by its own sandbox
+directory — an unclaimed or mismatched root is called out with the fix. The
+worktree and baseline listings live in the `/chworktree` manager and
+`/chworktree ls` (see above). `--prune` removes storage for gone worktrees and
 garbage baselines (incomplete from a crashed prime, source repo deleted, or a
 superseded duplicate). The same baseline GC also runs automatically after each
 baseline prime — the cache is self-healing, no manual cleanup needed.
-
-<p align="center">
-  <img src="docs/assets/ch-status-overview.png"
-       alt="pi terminal showing ch-status output: ChunkHound version, worktree and baseline library roots, embedding and LLM config, one indexed worktree with its commit and index size, a baseline, and one connected ch-mcp exposing five tools"
-       width="1000">
-</p>
-
-<p align="center"><em><code>/ch-status</code> — roots, worktrees, baselines and live MCP connections at a glance.</em></p>
 
 ### /ch-setup
 
