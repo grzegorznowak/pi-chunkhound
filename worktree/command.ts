@@ -20,7 +20,10 @@ import { connectEntry, resolveSandboxMatches } from "../mcp/command.js";
 import { disconnectMcp } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
-import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb } from "./manage.js";
+import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
+import { createManagerSession, runManagerSession, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
+import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
 const HELP = [
 	"/chworktree [repo] [branch] [options]     — create a worktree sandbox",
@@ -233,6 +236,26 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				return;
 			}
 
+			// ── TUI manager: the bare command owns one session across remounts. ──
+			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
+				const session = createManagerSession();
+				const provider = () => collectManagerItems(ctx);
+				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, provider), {
+					session,
+					runCreate: (_session, positional) => runWizard(wctx, state, positional),
+				});
+				return;
+			}
+
+			// ── RPC manager: one native select round-trip per manager action. ──
+			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "rpc" && typeof ctx.ui.select === "function") {
+				await runManagerSession(ctx, createWorktreeManagerRpcPresenter(ctx, () => collectManagerItems(ctx)), {
+					session: createManagerSession(),
+					runCreate: (_session, positional) => runWizard(wctx, state, positional),
+				});
+				return;
+			}
+
 			// ── Wizard mode: /chworktree [repo] with no branch and no flags ──
 			if (isWizardInvocation(positionals, flags)) {
 				await runWizard(wctx, state, positionals[0]);
@@ -400,7 +423,7 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 }
 
 /** Shared worktree creation: sandbox dir → git add → baseline → config → top-up → meta. */
-async function createIndexedWorktree(
+export async function createIndexedWorktree(
 	ctx: WizardCtx,
 	state: PluginState,
 	opts: {
@@ -422,9 +445,10 @@ async function createIndexedWorktree(
 		headOid?: string;
 		flags: Record<string, string | true>;
 	},
-): Promise<void> {
+): Promise<{ ok: boolean; sandboxId?: string }> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const { repoRoot, sandboxDir, wtPath, settings, createBranch, branch, commitIsh, flags } = opts;
+	const sandboxId = path.basename(sandboxDir);
 
 	const progress = createProgressUI(ctx);
 	try {
@@ -438,7 +462,7 @@ async function createIndexedWorktree(
 			await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
 		} catch (err) {
 			notify(err instanceof Error ? err.message : String(err), "error");
-			return;
+			return { ok: false };
 		}
 		const branchNow = await currentBranch(wtPath);
 		// Describe what the branch position did: new branch (explicit -b, typed
@@ -461,7 +485,7 @@ async function createIndexedWorktree(
 					`existing worktree is not wired up yet — /ch-status --reindex is the pending path for it.`,
 				"info",
 			);
-			return;
+			return { ok: true, sandboxId };
 		}
 
 		// Anchor the baseline to the LOCAL ref the worktree's tree comes from, so
@@ -515,7 +539,7 @@ async function createIndexedWorktree(
 				adopted = adoptConfigFile(flags["config"], ctx.cwd).adopted;
 			} catch (err) {
 				notify(err instanceof Error ? err.message : String(err), "error");
-				return;
+				return { ok: false };
 			}
 		}
 		const configPath = materializeConfig(sandboxDir, { settings, dbDir, adopted });
@@ -549,7 +573,7 @@ async function createIndexedWorktree(
 		if (result.code !== 0) {
 			const tail = result.stderrTail.split("\n").slice(-4).join("\n");
 			notify(`Index failed after ${formatElapsed(progress.elapsed())} (code ${result.code}):\n${tail}`, "error");
-			return;
+			return { ok: false };
 		}
 
 		// 4) Meta + summary — meta.json lives in the state dir, not the index root.
@@ -610,8 +634,10 @@ async function createIndexedWorktree(
 				);
 			}
 		}
+		return { ok: true, sandboxId };
 	} catch (err) {
 		notify(`/chworktree failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+		return { ok: false };
 	} finally {
 		progress.done();
 	}
@@ -637,42 +663,26 @@ function prSlot(number: number): string {
 /** Wizard ctx slice the prompt/flow helpers need (+ pi for the MCP connect). */
 type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI; pi: ExtensionAPI };
 
-async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string): Promise<void> {
+export async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
-
-	// 1) Repo / PR: a positional resolves one — a PR URL takes the PR path
-	//    (repo + PR identity come from the URL); otherwise the user picks
-	//    (the picker offers current repo, library repos, a PR, or a path).
 	if (positional) {
-		if (parsePrUrl(positional)) {
-			await runPrWizard(ctx, state, positional);
-			return;
-		}
+		if (parsePrUrl(positional)) return runPrWizard(ctx, state, positional);
 		const requestedPath = path.resolve(ctx.cwd, positional);
 		const probe = fs.existsSync(requestedPath) ? requestedPath : path.dirname(requestedPath);
 		const repoRoot = (await gitRootOrNull(ctx.cwd)) ?? (await findRepoRoot(probe));
 		if (!repoRoot) {
-			notify(
-				`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own ` +
-					"directory, or run /chworktree with no arguments to pick a repo from the library.",
-				"error",
-			);
-			return;
+			notify(`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own directory, or run /chworktree with no arguments to pick a repo from the library.`, "error");
+			return { kind: "failed" };
 		}
-		await runBranchWizard(ctx, state, path.resolve(repoRoot));
-		return;
+		return runBranchWizard(ctx, state, path.resolve(repoRoot));
 	}
 	const choice = await pickRepoInteractive(ctx);
-	if (!choice) return; // cancelled
-	if (choice.kind === "pr") {
-		await runPrWizard(ctx, state, choice.url);
-		return;
-	}
-	await runBranchWizard(ctx, state, choice.root);
+	if (!choice) return { kind: "cancelled" };
+	return choice.kind === "pr" ? runPrWizard(ctx, state, choice.url) : runBranchWizard(ctx, state, choice.root);
 }
 
 /** Branch-sandbox wizard: repo known → branch name → library root → create. */
-async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: string): Promise<void> {
+export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: string, deps: { create?: typeof createIndexedWorktree } = {}): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(repoRoot).settings;
 
@@ -688,7 +698,7 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 	});
 	if (branchRaw === undefined) {
 		notify("Cancelled.", "info");
-		return;
+		return { kind: "cancelled" };
 	}
 	const branchName = branchRaw.trim();
 	let createBranch: string | undefined;
@@ -697,7 +707,7 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 	let commitIsh: string | undefined;
 	if (branchName) {
 		const choice = await resolveBranchChoice(repoRoot, branchName, notify);
-		if (!choice) return; // notified (unknown remote branch / bad name)
+		if (!choice) return { kind: "failed" }; // notified (unknown remote branch / bad name)
 		branch = choice.branch;
 		createBranch = choice.createBranch;
 		remoteRef = choice.remoteRef;
@@ -707,16 +717,16 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 		const sha = await revParse(repoRoot, remoteRef);
 		if (!sha) {
 			notify(`Cannot resolve ${remoteRef} to a commit.`, "error");
-			return;
+			return { kind: "failed" };
 		}
 		commitIsh = sha;
 	}
 
 	// Library root prompt (with conflict re-prompts).
 	const pick = await promptLibraryRoot(ctx, settings, repoRoot, branch ?? createBranch ?? remoteRef);
-	if (!pick) return; // cancelled / blocked (notified)
+	if (!pick) return { kind: "cancelled" }; // cancelled / blocked (notified)
 
-	await createIndexedWorktree(ctx, state, {
+	const created = await (deps.create ?? createIndexedWorktree)(ctx, state, {
 		repoRoot,
 		sandboxDir: pick.sandboxDir,
 		wtPath: pick.wtPath,
@@ -729,6 +739,7 @@ async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: str
 		...(remoteRef ? { baseRef: remoteRef, branchLabel: remoteRef } : {}),
 		flags: {},
 	});
+	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
 }
 
 export const OTHER_REPO = "select local repository";
@@ -926,21 +937,21 @@ export async function resolvePrSandboxHost(
 }
 
 /** PR-wizard tail after the URL is validated: gh → host → root prompt → create. */
-async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string): Promise<void> {
+export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const pr = parsePrUrl(url);
 	if (!pr) {
 		notify(`Not a PR URL: ${url} — paste the full URL from the browser (https://github.com/<owner>/<repo>/pull/<n>).`, "error");
-		return;
+		return { kind: "failed" };
 	}
 	const cwdRoot = await gitRootOrNull(ctx.cwd);
 	const discovery = loadSettings(cwdRoot ?? ctx.cwd).settings;
 	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
-	if (!host) return;
+	if (!host) return { kind: "failed" };
 	const slot = prSlot(pr.number);
 	const pick = await promptLibraryRoot(ctx, host.settings, host.repoRoot, slot);
-	if (!pick) return; // cancelled / blocked (notified)
-	await createIndexedWorktree(ctx, state, {
+	if (!pick) return { kind: "cancelled" }; // cancelled / blocked (notified)
+	const created = await createIndexedWorktree(ctx, state, {
 		repoRoot: host.repoRoot,
 		sandboxDir: pick.sandboxDir,
 		wtPath: pick.wtPath,
@@ -954,6 +965,7 @@ async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string): Pro
 		headOid: host.headSha,
 		flags: {},
 	});
+	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
 }
 
 /** One-go PR path (/chworktree <PR URL> [--dest …]): fully non-interactive. */
@@ -1022,6 +1034,45 @@ async function oneGoLocation(
 }
 
 // ── Manager: /chworktree ls ─────────────────────────────────────────────────
+
+/** Read-only adapter for the TUI manager. Collection failures deliberately render an empty list. */
+async function collectManagerItems(ctx: {
+	cwd: string;
+	sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
+}): Promise<ManagerSandboxItem[]> {
+	try {
+		const repoRoot = await gitRootOrNull(ctx.cwd);
+		const settings = loadSettings(repoRoot ?? ctx.cwd).settings;
+		const entries = listSandboxes(settings);
+		let records: Map<string, ConnectionRecord> = new Map();
+		try {
+			if (ctx.sessionManager) records = rehydrateConnections(ctx.sessionManager.getBranch());
+		} catch { /* session log is optional */ }
+		const result = await collectWorktreeList({ entries, settings, records });
+		return result.infos.map((info: WtListInfo) => {
+			const { entry } = info;
+			const meta = entry.meta;
+			const projectKey = meta.repoRoot ?? entry.dir;
+			const sandboxId = path.basename(entry.dir);
+			return {
+				sandboxId,
+				projectKey,
+				projectLabel: path.basename(projectKey),
+				branch: meta.branch,
+				path: meta.worktree,
+				indexed: Boolean(entry.claimedRoot ?? readClaimedRoot(sandboxDbDir(entry.dir))),
+				gone: !fs.existsSync(meta.worktree),
+				live: Boolean(info.liveMcpPrefix),
+				...(info.pr ? { pr: { number: info.pr.number, state: info.pr.state } } : {}),
+				searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, info.pr ? `#${info.pr.number}` : ""].join(" "),
+				sizeBytes: info.checkoutBytes,
+				createdAt: meta.createdAt,
+			};
+		});
+	} catch {
+		return [];
+	}
+}
 
 /**
  * /chworktree ls — list the worktree library. Pure render (headless AND
