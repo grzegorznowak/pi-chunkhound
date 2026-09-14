@@ -55,7 +55,7 @@ describe("worktree manager core", () => {
 		const gone = rows.find((row: { sandboxId?: string }) => row.sandboxId === "gone-7");
 		await check(t, "indexed row exposes its stable id and badge", rows.some((row: { sandboxId?: string; badges?: string[] }) => row.sandboxId === "alpha-123" && row.badges?.includes("indexed")), JSON.stringify(rows));
 		await check(t, "PR row carries PR identity, not merely its branch", Boolean(pr?.label.includes("42") && pr.badges.includes("pr")), JSON.stringify(pr));
-		await check(t, "gone/live row exposes both state badges", Boolean(gone?.badges.includes("gone") && gone.badges.includes("live")), JSON.stringify(gone));
+		await check(t, "gone/live row exposes both state badges, live as the plug glyph", Boolean(gone?.badges.includes("gone") && gone.badges.includes("🔌") && !gone.badges.includes("live")), JSON.stringify(gone));
 	});
 
 	test("pending preselect resolves only when its row is visible", async (t) => {

@@ -395,6 +395,8 @@ describe("worktree manager TUI presenter", () => {
 			await check(t, "one DB/CHECKOUT/TOTAL header replaces the per-row labels", header.includes("DB") && header.includes("TOTAL") && !first.includes("db ") && !second.includes("checkout ") && frame.indexOf(header) < frame.indexOf(first), frame);
 			await check(t, "every measured row keeps its values", first.includes("1.0 MB") && first.includes("2.0 KB") && second.includes("2.0 MB") && second.includes("3.0 MB") && second.includes("5.0 MB"), frame);
 			await check(t, "status labels share a justified column", first.indexOf("indexed") === second.indexOf("indexed") && first.indexOf("indexed") > 0, `${first}\n${second}`);
+			await check(t, "the live badge is the plug glyph in indexed → plug → pr order", second.includes("🔌") && !second.includes("live") && second.indexOf("indexed") < second.indexOf("🔌") && second.indexOf("🔌") < second.indexOf("pr"), second);
+			await check(t, "the glyph keeps both rows visually aligned", visibleWidth(first) === visibleWidth(second), `${visibleWidth(first)} vs ${visibleWidth(second)}\n${first}\n${second}`);
 			const end = (line: string, value: string): number => line.indexOf(value) + value.length;
 			await check(t, "numeric cells right-align under their header columns", end(first, "2.0 KB") === end(second, "3.0 MB") && end(first, "1.0 MB") === end(second, "2.0 MB") && end(header, "DB") === end(first, "1.0 MB") && end(header, "CHECKOUT") === end(first, "2.0 KB") && end(header, "TOTAL") === end(second, "5.0 MB"), `${header}\n${first}\n${second}`);
 			component!.handleInput("q");

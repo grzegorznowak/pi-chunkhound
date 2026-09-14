@@ -276,7 +276,7 @@ function sandboxRow(item: ManagerSandboxItem): ManagerRow {
 	const badges = [
 		...(item.indexed ? ["indexed"] : []),
 		...(item.gone ? ["gone"] : []),
-		...(item.live ? ["live"] : []),
+		...(item.live ? ["🔌"] : []),
 		...(item.pr ? ["pr"] : []),
 	];
 	const sizeCells = formatSizeCells(item.dbBytes, item.sizeBytes);
