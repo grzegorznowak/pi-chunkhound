@@ -242,7 +242,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				const provider = () => collectManagerItems(ctx);
 				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, provider), {
 					session,
-					runCreate: (_session, positional) => runWizard(wctx, state, positional),
+					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
 				});
 				return;
 			}
@@ -251,7 +251,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "rpc" && typeof ctx.ui.select === "function") {
 				await runManagerSession(ctx, createWorktreeManagerRpcPresenter(ctx, () => collectManagerItems(ctx)), {
 					session: createManagerSession(),
-					runCreate: (_session, positional) => runWizard(wctx, state, positional),
+					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
 				});
 				return;
 			}
@@ -654,6 +654,12 @@ type WizardUI = ProgressUICtx["ui"] & {
 };
 
 type RepoPick = { kind: "repo"; root: string } | { kind: "pr"; url: string };
+type PromptResult<T> = { kind: "picked"; value: T } | { kind: "cancelled" } | { kind: "blocked" };
+type WizardDeps = { create?: typeof createIndexedWorktree; suppressCancelNotify?: boolean };
+
+function notifyCancelled(ctx: WizardCtx, deps: Pick<WizardDeps, "suppressCancelNotify">): void {
+	if (!deps.suppressCancelNotify) ctx.ui.notify("Cancelled.", "info");
+}
 
 /** Sandbox branch-slot for a PR (identity + worktree folder + meta.branch). */
 function prSlot(number: number): string {
@@ -663,10 +669,10 @@ function prSlot(number: number): string {
 /** Wizard ctx slice the prompt/flow helpers need (+ pi for the MCP connect). */
 type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI; pi: ExtensionAPI };
 
-export async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string): Promise<WizardOutcome> {
+export async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string, deps: WizardDeps = {}): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	if (positional) {
-		if (parsePrUrl(positional)) return runPrWizard(ctx, state, positional);
+		if (parsePrUrl(positional)) return runPrWizard(ctx, state, positional, deps);
 		const requestedPath = path.resolve(ctx.cwd, positional);
 		const probe = fs.existsSync(requestedPath) ? requestedPath : path.dirname(requestedPath);
 		const repoRoot = (await gitRootOrNull(ctx.cwd)) ?? (await findRepoRoot(probe));
@@ -674,15 +680,15 @@ export async function runWizard(ctx: WizardCtx, state: PluginState, positional?:
 			notify(`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own directory, or run /chworktree with no arguments to pick a repo from the library.`, "error");
 			return { kind: "failed" };
 		}
-		return runBranchWizard(ctx, state, path.resolve(repoRoot));
+		return runBranchWizard(ctx, state, path.resolve(repoRoot), deps);
 	}
-	const choice = await pickRepoInteractive(ctx);
-	if (!choice) return { kind: "cancelled" };
-	return choice.kind === "pr" ? runPrWizard(ctx, state, choice.url) : runBranchWizard(ctx, state, choice.root);
+	const choice = await pickRepoInteractive(ctx, deps);
+	if (choice.kind !== "picked") return { kind: choice.kind === "cancelled" ? "cancelled" : "failed" };
+	return choice.value.kind === "pr" ? runPrWizard(ctx, state, choice.value.url, deps) : runBranchWizard(ctx, state, choice.value.root, deps);
 }
 
 /** Branch-sandbox wizard: repo known → branch name → library root → create. */
-export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: string, deps: { create?: typeof createIndexedWorktree } = {}): Promise<WizardOutcome> {
+export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRoot: string, deps: WizardDeps = {}): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(repoRoot).settings;
 
@@ -697,7 +703,7 @@ export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRo
 		hint: `Enter accepts the new branch ${defaultBranch} — typing replaces it`,
 	});
 	if (branchRaw === undefined) {
-		notify("Cancelled.", "info");
+		notifyCancelled(ctx, deps);
 		return { kind: "cancelled" };
 	}
 	const branchName = branchRaw.trim();
@@ -723,13 +729,13 @@ export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRo
 	}
 
 	// Library root prompt (with conflict re-prompts).
-	const pick = await promptLibraryRoot(ctx, settings, repoRoot, branch ?? createBranch ?? remoteRef);
-	if (!pick) return { kind: "cancelled" }; // cancelled / blocked (notified)
+	const pick = await promptLibraryRoot(ctx, settings, repoRoot, branch ?? createBranch ?? remoteRef, deps);
+	if (pick.kind !== "picked") return { kind: pick.kind === "cancelled" ? "cancelled" : "failed" };
 
 	const created = await (deps.create ?? createIndexedWorktree)(ctx, state, {
 		repoRoot,
-		sandboxDir: pick.sandboxDir,
-		wtPath: pick.wtPath,
+		sandboxDir: pick.value.sandboxDir,
+		wtPath: pick.value.wtPath,
 		settings,
 		createBranch,
 		branch,
@@ -749,7 +755,7 @@ export const REPO_PICKER_TITLE = "Select a repository";
 
 /** Repo picker for bare /chworktree: current repo + library repos, a PR (URL
  * prompt), or a typed path. */
-async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined> {
+async function pickRepoInteractive(ctx: WizardCtx, deps: Pick<WizardDeps, "suppressCancelNotify">): Promise<PromptResult<RepoPick>> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const settings = loadSettings(ctx.cwd).settings;
 	// One row per source repo, keyed by its canonical root. The same root can be
@@ -778,8 +784,8 @@ async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined
 	const options = [...candidates.values(), PICK_PR, OTHER_REPO];
 	const choice = await ctx.ui.select(REPO_PICKER_TITLE, options);
 	if (choice === undefined) {
-		notify("Cancelled.", "info");
-		return undefined;
+		notifyCancelled(ctx, deps);
+		return { kind: "cancelled" };
 	}
 	if (choice === PICK_PR) {
 		for (let attempt = 0; attempt < 3; attempt++) {
@@ -788,51 +794,52 @@ async function pickRepoInteractive(ctx: WizardCtx): Promise<RepoPick | undefined
 				hint: "Paste the full URL from the browser: https://github.com/<owner>/<repo>/pull/<n>",
 			});
 			if (raw === undefined) {
-				notify("Cancelled.", "info");
-				return undefined;
+				notifyCancelled(ctx, deps);
+				return { kind: "cancelled" };
 			}
 			const url = raw.trim();
-			if (parsePrUrl(url)) return { kind: "pr", url };
+			if (parsePrUrl(url)) return { kind: "picked", value: { kind: "pr", url } };
 			notify(`Not a PR URL: ${url}. Expected https://github.com/<owner>/<repo>/pull/<n>`, "error");
 		}
 		notify("No valid PR URL — cancelling.", "error");
-		return undefined;
+		return { kind: "blocked" };
 	}
 	if (choice !== OTHER_REPO) {
 		for (const [root, label] of candidates) {
-			if (label === choice) return { kind: "repo", root };
+			if (label === choice) return { kind: "picked", value: { kind: "repo", root } };
 		}
 	}
 
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const raw = await promptPath(ctx.ui, { title: "Repo path (a git repository) — TAB completes:", cwd: ctx.cwd, paramLabel: "repo directory" });
 		if (raw === undefined) {
-			notify("Cancelled.", "info");
-			return undefined;
+			notifyCancelled(ctx, deps);
+			return { kind: "cancelled" };
 		}
 		const p = path.resolve(ctx.cwd, expandHome(raw.trim()));
 		// A pasted PR URL works here too (it carries the repo identity).
-		if (parsePrUrl(p)) return { kind: "pr", url: p };
+		if (parsePrUrl(p)) return { kind: "picked", value: { kind: "pr", url: p } };
 		const probe = fs.existsSync(p) ? p : path.dirname(p);
 		const root = await findRepoRoot(probe);
-		if (root) return { kind: "repo", root: path.resolve(root) };
+		if (root) return { kind: "picked", value: { kind: "repo", root: path.resolve(root) } };
 		notify(`Not a git repo: ${raw}. Try the repo's own directory.`, "error");
 	}
 	notify("No valid repo selected — cancelling.", "error");
-	return undefined;
+	return { kind: "blocked" };
 }
 
 /**
  * Library root prompt for the wizards: prefilled with the configured root,
  * TAB-completed, and re-prompted (≤3) when the location would overlap another
- * chunkhound worktree/index. Returns undefined when cancelled or blocked.
+ * chunkhound worktree/index.
  */
 async function promptLibraryRoot(
 	ctx: WizardCtx,
 	settings: ChhoundSettings,
 	repoRoot: string,
 	slot: string | undefined,
-): Promise<{ dest: string; sandboxDir: string; wtPath: string } | undefined> {
+	deps: Pick<WizardDeps, "suppressCancelNotify">,
+): Promise<PromptResult<{ dest: string; sandboxDir: string; wtPath: string }>> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const defaultRoot = sandboxRoot(settings);
 	const promptTitle = (): string =>
@@ -851,8 +858,8 @@ async function promptLibraryRoot(
 		paramLabel: "worktree library root",
 	});
 	if (destRaw === undefined) {
-		notify("Cancelled.", "info");
-		return undefined;
+		notifyCancelled(ctx, deps);
+		return { kind: "cancelled" };
 	}
 	let dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
 	let { sandboxDir, wtPath, conflict } = compute(dest);
@@ -865,17 +872,17 @@ async function promptLibraryRoot(
 			paramLabel: "worktree library root",
 		});
 		if (destRaw === undefined) {
-			notify("Cancelled.", "info");
-			return undefined;
+			notifyCancelled(ctx, deps);
+			return { kind: "cancelled" };
 		}
 		dest = path.resolve(ctx.cwd, expandHome(destRaw.trim() || defaultRoot));
 		({ sandboxDir, wtPath, conflict } = compute(dest));
 	}
 	if (conflict) {
 		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-status lists worktrees.`, "error");
-		return undefined;
+		return { kind: "blocked" };
 	}
-	return { dest, sandboxDir, wtPath };
+	return { kind: "picked", value: { dest, sandboxDir, wtPath } };
 }
 
 // ── PR sandboxes ─────────────────────────────────────────────────────────────
@@ -937,7 +944,7 @@ export async function resolvePrSandboxHost(
 }
 
 /** PR-wizard tail after the URL is validated: gh → host → root prompt → create. */
-export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string): Promise<WizardOutcome> {
+export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: string, deps: Pick<WizardDeps, "suppressCancelNotify"> = {}): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const pr = parsePrUrl(url);
 	if (!pr) {
@@ -949,12 +956,12 @@ export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: strin
 	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
 	if (!host) return { kind: "failed" };
 	const slot = prSlot(pr.number);
-	const pick = await promptLibraryRoot(ctx, host.settings, host.repoRoot, slot);
-	if (!pick) return { kind: "cancelled" }; // cancelled / blocked (notified)
+	const pick = await promptLibraryRoot(ctx, host.settings, host.repoRoot, slot, deps);
+	if (pick.kind !== "picked") return { kind: pick.kind === "cancelled" ? "cancelled" : "failed" };
 	const created = await createIndexedWorktree(ctx, state, {
 		repoRoot: host.repoRoot,
-		sandboxDir: pick.sandboxDir,
-		wtPath: pick.wtPath,
+		sandboxDir: pick.value.sandboxDir,
+		wtPath: pick.value.wtPath,
 		settings: host.settings,
 		// Detached at the PR head; baseline anchored at the PR's BASE branch so
 		// the top-up only indexes the PR delta.

@@ -20,7 +20,7 @@ describe("worktree manager TUI presenter", () => {
 			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory(tui, theme, getKeybindings(), resolve); }) } };
-			const presenter = createWorktreeManagerTuiPresenter(ctx, () => items);
+			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => items);
 			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 			// The real presenter may await its row provider before mounting; wait one
 			// macrotask so the fake ui.custom has constructed the component.
@@ -60,6 +60,33 @@ describe("worktree manager TUI presenter", () => {
 			await tick();
 			component!.handleInput("\n");
 			await check(t, "Enter on the selected create row requests creation", (await create as { kind?: string })?.kind === "create", JSON.stringify(session));
+		} finally {
+			setKeybindings(original);
+		}
+	});
+
+	test("mounts a loading frame before rows resolve and ignores late rows after close", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let resolveRows: ((value: typeof items) => void) | undefined;
+			const rows = new Promise<typeof items>((resolve) => { resolveRows = resolve; });
+			let renders = 0;
+			const tui = { requestRender: () => { renders++; } };
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory(tui, theme, getKeybindings(), resolve); }) } };
+			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => rows);
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = presenter.next(session);
+			await check(t, "loading frame renders before the deferred provider", /loading worktrees/i.test(component!.render(100).join("\n")), component!.render(100).join("\n"));
+			component!.handleInput("q");
+			await pending;
+			const rendersBeforeLateRows = renders;
+			resolveRows!(items);
+			await new Promise((resolve) => setImmediate(resolve));
+			await check(t, "late rows neither re-render nor reopen a closed panel", renders === rendersBeforeLateRows, String(renders));
 		} finally {
 			setKeybindings(original);
 		}
