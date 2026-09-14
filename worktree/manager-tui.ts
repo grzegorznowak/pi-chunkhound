@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, decodeKittyPrintable, matchesKey } from "@earendil-works/pi-tui";
-import { buildManagerRows, describeManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSandboxItem, type ManagerSession, type PanelAction } from "./manager-core.js";
+import { buildManagerRows, describeManagerItem, type ManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSession, type PanelAction } from "./manager-core.js";
 
 /**
  * pi-tui negotiates the terminal keyboard protocol at startup (Kitty CSI-u
@@ -33,11 +33,12 @@ function printableText(data: string): string | undefined {
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const CREATE_ROW: ManagerRow = { kind: "create", label: "+ new worktree…", badges: [] };
+const TABS: ReadonlyArray<ManagerSession["tab"]> = ["worktrees", "projects", "baselines"];
 
 /** Cache hits arrive synchronously; misses arrive as a shared promise. */
 function isLoadedRows(
-	value: readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
-): value is readonly ManagerSandboxItem[] {
+	value: readonly ManagerItem[] | Promise<readonly ManagerItem[]>,
+): value is readonly ManagerItem[] {
 	return Array.isArray(value);
 }
 
@@ -46,7 +47,7 @@ export function createWorktreeManagerTuiPresenter(
 	getRows: (
 		session: ManagerSession,
 		onProgress?: (progress: ManagerLoadProgress) => void,
-	) => readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
+	) => readonly ManagerItem[] | Promise<readonly ManagerItem[]>,
 	options: { onRefresh?: () => void } = {},
 ): { next(session: ManagerSession): Promise<PanelAction | undefined> } {
 	return {
@@ -54,7 +55,7 @@ export function createWorktreeManagerTuiPresenter(
 			return ctx.ui.custom<PanelAction>((tui, theme, _keybindings, done) => {
 				let tab = session.tab;
 				let row = Math.max(0, session.row);
-				let items: readonly ManagerSandboxItem[] | undefined;
+				let items: readonly ManagerItem[] | undefined;
 				// The create row is present from the first frame: a user who only
 				// wants a new worktree never waits for the library probe to finish.
 				let rows: ManagerRow[] = [CREATE_ROW];
@@ -99,8 +100,17 @@ export function createWorktreeManagerTuiPresenter(
 					row = Math.max(0, Math.min(session.row, Math.max(0, rows.length - 1)));
 					session.row = row;
 				};
+				const showTab = (next: ManagerSession["tab"]): void => {
+					if (next === tab) return;
+					tab = next;
+					row = 0;
+					status = [];
+					rebuild();
+					tui.requestRender();
+				};
+				const cycleTab = (step: number): void => showTab(TABS[(TABS.indexOf(tab) + step + TABS.length) % TABS.length]!);
 				const paint = (color: Parameters<typeof theme.fg>[0], text: string) => theme.fg(color, text);
-				const settle = (loaded: readonly ManagerSandboxItem[]): void => {
+				const settle = (loaded: readonly ManagerItem[]): void => {
 					if (finished) return;
 					items = loaded;
 					progress = { done: loaded.length, total: loaded.length };
@@ -130,7 +140,7 @@ export function createWorktreeManagerTuiPresenter(
 						rebuild();
 						tui.requestRender();
 					};
-					let loaded: readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>;
+					let loaded: readonly ManagerItem[] | Promise<readonly ManagerItem[]>;
 					try {
 						loaded = getRows(session, applyProgress);
 					} catch {
@@ -152,18 +162,18 @@ export function createWorktreeManagerTuiPresenter(
 					},
 					render(_width: number): string[] {
 						const tabName = (name: ManagerSession["tab"]) => tab === name ? theme.bold(paint("accent", `[${name}]`)) : name;
-						const footer = paint("dim", "Tab switch views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close");
+						const footer = paint("dim", "Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close");
 						const filterLine = filterDraft !== undefined
 							? `${theme.bold(paint("accent", "filter>"))} ${filterDraft}▮   ${paint("dim", "⏎ keep · Esc clear")}`
 							: session.filter ? paint("dim", `(showing ${items?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${items?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
 						const loadingLine = loading
-							? `${paint("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!)} ${paint("dim", `Loading ${tab === "projects" ? "projects" : "worktrees"}…${progress ? ` ${progress.done}/${progress.total}` : ""} ${((Date.now() - loadingStartedAt) / 1000).toFixed(1)}s — Enter on “+ new worktree…” creates without waiting`)}`
-							: failed ? paint("error", "Unable to load worktrees — Esc closes, reopen the manager to retry.") : undefined;
+							? `${paint("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!)} ${paint("dim", `Loading ${tab}…${progress ? ` ${progress.done}/${progress.total}` : ""} ${((Date.now() - loadingStartedAt) / 1000).toFixed(1)}s${tab === "worktrees" ? " — Enter on “+ new worktree…” creates without waiting" : ""}`)}`
+							: failed ? paint("error", "Unable to load the worktree library — Esc closes, reopen the manager to retry.") : undefined;
 						const emptyLine = !loading && !failed && rows.length === 0
-							? paint("dim", "(no projects yet — n starts a worktree in a repo)")
+							? paint("dim", tab === "baselines" ? "(no cached baselines — the create wizard primes them)" : "(no projects yet — n starts a worktree in a repo)")
 							: undefined;
 						// Justified columns: labels and status badges share a width across
-						// rows so the badges (and then the checkout size) line up visually.
+						// rows so the badges (and then the size breakdown) line up visually.
 						const badgeText = (item: ManagerRow): string => item.kind !== "create" && item.badges.length ? item.badges.join(" ") : "";
 						const labelWidth = rows.reduce((max, item) => Math.max(max, item.label.length), 0);
 						const badgeWidth = rows.reduce((max, item) => Math.max(max, badgeText(item).length), 0);
@@ -176,7 +186,7 @@ export function createWorktreeManagerTuiPresenter(
 							return line;
 						};
 						return [
-							`${tabName("worktrees")}  ${tabName("projects")}`, "",
+							TABS.map((name) => tabName(name)).join("  "), "",
 							...(filterLine ? [filterLine, ""] : []),
 							...rows.map(rowLine),
 							...(emptyLine ? ["", emptyLine] : []),
@@ -198,6 +208,7 @@ export function createWorktreeManagerTuiPresenter(
 							tui.requestRender(); return;
 						}
 						if (text === "/") { filterDraft = session.filter; status = []; tui.requestRender(); return; }
+						if (text === "1" || text === "2" || text === "3") { showTab(TABS[Number(text) - 1]!); return; }
 						if (text === "r") {
 							if (loading) return; // a collect is already running
 							options.onRefresh?.();
@@ -207,15 +218,17 @@ export function createWorktreeManagerTuiPresenter(
 							tui.requestRender();
 							return;
 						}
-						if (matchesKey(data, Key.tab) || data === "\x1b[Z") {
-							tab = tab === "worktrees" ? "projects" : "worktrees"; row = 0; status = []; rebuild(); tui.requestRender(); return;
-						}
+						if (data === "\x1b[Z" || matchesKey(data, Key.shift("tab"))) { cycleTab(-1); return; }
+						if (matchesKey(data, Key.tab)) { cycleTab(1); return; }
 						if (matchesKey(data, Key.up)) { row = Math.max(0, row - 1); tui.requestRender(); return; }
 						if (matchesKey(data, Key.down)) { row = Math.max(0, Math.min(rows.length - 1, row + 1)); tui.requestRender(); return; }
 						if (text === "q" || isCancel(data)) { finish({ kind: "close" }); return; }
 						const selected = rows[row];
-						if (text === "n" && selected) {
-							const positional = selected.kind === "project" ? selected.projectKey : selected.kind === "sandbox" ? items?.find((item) => item.sandboxId === selected.sandboxId)?.projectKey : undefined;
+						if (text === "n") {
+							const positional = selected?.kind === "project" ? selected.projectKey
+								: selected?.kind === "sandbox" ? items?.find((item) => item.kind === "sandbox" && item.sandboxId === selected.sandboxId)?.projectKey
+									: selected?.kind === "baseline" ? items?.find((item) => item.kind === "baseline" && item.baselineDir === selected.baselineDir)?.projectKey
+										: undefined;
 							finish({ kind: "create", positional }); return;
 						}
 						if (!isEnter(data)) return;
@@ -223,9 +236,14 @@ export function createWorktreeManagerTuiPresenter(
 						if (selected?.kind === "project") {
 							tab = "worktrees"; session.filter = selected.label; row = 0; status = [paint("dim", `Showing worktrees for ${selected.label}.`)]; rebuild(); tui.requestRender(); return;
 						}
-						if (selected?.kind === "sandbox") {
-							const item = items?.find((value) => value.sandboxId === selected.sandboxId);
-							if (item) status = [...describeManagerItem(item), paint("dim", "read-only — connect/remove arrive in a later slice")];
+						if (selected?.kind === "sandbox" || selected?.kind === "baseline") {
+							const item = selected.kind === "sandbox"
+								? items?.find((value) => value.kind === "sandbox" && value.sandboxId === selected.sandboxId)
+								: items?.find((value) => value.kind === "baseline" && value.baselineDir === selected.baselineDir);
+							if (item) {
+								const note = selected.kind === "baseline" ? "read-only — baseline refresh/removal arrive in a later slice" : "read-only — connect/remove arrive in a later slice";
+								status = [...describeManagerItem(item), paint("dim", note)];
+							}
 							tui.requestRender();
 						}
 					},

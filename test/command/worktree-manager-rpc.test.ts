@@ -1,8 +1,8 @@
 import { describe, test } from "node:test";
 import { check } from "../lib/checks.js";
-import type { ManagerSession } from "../../worktree/manager-core.js";
+import type { ManagerBaselineItem, ManagerItem, ManagerSession } from "../../worktree/manager-core.js";
 
-const items = () => [{ sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" }];
+const items = (): ManagerItem[] => [{ kind: "sandbox", sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" }];
 
 describe("worktree manager RPC presenter", () => {
 	test("one select round-trip maps create and conveys the active view", async (t) => {
@@ -58,6 +58,21 @@ describe("worktree manager RPC presenter", () => {
 		}
 	});
 
+	test("baselines view cycles in and opens baseline details", async (t) => {
+		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
+		const baseline: ManagerBaselineItem = { kind: "baseline", baselineDir: "/cache/bases/repo/main", projectKey: "/repos/repo", projectLabel: "repo", ref: "main", path: "/repos/repo", searchText: "repo main", dbBytes: 7 * 1024 * 1024, baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560", chhoundVersion: "chhound 5.2.2", updatedAt: "2026-09-06T11:50:50.222Z" };
+		const calls: Array<{ title: string; options: string[] }> = [];
+		const responses: Array<string | undefined> = ["view: baselines", "repo · main", "close"];
+		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
+		const presenter = createWorktreeManagerRpcPresenter(ctx, () => [items()[0]!, baseline]);
+		const session: ManagerSession = { tab: "projects", row: 0, filter: "", preselect: undefined };
+		await presenter.next(session);
+		await check(t, "projects view offers the baselines switch", calls[0]!.options.includes("view: baselines") && session.tab === "baselines", JSON.stringify(calls[0]));
+		const detail = await presenter.next(session);
+		await check(t, "baselines view lists the cached baseline", calls[1]!.title.includes("1 baseline") && calls[1]!.options.includes("repo · main"), JSON.stringify(calls[1]));
+		await check(t, "baseline selection opens its own details", detail.kind === "close" && calls[2]!.title.startsWith("Baseline details") && calls[2]!.title.includes("/repos/repo") && calls[2]!.options.join(",") === "back,close", JSON.stringify(calls[2]));
+	});
+
 	test("rows are obtained afresh for every presentation", async (t) => {
 		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
 		let version = 0;
@@ -65,7 +80,7 @@ describe("worktree manager RPC presenter", () => {
 		const ctx = { ui: { select: async (title: string) => { titles.push(title); return "close"; } } };
 		const presenter = createWorktreeManagerRpcPresenter(ctx, () => {
 			version++;
-			return [{ sandboxId: `fresh-${version}`, projectKey: "/repo", projectLabel: "repo", branch: "feature", path: `/worktrees/${version}`, indexed: true, gone: false, live: false, searchText: `fresh ${version}` }];
+			return [{ kind: "sandbox", sandboxId: `fresh-${version}`, projectKey: "/repo", projectLabel: "repo", branch: "feature", path: `/worktrees/${version}`, indexed: true, gone: false, live: false, searchText: `fresh ${version}` }];
 		});
 		const session: ManagerSession = { tab: "worktrees", row: 0, filter: "", preselect: undefined };
 		await presenter.next(session);

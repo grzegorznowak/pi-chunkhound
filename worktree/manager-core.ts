@@ -1,33 +1,56 @@
 import { fmtSize } from "../chhound/sandbox.js";
 
-export interface ManagerSandboxItem {
-	sandboxId: string;
+export interface ManagerItemBase {
+	/** Stable identity of the source repo (sandbox repo root / baseline repoRoot). */
 	projectKey: string;
 	projectLabel: string;
-	branch: string;
+	/** Checkout path for sandboxes; source repo root for baselines. */
 	path: string;
+	searchText: string;
+	/** Checkout bytes — absent on baselines (they carry no checkout copy). */
+	sizeBytes?: number;
+	/** Index-db bytes. */
+	dbBytes?: number;
+}
+
+export interface ManagerSandboxItem extends ManagerItemBase {
+	kind: "sandbox";
+	sandboxId: string;
+	branch: string;
 	indexed: boolean;
 	gone: boolean;
 	live: boolean;
 	pr?: { number: number; state: string };
-	searchText: string;
-	sizeBytes?: number;
 	createdAt?: string;
 }
 
+/** A cached baseline index: db-only (the priming worktree is removed after indexing). */
+export interface ManagerBaselineItem extends ManagerItemBase {
+	kind: "baseline";
+	baselineDir: string;
+	ref: string;
+	baseCommit?: string;
+	chhoundVersion?: string;
+	updatedAt?: string;
+}
+
+export type ManagerItem = ManagerSandboxItem | ManagerBaselineItem;
+
 export interface ManagerRow {
-	kind: "create" | "sandbox" | "project";
+	kind: "create" | "sandbox" | "project" | "baseline";
 	/** Present on sandbox rows; the create row has none. */
 	sandboxId?: string;
 	projectKey?: string;
+	/** Present on baseline rows. */
+	baselineDir?: string;
 	label: string;
 	badges: string[];
-	/** Sandbox rows only: the same "checkout <size>" text the details show. */
+	/** Sandbox/baseline rows: the same size breakdown the details show. */
 	sizeLabel?: string;
 }
 
 export interface ManagerSession {
-	tab: "worktrees" | "projects";
+	tab: "worktrees" | "projects" | "baselines";
 	row: number;
 	filter: string;
 	preselect?: string;
@@ -40,7 +63,7 @@ export type WizardOutcome = { kind: "created"; sandboxId: string } | { kind: "ca
 export interface ManagerLoadProgress {
 	done: number;
 	total: number;
-	items: readonly ManagerSandboxItem[];
+	items: readonly ManagerItem[];
 }
 export interface ManagerPresenter {
 	next(session: ManagerSession): Promise<PanelAction | undefined>;
@@ -56,15 +79,15 @@ export interface ManagerPresenter {
  * preselect.
  */
 export interface ManagerItemStore {
-	load(onProgress?: (progress: ManagerLoadProgress) => void): readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>;
+	load(onProgress?: (progress: ManagerLoadProgress) => void): readonly ManagerItem[] | Promise<readonly ManagerItem[]>;
 	invalidate(): void;
 }
 
 export function createManagerItemStore(
-	loader: (onProgress?: (progress: ManagerLoadProgress) => void) => Promise<readonly ManagerSandboxItem[]>,
+	loader: (onProgress?: (progress: ManagerLoadProgress) => void) => Promise<readonly ManagerItem[]>,
 ): ManagerItemStore {
-	let cached: readonly ManagerSandboxItem[] | undefined;
-	let inFlight: { promise: Promise<readonly ManagerSandboxItem[]>; generation: number } | undefined;
+	let cached: readonly ManagerItem[] | undefined;
+	let inFlight: { promise: Promise<readonly ManagerItem[]>; generation: number } | undefined;
 	let generation = 0;
 	let lastProgress: ManagerLoadProgress | undefined;
 	const listeners = new Set<(progress: ManagerLoadProgress) => void>();
@@ -130,17 +153,26 @@ export function createManagerSession(initial: Partial<ManagerSession> = {}): Man
 	return { tab: "worktrees", row: 0, filter: "", preselect: undefined, ...initial };
 }
 
-/** The list row and the details share this exact "checkout <size>" text. */
-export function formatCheckoutSize(sizeBytes?: number): string | undefined {
-	return sizeBytes !== undefined ? `checkout ${fmtSize(sizeBytes)}` : undefined;
+/**
+ * Shared size text: `db … · checkout … · total …` for sandboxes, `db …` for
+ * baselines (no checkout copy exists). Undefined only when neither side was
+ * measured (fixtures/partial data), so the row stays blank; a measured but
+ * missing db file is a real 0 B.
+ */
+export function formatSizeBreakdown(dbBytes?: number, checkoutBytes?: number): string | undefined {
+	if (dbBytes === undefined && checkoutBytes === undefined) return undefined;
+	const db = dbBytes ?? 0;
+	if (checkoutBytes === undefined) return `db ${fmtSize(db)}`;
+	return `db ${fmtSize(db)} · checkout ${fmtSize(checkoutBytes)} · total ${fmtSize(db + checkoutBytes)}`;
 }
 
-export function buildManagerRows(session: ManagerSession, items: readonly ManagerSandboxItem[]): ManagerRow[] {
+export function buildManagerRows(session: ManagerSession, items: readonly ManagerItem[]): ManagerRow[] {
 	const filter = session.filter.toLowerCase();
 	const matching = items.filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
 	if (session.tab === "projects") {
 		const projects = new Map<string, { label: string; count: number }>();
 		for (const item of matching) {
+			if (item.kind !== "sandbox") continue;
 			const project = projects.get(item.projectKey);
 			if (project) project.count++;
 			else projects.set(item.projectKey, { label: item.projectLabel, count: 1 });
@@ -152,15 +184,32 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 			badges: [`${project.count} ${project.count === 1 ? "worktree" : "worktrees"}`],
 		}));
 	}
+	if (session.tab === "baselines") {
+		const rows: ManagerRow[] = [];
+		for (const item of matching) {
+			if (item.kind !== "baseline") continue;
+			const sizeLabel = formatSizeBreakdown(item.dbBytes);
+			rows.push({
+				kind: "baseline",
+				baselineDir: item.baselineDir,
+				projectKey: item.projectKey,
+				label: `${item.projectLabel} · ${item.ref}`,
+				badges: [],
+				...(sizeLabel ? { sizeLabel } : {}),
+			});
+		}
+		return rows;
+	}
 	const rows: ManagerRow[] = [{ kind: "create", label: "+ new worktree…", badges: [] }];
 	for (const item of matching) {
+		if (item.kind !== "sandbox") continue;
 		const badges = [
 			...(item.indexed ? ["indexed"] : []),
 			...(item.gone ? ["gone"] : []),
 			...(item.live ? ["live"] : []),
 			...(item.pr ? ["pr"] : []),
 		];
-		const sizeLabel = formatCheckoutSize(item.sizeBytes);
+		const sizeLabel = formatSizeBreakdown(item.dbBytes, item.sizeBytes);
 		rows.push({
 			kind: "sandbox",
 			sandboxId: item.sandboxId,
@@ -179,15 +228,29 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 	return rows;
 }
 
-export function describeManagerItem(item: ManagerSandboxItem): string[] {
-	const checkout = formatCheckoutSize(item.sizeBytes);
+export function describeManagerItem(item: ManagerItem): string[] {
+	const sizes = formatSizeBreakdown(item.dbBytes, item.sizeBytes);
+	if (item.kind === "baseline") {
+		return [
+			`${item.projectLabel} · ${item.ref}`,
+			item.path,
+			[
+				`repo ${item.projectKey}`,
+				"baseline index (no checkout copy)",
+				...(sizes ? [sizes] : []),
+				...(item.baseCommit ? [`commit ${item.baseCommit.slice(0, 12)}`] : []),
+				...(item.chhoundVersion ? [item.chhoundVersion] : []),
+				...(item.updatedAt ? [`updated ${item.updatedAt.slice(0, 10)}`] : []),
+			].join(" · "),
+		];
+	}
 	const facts = [
 		`repo ${item.projectKey}`,
 		item.indexed ? "indexed" : "not indexed",
 		...(item.live ? ["live MCP"] : []),
 		...(item.gone ? ["checkout gone"] : []),
 		...(item.pr ? [`PR #${item.pr.number} ${item.pr.state}`] : []),
-		...(checkout ? [checkout] : []),
+		...(sizes ? [sizes] : []),
 		...(item.createdAt ? [`created ${item.createdAt.slice(0, 10)}`] : []),
 	];
 	return [`${item.sandboxId} · ${item.projectLabel} · ${item.branch}`, item.path, facts.join(" · ")];

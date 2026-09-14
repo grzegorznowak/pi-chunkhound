@@ -1,14 +1,16 @@
 import { describe, test } from "node:test";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
-import type { ManagerSession } from "../../worktree/manager-core.js";
+import type { ManagerBaselineItem, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
 import { check } from "../lib/checks.js";
 
 // The TUI presenter is live: Tab/Shift+Tab/arrows mutate the panel without
 // ending the mount; only close/create (and future sub-screen back) resolve
 // next(). The shared session is committed when that action resolves.
-const items = [
-	{ sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" },
+const items: ManagerSandboxItem[] = [
+	{ kind: "sandbox", sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" },
 ];
+
+const baseline: ManagerBaselineItem = { kind: "baseline", baselineDir: "/cache/bases/repo/main", projectKey: "/repos/repo", projectLabel: "repo", ref: "main", path: "/repos/repo", searchText: "repo main baseline", dbBytes: 7 * 1024 * 1024, baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560", chhoundVersion: "chhound 5.2.2", updatedAt: "2026-09-06T11:50:50.222Z" };
 
 describe("worktree manager TUI presenter", () => {
 	test("live navigation commits to the session when the panel action resolves", async (t) => {
@@ -336,8 +338,8 @@ describe("worktree manager TUI presenter", () => {
 		try {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 			const sized = [
-				{ ...items[0]!, sizeBytes: 2048 },
-				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta-tools", branch: "bugfix/longer", path: "/worktrees/two", searchText: "beta bugfix", live: true, pr: { number: 7, state: "OPEN" }, sizeBytes: 3 * 1024 * 1024 },
+				{ ...items[0]!, sizeBytes: 2048, dbBytes: 1024 * 1024 },
+				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta-tools", branch: "bugfix/longer", path: "/worktrees/two", searchText: "beta bugfix", live: true, pr: { number: 7, state: "OPEN" }, sizeBytes: 3 * 1024 * 1024, dbBytes: 2 * 1024 * 1024 },
 			];
 			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
@@ -348,11 +350,57 @@ describe("worktree manager TUI presenter", () => {
 			const frame = component!.render(100).join("\n");
 			const first = frame.split("\n").find((line) => line.includes("repo · feature"))!;
 			const second = frame.split("\n").find((line) => line.includes("beta-tools · bugfix/longer"))!;
-			await check(t, "every sandbox row shows its checkout size before drilling in", first.includes("checkout 2.0 KB") && second.includes("checkout 3.0 MB"), frame);
+			await check(t, "every sandbox row shows its db/checkout/total before drilling in", first.includes("db 1.0 MB") && first.includes("checkout 2.0 KB") && first.includes("total 1.0 MB") && second.includes("db 2.0 MB") && second.includes("checkout 3.0 MB") && second.includes("total 5.0 MB"), frame);
 			await check(t, "status labels share a justified column", first.indexOf("indexed") === second.indexOf("indexed") && first.indexOf("indexed") > 0, `${first}\n${second}`);
 			await check(t, "the size column lines up after the badges", first.indexOf("checkout") === second.indexOf("checkout"), `${first}\n${second}`);
 			component!.handleInput("q");
 			await pending;
+		} finally { setKeybindings(original); }
+	});
+
+	test("baselines tab renders db-only rows, details, and create-in-repo", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [...items, baseline]).next(session);
+			component!.handleInput("3");
+			let frame = component!.render(100).join("\n");
+			await check(t, "digit 3 opens the baselines tab with db-only rows", frame.includes("[baselines]") && frame.includes("repo · main") && frame.includes("db 7.0 MB") && !frame.includes("+ new worktree"), frame);
+			component!.handleInput("\n");
+			frame = component!.render(100).join("\n");
+			await check(t, "baseline details explain the index and absence of a checkout", frame.includes("baseline index (no checkout copy)") && frame.includes("commit c9698c47bb16") && frame.includes("updated 2026-09-06"), frame);
+			component!.handleInput("\t");
+			frame = component!.render(100).join("\n");
+			await check(t, "Tab wraps baselines back to worktrees", frame.includes("[worktrees]") && frame.includes("+ new worktree"), frame);
+			component!.handleInput("3");
+			component!.handleInput("n");
+			const action = await pending as { kind: string; positional?: string };
+			await check(t, "n on a baseline starts a create in its repo", action.kind === "create" && action.positional === "/repos/repo", JSON.stringify(action));
+		} finally { setKeybindings(original); }
+	});
+
+	test("n on an empty tab still starts a create", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
+			component!.handleInput("3");
+			await check(t, "an empty baselines tab renders no selectable row", !component!.render(100).join("\n").includes("→ "), component!.render(100).join("\n"));
+			component!.handleInput("n");
+			const action = await pending as { kind: string; positional?: string };
+			await check(t, "n without a selection still opens the create wizard", action.kind === "create" && action.positional === undefined, JSON.stringify(action));
 		} finally { setKeybindings(original); }
 	});
 });

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
-import { baselineDbDirFor, ensureBaseline, listBaselines } from "../chhound/baseline.js";
+import { baselineDbDirFor, baselineDbPathIn, ensureBaseline, listBaselines } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
@@ -13,15 +13,15 @@ import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
-import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxBranchLabel, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, readClaimedRoot } from "../chhound/sandbox.js";
+import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxBranchLabel, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, dirSizeAsync, readClaimedRoot } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
-import type { ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
+import type { BaselineMeta, ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
 import { connectEntry, resolveSandboxMatches } from "../mcp/command.js";
 import { disconnectMcp } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
-import { createManagerItemStore, createManagerSession, runManagerSession, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createManagerItemStore, createManagerSession, runManagerSession, type ManagerBaselineItem, type ManagerItem, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
 import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
@@ -1052,22 +1052,39 @@ async function collectManagerItems(
 		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
 	},
 	onProgress?: (progress: ManagerLoadProgress) => void,
-): Promise<ManagerSandboxItem[]> {
+): Promise<ManagerItem[]> {
 	try {
 		const repoRoot = await gitRootOrNull(ctx.cwd);
 		const settings = loadSettings(repoRoot ?? ctx.cwd).settings;
 		const entries = listSandboxes(settings);
+		// Meta-less baseline dirs are garbage (failed/abandoned primes), not rows.
+		// A racing removal here must not cost us the whole sandbox listing.
+		let baselines: ReturnType<typeof listBaselines> = [];
+		try {
+			baselines = listBaselines(settings).filter((baseline) => baseline.meta !== undefined);
+		} catch { /* baseline listing is optional */ }
+		// Newest-first like the sandboxes, and stable across remounts.
+		baselines.sort((a, b) => (b.meta?.updatedAt ?? "").localeCompare(a.meta?.updatedAt ?? ""));
+		const total = entries.length + baselines.length;
 		let records: Map<string, ConnectionRecord> = new Map();
 		try {
 			if (ctx.sessionManager) records = rehydrateConnections(ctx.sessionManager.getBranch());
 		} catch { /* session log is optional */ }
-		// Report the total as soon as the library listing is known, then stream
-		// completed sandboxes in library order (the probe pool finishes out of
-		// order; buffering keeps the visible list prefix-stable).
-		const ordered: ManagerSandboxItem[] = [];
-		const buffered = new Map<number, ManagerSandboxItem>();
+		// Report the total as soon as both listings are known, then stream
+		// completed items in library order (sandboxes from the probe pool finish
+		// out of order; buffering keeps the visible list prefix-stable).
+		const ordered: ManagerItem[] = [];
+		const buffered = new Map<number, ManagerItem>();
 		let done = 0;
-		const report = (): void => { onProgress?.({ done, total: entries.length, items: ordered }); };
+		const drain = (): void => {
+			let head = buffered.get(ordered.length);
+			while (head !== undefined) {
+				ordered.push(head);
+				buffered.delete(ordered.length - 1);
+				head = buffered.get(ordered.length);
+			}
+		};
+		const report = (): void => { onProgress?.({ done, total, items: ordered }); };
 		report();
 		const result = await collectWorktreeList({
 			entries,
@@ -1076,16 +1093,22 @@ async function collectManagerItems(
 			onItem: (index, info) => {
 				buffered.set(index, managerItemFrom(info));
 				done++;
-				let head = buffered.get(ordered.length);
-				while (head !== undefined) {
-					ordered.push(head);
-					buffered.delete(ordered.length - 1);
-					head = buffered.get(ordered.length);
-				}
+				drain();
 				report();
 			},
 		});
-		return ordered.length === entries.length ? ordered : result.infos.map(managerItemFrom);
+		// Baselines stream after the sandboxes. A baseline db is a single file, so
+		// this is one stat per baseline — no checkout walk (there is no checkout).
+		const baselineItems: ManagerItem[] = [];
+		for (const [i, baseline] of baselines.entries()) {
+			const item = await baselineItemFrom(baseline.dir, baseline.meta);
+			baselineItems.push(item);
+			buffered.set(entries.length + i, item);
+			done++;
+			drain();
+			report();
+		}
+		return ordered.length === total ? ordered : [...result.infos.map(managerItemFrom), ...baselineItems];
 	} catch {
 		return [];
 	}
@@ -1098,6 +1121,7 @@ function managerItemFrom(info: WtListInfo): ManagerSandboxItem {
 	const projectKey = meta.repoRoot ?? entry.dir;
 	const sandboxId = path.basename(entry.dir);
 	return {
+		kind: "sandbox",
 		sandboxId,
 		projectKey,
 		projectLabel: path.basename(projectKey),
@@ -1109,7 +1133,26 @@ function managerItemFrom(info: WtListInfo): ManagerSandboxItem {
 		...(info.pr ? { pr: { number: info.pr.number, state: info.pr.state } } : {}),
 		searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, info.pr ? `#${info.pr.number}` : ""].join(" "),
 		sizeBytes: info.checkoutBytes,
+		dbBytes: entry.dbSizeBytes,
 		createdAt: meta.createdAt,
+	};
+}
+
+/** Adapter from one cached baseline to the renderer-free manager item. */
+async function baselineItemFrom(dir: string, meta: BaselineMeta | undefined): Promise<ManagerBaselineItem> {
+	const repoRoot = meta?.repoRoot && meta.repoRoot.length > 0 ? meta.repoRoot : dir;
+	return {
+		kind: "baseline",
+		baselineDir: dir,
+		projectKey: repoRoot,
+		projectLabel: path.basename(repoRoot),
+		ref: meta?.baseRef ?? path.basename(dir),
+		path: repoRoot,
+		dbBytes: await dirSizeAsync(baselineDbPathIn(dir)),
+		...(meta?.baseCommit ? { baseCommit: meta.baseCommit } : {}),
+		...(meta?.chhoundVersion ? { chhoundVersion: meta.chhoundVersion } : {}),
+		...(meta?.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+		searchText: [repoRoot, path.basename(repoRoot), meta?.baseRef ?? path.basename(dir), dir].join(" "),
 	};
 }
 

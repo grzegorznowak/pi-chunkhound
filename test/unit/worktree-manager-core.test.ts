@@ -4,6 +4,7 @@ import { check } from "../lib/checks.js";
 // Planned renderer-free manager input. The adapter from SandboxEntry/WtListInfo
 // supplies these facts; renderers must not need filesystem or git access.
 type ManagerSandboxItem = {
+	kind: "sandbox";
 	sandboxId: string;
 	projectKey: string;
 	projectLabel: string;
@@ -15,13 +16,32 @@ type ManagerSandboxItem = {
 	pr?: { number: number; state: string };
 	searchText: string;
 	sizeBytes?: number;
+	dbBytes?: number;
 	createdAt?: string;
 };
 
+type ManagerBaselineItem = {
+	kind: "baseline";
+	baselineDir: string;
+	projectKey: string;
+	projectLabel: string;
+	ref: string;
+	path: string;
+	searchText: string;
+	dbBytes?: number;
+	baseCommit?: string;
+	chhoundVersion?: string;
+	updatedAt?: string;
+};
+
 const items: ManagerSandboxItem[] = [
-	{ sandboxId: "alpha-123", projectKey: "/repos/alpha", projectLabel: "alpha", branch: "feature/one", path: "/worktrees/alpha-123/feature-one", indexed: true, gone: false, live: false, searchText: "alpha feature one" },
-	{ sandboxId: "beta-pr-42", projectKey: "/repos/beta", projectLabel: "beta", branch: "pull/42", path: "/worktrees/beta-pr-42/pull-42", indexed: true, gone: false, live: true, pr: { number: 42, state: "OPEN" }, searchText: "beta pull 42 pr" },
-	{ sandboxId: "gone-7", projectKey: "/repos/gone", projectLabel: "gone", branch: "old", path: "/worktrees/gone-7/old", indexed: false, gone: true, live: true, searchText: "gone old" },
+	{ kind: "sandbox", sandboxId: "alpha-123", projectKey: "/repos/alpha", projectLabel: "alpha", branch: "feature/one", path: "/worktrees/alpha-123/feature-one", indexed: true, gone: false, live: false, searchText: "alpha feature one" },
+	{ kind: "sandbox", sandboxId: "beta-pr-42", projectKey: "/repos/beta", projectLabel: "beta", branch: "pull/42", path: "/worktrees/beta-pr-42/pull-42", indexed: true, gone: false, live: true, pr: { number: 42, state: "OPEN" }, searchText: "beta pull 42 pr" },
+	{ kind: "sandbox", sandboxId: "gone-7", projectKey: "/repos/gone", projectLabel: "gone", branch: "old", path: "/worktrees/gone-7/old", indexed: false, gone: true, live: true, searchText: "gone old" },
+];
+
+const baselines: ManagerBaselineItem[] = [
+	{ kind: "baseline", baselineDir: "/cache/bases/alpha/main", projectKey: "/repos/alpha", projectLabel: "alpha", ref: "main", path: "/repos/alpha", searchText: "alpha main baseline", dbBytes: 7 * 1024 * 1024, baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560", chhoundVersion: "chhound 5.2.2", updatedAt: "2026-09-06T11:50:50.222Z" },
 ];
 
 describe("worktree manager core", () => {
@@ -97,15 +117,28 @@ describe("worktree manager core", () => {
 		await check(t, "details expose the read-only sandbox facts", lines.length === 3 && text.includes("beta-pr-42 · beta · pull/42") && text.includes("/worktrees/beta-pr-42/pull-42") && text.includes("repo /repos/beta") && text.includes("indexed") && text.includes("live MCP") && text.includes("PR #42 OPEN") && text.includes("checkout 2.0 KB") && text.includes("created 2026-09-14"), text);
 	});
 
-	test("sandbox rows carry the same checkout size text as the details", async (t) => {
+	test("sandbox rows carry the same size breakdown as the details", async (t) => {
 		const { buildManagerRows, createManagerSession, describeManagerItem } = await import("../../worktree/manager-core.js");
-		const sized = { ...items[0]!, sizeBytes: 2048 };
+		const sized = { ...items[0]!, sizeBytes: 2048, dbBytes: 1024 * 1024 };
 		const row = buildManagerRows(createManagerSession(), [sized]).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
 		const details = describeManagerItem(sized).join("\n");
-		const rowLabel = row?.sizeLabel;
-		await check(t, "row size text is verbatim from the details", rowLabel === "checkout 2.0 KB" && details.includes(rowLabel), JSON.stringify({ row, details }));
-		const unsized = buildManagerRows(createManagerSession(), items).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
-		await check(t, "an unknown size stays absent rather than guessed", unsized?.sizeLabel === undefined, JSON.stringify(unsized));
+		const expected = "db 1.0 MB · checkout 2.0 KB · total 1.0 MB";
+		await check(t, "row size text is the shared db/checkout/total breakdown", row?.sizeLabel === expected && details.includes(expected), JSON.stringify({ row, details }));
+		const unmeasured = buildManagerRows(createManagerSession(), [items[0]!]).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
+		await check(t, "unmeasured items stay blank rather than claiming 0 B", unmeasured?.sizeLabel === undefined && !describeManagerItem(items[0]!).join("\n").includes("0 B"), JSON.stringify(unmeasured));
+	});
+
+	test("baselines render on their own tab with db-only size and details", async (t) => {
+		const { buildManagerRows, createManagerSession, describeManagerItem } = await import("../../worktree/manager-core.js");
+		const rows = buildManagerRows(createManagerSession({ tab: "baselines" }), [...items, ...baselines]);
+		await check(t, "baseline tab has no create row and only baseline rows", rows.length === 1 && rows[0]?.kind === "baseline" && rows[0]?.baselineDir === "/cache/bases/alpha/main", JSON.stringify(rows));
+		await check(t, "baseline rows carry label, repo key, and db-only size", rows[0]?.label === "alpha · main" && rows[0]?.projectKey === "/repos/alpha" && rows[0]?.sizeLabel === "db 7.0 MB", JSON.stringify(rows[0]));
+		const details = describeManagerItem(baselines[0]!).join("\n");
+		await check(t, "baseline details explain the db-only nature", details.includes("alpha · main") && details.includes("/repos/alpha") && details.includes("baseline index (no checkout copy)") && details.includes("db 7.0 MB") && details.includes("commit c9698c47bb16") && details.includes("updated 2026-09-06"), details);
+		const worktrees = buildManagerRows(createManagerSession(), [...items, ...baselines]);
+		await check(t, "baselines never leak into the worktrees tab", worktrees.every((row) => row.kind !== "baseline"), JSON.stringify(worktrees.map((row) => row.kind)));
+		const projects = buildManagerRows(createManagerSession({ tab: "projects" }), [...items, ...baselines]);
+		await check(t, "baselines never join project grouping", projects.find((row) => row.label === "alpha")?.badges.includes("1 worktree") === true, JSON.stringify(projects));
 	});
 
 	test("created from projects switches to worktrees before redisplay", async (t) => {
