@@ -1,16 +1,14 @@
-import * as fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { listBaselines, sweepBaselineGarbage } from "../chhound/baseline.js";
+import { sweepBaselineGarbage } from "../chhound/baseline.js";
 import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { baseRoot, sandboxRoot } from "../chhound/paths.js";
-import { fmtSize, listSandboxes, pruneSandboxes, claimedRootMatches, sandboxBranchLabel } from "../chhound/sandbox.js";
+import { listSandboxes, pruneSandboxes, claimedRootMatches, sandboxBranchLabel } from "../chhound/sandbox.js";
 import { listMcpConnections, indexDisambigToken } from "../mcp/manager.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
-import type { BaselineMeta } from "../chhound/types.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
 
 /** A connection as shown in /ch-status; repo identity fields are set by
@@ -37,10 +35,9 @@ export function buildStatusLines(opts: {
 	version: string;
 	settings: ChhoundSettings;
 	sandboxes: SandboxEntry[];
-	baselines: Array<{ dir: string; meta?: BaselineMeta }>;
 	conns: readonly McpStatusConn[];
 }): string[] {
-	const { version, settings, sandboxes, baselines, conns } = opts;
+	const { version, settings, sandboxes, conns } = opts;
 	const lines: string[] = [
 		`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
 		`worktree library root: ${sandboxRoot(settings)}${settings.worktreeBase && !settings.sandboxRoot ? ` (legacy worktreeBase)` : ""}`,
@@ -51,54 +48,33 @@ export function buildStatusLines(opts: {
 		`llm: ${settings.llm?.provider ? `${settings.llm.provider}/${settings.llm.model ?? "default"}` : "not configured — research tools need it (/ch-setup)"}`,
 		`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or /ch-setup)"}`,
 		"",
-		`worktrees (${sandboxes.length}):`,
+		`index roots (${sandboxes.length}):`,
 	];
+	// Index-root claim health — unique to /ch-status: the manager only shows
+	// whether a claim exists, never whether it points at the right root. The
+	// claimed root is the SANDBOX dir (the daemon's project dir — the checkout
+	// lives inside it), not the worktree.
+	let problems = 0;
 	if (sandboxes.length === 0) {
-		lines.push("  (none — run /chworktree <path>)");
+		lines.push("  (no sandboxes — run /chworktree <path>)");
 	} else {
 		for (const s of sandboxes) {
-			const alive = fs.existsSync(s.meta.worktree) ? "✓ live" : "✗ gone";
 			const repoName = s.meta.repoRoot ? path.basename(s.meta.repoRoot) : path.basename(s.dir);
-			// Design 1: the claimed root is the SANDBOX dir (the daemon's
-			// project dir — the checkout lives inside it), not the worktree.
-			let rootTxt: string[];
+			const label = `${repoName}/${sandboxBranchLabel(s.meta)}`;
 			if (!s.claimedRoot) {
-				rootTxt = [`⚠ unclaimed — run chunkhound index/mcp from ${s.dir}`];
-			} else if (claimedRootMatches(s.claimedRoot, s.dir)) {
-				rootTxt = [`✓ ${s.claimedRoot}`];
-			} else {
-				rootTxt = [
-					"⚠ mismatch",
-					`claimed:  ${s.claimedRoot}`,
-					`expected: ${s.dir}`,
-					"fix: run chunkhound index/mcp from the expected root",
-				];
+				problems++;
+				lines.push(`  ⚠ ${label} — unclaimed — run chunkhound index/mcp from ${s.dir}`);
+			} else if (!claimedRootMatches(s.claimedRoot, s.dir)) {
+				problems++;
+				lines.push(
+					`  ⚠ ${label} — mismatched claim`,
+					`      claimed:  ${s.claimedRoot}`,
+					`      expected: ${s.dir}`,
+					"      fix: run chunkhound index/mcp from the expected root",
+				);
 			}
-			lines.push(
-				`  ${alive}  ${repoName}/${sandboxBranchLabel(s.meta)}`,
-				`      worktree:   ${s.meta.worktree}`,
-				`      base commit: ${s.meta.baseCommit.slice(0, 8)} · index: ${fmtSize(s.dbSizeBytes)} · created: ${s.meta.createdAt.slice(0, 10)}`,
-				`      index root: ${rootTxt[0]}`,
-				...rootTxt.slice(1).map((l) => `          ${l}`),
-			);
 		}
-	}
-	lines.push("", `baselines (${baselines.length}):`);
-	if (baselines.length === 0) {
-		lines.push("  (none — created on first /chworktree)");
-	} else {
-		for (const b of baselines) {
-			const meta = b.meta;
-			// Dir layout is <baseRoot>/<repo-slug>-<hash8>/<ref> — show the
-			// repo (slug part) so multi-repo libraries are readable.
-			const repoDirName = path.basename(path.dirname(b.dir));
-			const repoName = repoDirName.length > 9 ? repoDirName.slice(0, -9) : repoDirName;
-			lines.push(
-				meta
-					? `  ${repoName}/${path.basename(b.dir)} @ ${meta.baseCommit.slice(0, 8)} · ${meta.chhoundVersion} · updated ${meta.updatedAt.slice(0, 10)}`
-					: `  ${repoName}/${path.basename(b.dir)} (no meta — incomplete)`,
-			);
-		}
+		if (problems === 0) lines.push("  ✓ all claimed correctly");
 	}
 	// Join connections to their sandbox meta so each line can name the source
 	// repo and branch behind the connection. The join prefers the immutable
@@ -193,7 +169,7 @@ export function mcpStatusLines(conns: readonly McpStatusConn[]): string[] {
 export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): void {
 	pi.registerCommand("ch-status", {
 		description:
-			"List pi-chhound worktrees and baselines (index library). " +
+			"Show chunkhound config, index-root claim health, and live MCP connections. " +
 			"Usage: /ch-status [--prune] (--prune removes storage for gone worktrees and garbage baselines: " +
 			"incomplete, dead repo, superseded)",
 		handler: async (args, ctx) => {
@@ -221,10 +197,9 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 
 			const version = await chhoundVersion();
 			const sandboxes = listSandboxes(settings);
-			const baselines = listBaselines(settings);
 
 			ctx.ui.notify(
-				buildStatusLines({ version, settings, sandboxes, baselines, conns: listMcpConnections() }).join("\n"),
+				buildStatusLines({ version, settings, sandboxes, conns: listMcpConnections() }).join("\n"),
 				"info",
 			);
 		},
