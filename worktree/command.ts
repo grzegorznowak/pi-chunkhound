@@ -17,11 +17,11 @@ import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxBra
 import { loadSettings } from "../chhound/settings.js";
 import type { BaselineMeta, ChhoundSettings, PluginState, SandboxMeta } from "../chhound/types.js";
 import { connectEntry, resolveSandboxMatches } from "../mcp/command.js";
-import { disconnectMcp } from "../mcp/manager.js";
+import { disconnectMcp, getMcpConnection } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
-import { createManagerItemStore, createManagerSession, runManagerSession, type ManagerBaselineItem, type ManagerItem, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createManagerItemStore, createManagerSession, runManagerSession, sandboxMetaItem, type ManagerBaselineItem, type ManagerItem, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
 import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
@@ -1046,7 +1046,7 @@ async function oneGoLocation(
 // ── Manager: /chworktree ls ─────────────────────────────────────────────────
 
 /** Read-only adapter for the TUI manager. Collection failures deliberately render an empty list. */
-async function collectManagerItems(
+export async function collectManagerItems(
 	ctx: {
 		cwd: string;
 		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
@@ -1070,42 +1070,42 @@ async function collectManagerItems(
 		try {
 			if (ctx.sessionManager) records = rehydrateConnections(ctx.sessionManager.getBranch());
 		} catch { /* session log is optional */ }
-		// Report the total as soon as both listings are known, then stream
-		// completed items in library order (sandboxes from the probe pool finish
-		// out of order; buffering keeps the visible list prefix-stable).
-		const ordered: ManagerItem[] = [];
-		const buffered = new Map<number, ManagerItem>();
+		// Paint pass: every sandbox row from metadata alone (branch, paths, db
+		// size, liveness) before the first probe runs. The rows are then replaced
+		// in place at their index as the probe pool settles (out of order), so
+		// indices — and therefore selection/filtering — stay stable on every frame.
+		const ordered: ManagerItem[] = entries.map((entry) => sandboxMetaItem(entry, {
+			live: Boolean(getMcpConnection(path.basename(entry.dir))?.prefix),
+		}));
 		let done = 0;
-		const drain = (): void => {
-			let head = buffered.get(ordered.length);
-			while (head !== undefined) {
-				ordered.push(head);
-				buffered.delete(ordered.length - 1);
-				head = buffered.get(ordered.length);
-			}
-		};
-		const report = (): void => { onProgress?.({ done, total, items: ordered }); };
+		// Each event carries a snapshot: a consumer that keeps an event must never
+		// observe later probe results appearing in it retroactively.
+		const report = (): void => { onProgress?.({ done, total, items: [...ordered] }); };
 		report();
 		const result = await collectWorktreeList({
 			entries,
 			settings,
 			records,
 			onItem: (index, info) => {
-				buffered.set(index, managerItemFrom(info));
+				ordered[index] = managerItemFrom(info);
 				done++;
-				drain();
+				report();
+			},
+			// A slow gh lookup must not hold back the row's size/git cells: the row
+			// is already painted, and the PR state settles the same slot later.
+			onUpdate: (index, info) => {
+				ordered[index] = managerItemFrom(info);
 				report();
 			},
 		});
 		// Baselines stream after the sandboxes. A baseline db is a single file, so
 		// this is one stat per baseline — no checkout walk (there is no checkout).
 		const baselineItems: ManagerItem[] = [];
-		for (const [i, baseline] of baselines.entries()) {
+		for (const baseline of baselines) {
 			const item = await baselineItemFrom(baseline.dir, baseline.meta);
 			baselineItems.push(item);
-			buffered.set(entries.length + i, item);
+			ordered.push(item);
 			done++;
-			drain();
 			report();
 		}
 		return ordered.length === total ? ordered : [...result.infos.map(managerItemFrom), ...baselineItems];
@@ -1116,25 +1116,10 @@ async function collectManagerItems(
 
 /** Adapter from one collected list row to the renderer-free manager item. */
 function managerItemFrom(info: WtListInfo): ManagerSandboxItem {
-	const { entry } = info;
-	const meta = entry.meta;
-	const projectKey = meta.repoRoot ?? entry.dir;
-	const sandboxId = path.basename(entry.dir);
+	const pr = info.pr ? { number: info.pr.number, state: info.pr.state } : undefined;
 	return {
-		kind: "sandbox",
-		sandboxId,
-		projectKey,
-		projectLabel: path.basename(projectKey),
-		branch: meta.branch,
-		path: meta.worktree,
-		indexed: Boolean(entry.claimedRoot ?? readClaimedRoot(sandboxDbDir(entry.dir))),
-		gone: !fs.existsSync(meta.worktree),
-		live: Boolean(info.liveMcpPrefix),
-		...(info.pr ? { pr: { number: info.pr.number, state: info.pr.state } } : {}),
-		searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, info.pr ? `#${info.pr.number}` : ""].join(" "),
+		...sandboxMetaItem(info.entry, { live: info.liveMcpPrefix !== undefined, pr }),
 		sizeBytes: info.checkoutBytes,
-		dbBytes: entry.dbSizeBytes,
-		createdAt: meta.createdAt,
 	};
 }
 

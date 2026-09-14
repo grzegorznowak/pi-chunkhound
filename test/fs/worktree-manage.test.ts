@@ -2,9 +2,10 @@ import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
 import { runGit } from "../../chhound/git.js";
-import { dirSize, dirSizeAsync } from "../../chhound/sandbox.js";
+import { dirSize, dirSizeAsync, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxEntry } from "../../chhound/sandbox.js";
-import type { ChhoundSettings } from "../../chhound/types.js";
+import type { ChhoundSettings, SandboxMeta } from "../../chhound/types.js";
+import type { ManagerLoadProgress } from "../../worktree/manager-core.js";
 import { buildWorktreeListLines, collectWorktreeList, entryBadges, groupListInfos, probeWorktreeGit, removeWorktreeEntry } from "../../worktree/manage.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
@@ -329,6 +330,88 @@ describe("removal flow over a fixture library (throwaway)", () => {
 			await check(t, "gone: no stale registration left", (await git(["worktree", "list", "--porcelain"], { cwd: repo })).includes(wtGone) === false);
 
 			await check(t, "main untouched", (await runGit(["show-ref", "--verify", "--quiet", "refs/heads/main"], { cwd: repo })).code === 0);
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("manager collector paints metadata rows before the probes settle", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-manager-paint-");
+		try {
+			const home = await makeFakeHome(root);
+			const sandboxLibrary = path.join(root, "sandboxes");
+			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_SANDBOX_ROOT: sandboxLibrary } }));
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(checkout, { recursive: true });
+			fs.writeFileSync(path.join(checkout, "file.txt"), "0123456789");
+			const sandboxId = "sb-paint-00000001";
+			const stateDir = path.join(sandboxLibrary, ".state", sandboxId);
+			const dbPath = path.join(stateDir, "db");
+			fs.mkdirSync(dbPath, { recursive: true });
+			fs.writeFileSync(path.join(dbPath, "index.duckdb"), "x".repeat(2048));
+			writeSandboxMeta(stateDir, {
+				version: 1, worktree: checkout, repoRoot: path.join(root, "repo"), branch: "feat/paint", baseRef: "main",
+				baseCommit: "0".repeat(40), chhoundVersion: "test", createdAt: "2026-09-14T00:00:00.000Z",
+				copiedFrom: "", dbPath,
+			} satisfies SandboxMeta);
+			const progress: ManagerLoadProgress[] = [];
+			const { collectManagerItems } = await import("../../worktree/command.js");
+			const collected = await collectManagerItems({ cwd: root }, (update) => progress.push(update));
+			const first = progress[0]!;
+			await check(t, "the first event paints the row from metadata alone", first.done === 0 && first.total === 1 && first.items.length === 1 && first.items[0]?.kind === "sandbox", JSON.stringify({ done: first.done, total: first.total, items: first.items.length }));
+			const metaRow = first.items[0];
+			await check(t, "the meta row carries identity and db size but no checkout measurement", metaRow?.kind === "sandbox" && metaRow.branch === "feat/paint" && metaRow.dbBytes === dirSize(dbPath) && metaRow.sizeBytes === undefined, JSON.stringify(metaRow));
+			const settled = collected[0];
+			await check(t, "the settled row fills the checkout size at the same index", settled?.kind === "sandbox" && settled.sizeBytes === dirSize(checkout) && progress.length >= 2 && progress.every((update) => update.items.length === 1), JSON.stringify(progress.map((update) => update.done)));
+		} finally {
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a pull/N row reports before the gh state lands", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-manager-pr-update-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const ghShim = path.join(root, "gh-shim");
+			fs.mkdirSync(ghShim);
+			fs.writeFileSync(path.join(ghShim, "gh"), "#!/bin/sh\necho '{\"state\":\"MERGED\",\"isDraft\":false}'\n");
+			fs.chmodSync(path.join(ghShim, "gh"), 0o755);
+			process.env.PATH = ghShim + path.delimiter + (process.env.PATH ?? "");
+			const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
+			const repo = path.join(root, "repo");
+			fs.mkdirSync(repo);
+			const git = async (args: string[]): Promise<void> => {
+				const r = await runGit(args, { cwd: repo });
+				if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+			};
+			await git(["init", "-q", "-b", "main"]);
+			await git(["remote", "add", "origin", "https://github.com/acme/widgets.git"]);
+			const wt = path.join(root, "checkouts", "pull-9");
+			fs.mkdirSync(wt, { recursive: true });
+			fs.writeFileSync(path.join(wt, "file.txt"), "content\n");
+			const entry: SandboxEntry = {
+				dir: path.join(settings.sandboxRoot!, "sb-pr-00000009"),
+				stateDir: path.join(settings.sandboxRoot!, ".state", "sb-pr-00000009"),
+				dbSizeBytes: 0,
+				meta: {
+					version: 1, worktree: wt, repoRoot: repo, branch: "pull/9", baseRef: "main",
+					baseCommit: "0".repeat(40), chhoundVersion: "test", createdAt: "2026-09-14T00:00:00.000Z",
+					copiedFrom: "", dbPath: path.join(settings.sandboxRoot!, ".state", "sb-pr-00000009", "db"),
+				},
+			};
+			const events: string[] = [];
+			const result = await collectWorktreeList({
+				entries: [entry], settings, records: new Map(),
+				onItem: (_index, info) => events.push(info.pr === undefined ? "item:base" : "item:pr"),
+				onUpdate: (_index, info) => events.push(`update:${info.pr?.state ?? "none"}`),
+			});
+			await check(t, "the row reports before the gh state lands on the same index", events.join(",") === "item:base,update:MERGED", JSON.stringify(events));
+			await check(t, "the settled row and the gh counters carry the PR state", result.infos[0]?.pr?.state === "MERGED" && result.ghAttempted === 1 && result.ghFailed === 0, JSON.stringify({ pr: result.infos[0]?.pr, attempted: result.ghAttempted, failed: result.ghFailed }));
 		} finally {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });

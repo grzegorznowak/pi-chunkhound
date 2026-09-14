@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
-import type { ManagerBaselineItem, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
+import type { ManagerBaselineItem, ManagerLoadProgress, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
 import { check } from "../lib/checks.js";
 
 // The TUI presenter is live: Tab/Shift+Tab/arrows mutate the panel without
@@ -272,6 +272,39 @@ describe("worktree manager TUI presenter", () => {
 			await check(t, "resolved load shows every row and ends the loading line", complete.includes("beta · bugfix") && !/loading worktrees/i.test(complete), complete);
 			component!.handleInput("q");
 			await check(t, "loaded session still closes", (await pending as { kind?: string })?.kind === "close", JSON.stringify(session));
+		} finally { setKeybindings(original); }
+	});
+
+	test("metadata rows paint before the probes, then fill in place", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const metaOne: ManagerSandboxItem = { ...items[0]! };
+			const metaTwo: ManagerSandboxItem = { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" };
+			let stream: ((progress: ManagerLoadProgress) => void) | undefined;
+			let finishLoad: ((value: readonly ManagerSandboxItem[]) => void) | undefined;
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => {
+				stream = onProgress;
+				onProgress?.({ done: 0, total: 2, items: [metaOne, metaTwo] });
+				return new Promise<readonly ManagerSandboxItem[]>((resolve) => { finishLoad = resolve; });
+			}).next(session);
+			const firstFrame = component!.render(100).join("\n");
+			await check(t, "every metadata row and 0/2 progress paints on the first frame", firstFrame.includes("repo · feature") && firstFrame.includes("beta · bugfix") && firstFrame.includes("0/2") && /loading worktrees/i.test(firstFrame), firstFrame);
+			stream!({ done: 1, total: 2, items: [{ ...metaOne, dbBytes: 2048, sizeBytes: 1024 }, metaTwo] });
+			const filling = component!.render(100).join("\n");
+			await check(t, "a settled probe fills its own row while the pending row stays visible", filling.includes("1/2") && filling.includes("2.0 KB") && filling.includes("1.0 KB") && filling.includes("beta · bugfix"), filling);
+			finishLoad!([{ ...metaOne, dbBytes: 2048, sizeBytes: 1024 }, { ...metaTwo, dbBytes: 4096, sizeBytes: 2048 }]);
+			await new Promise((resolve) => setImmediate(resolve));
+			const complete = component!.render(100).join("\n");
+			await check(t, "the resolved load ends the loading line", !/loading worktrees/i.test(complete) && complete.includes("4.0 KB"), complete);
+			component!.handleInput("q");
+			await pending;
 		} finally { setKeybindings(original); }
 	});
 

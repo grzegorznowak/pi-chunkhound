@@ -1,4 +1,7 @@
-import { fmtSize } from "../chhound/sandbox.js";
+import * as fs from "node:fs";
+import path from "node:path";
+import { fmtSize, readClaimedRoot, sandboxDbDir } from "../chhound/sandbox.js";
+import type { SandboxEntry } from "../chhound/sandbox.js";
 
 export interface ManagerItemBase {
 	/** Stable identity of the source repo (sandbox repo root / baseline repoRoot). */
@@ -67,7 +70,13 @@ export interface ManagerSession {
 export type PanelAction = { kind: "close" } | { kind: "create"; positional?: string } | { kind: "back" };
 export type WizardOutcome = { kind: "created"; sandboxId: string } | { kind: "cancelled" } | { kind: "failed" };
 
-/** Incremental load state: completed items in library order (prefix-stable, never reordered). */
+/**
+ * Incremental load state: the row set in library order. The first event
+ * already carries every metadata row (identity, db size, liveness) so the
+ * panel can paint immediately; rows are replaced in place as the probes
+ * settle, and `done` counts settled rows (never reordered, never shrinking).
+ * `items` is a per-event snapshot, never the live collector array.
+ */
 export interface ManagerLoadProgress {
 	done: number;
 	total: number;
@@ -154,6 +163,38 @@ export function createManagerItemStore(
 			cached = undefined;
 			lastProgress = undefined;
 		},
+	};
+}
+
+/**
+ * Cheap manager row from a sandbox entry alone: identity, branch, paths, the
+ * (already measured) index-db size and liveness — no checkout walk, no git or
+ * gh probe. The manager paints these rows immediately, then replaces each one
+ * in place with the fully probed item (`sizeBytes`/`pr` arrive later). Both
+ * phases share this builder so the meta row can never drift from the final
+ * row's identity fields.
+ */
+export function sandboxMetaItem(
+	entry: SandboxEntry,
+	opts: { live?: boolean; pr?: { number: number; state: string } } = {},
+): ManagerSandboxItem {
+	const meta = entry.meta;
+	const projectKey = meta.repoRoot ?? entry.dir;
+	const sandboxId = path.basename(entry.dir);
+	return {
+		kind: "sandbox",
+		sandboxId,
+		projectKey,
+		projectLabel: path.basename(projectKey),
+		branch: meta.branch,
+		path: meta.worktree,
+		indexed: Boolean(entry.claimedRoot ?? readClaimedRoot(sandboxDbDir(entry.dir))),
+		gone: !fs.existsSync(meta.worktree),
+		live: Boolean(opts.live),
+		...(opts.pr ? { pr: opts.pr } : {}),
+		searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, opts.pr ? `#${opts.pr.number}` : ""].join(" "),
+		dbBytes: entry.dbSizeBytes,
+		createdAt: meta.createdAt,
 	};
 }
 

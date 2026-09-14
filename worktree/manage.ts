@@ -344,8 +344,11 @@ export async function collectWorktreeList(opts: {
 	records: ReadonlyMap<string, ConnectionRecord>;
 	livePrefixFor?: (id: string) => string | undefined;
 	concurrency?: number;
-	/** Called once per entry as soon as its probes settle (worker-completion order). */
+	/** Called once per entry when its row is displayable (checkout walk + git
+	 * probes settled); the row may still receive an `onUpdate` for its PR state. */
 	onItem?: (index: number, info: WtListInfo) => void;
+	/** Called when a late field (the gh PR state) lands on an already-reported row. */
+	onUpdate?: (index: number, info: WtListInfo) => void;
 }): Promise<WtListResult> {
 	const { entries, settings, records } = opts;
 	const livePrefixFor = opts.livePrefixFor ?? ((id: string) => getMcpConnection(id)?.prefix);
@@ -361,17 +364,23 @@ export async function collectWorktreeList(opts: {
 			const id = path.basename(entry.dir);
 			const wt = entry.meta.worktree;
 			const gone = wt.length === 0 || !fs.existsSync(wt);
+			// Start the gh lookup before the local probes: the network round-trip
+			// overlaps the checkout walk, so a slow/failing gh delays only the PR
+			// cell (via onUpdate), never the size/git cells.
+			const prTask = /^pull\/\d+$/.test(entry.meta.branch ?? "")
+				? (async (): Promise<WtPrState | undefined> => {
+					if (!(await prRepoIdentity(settings, entry.meta.repoRoot))) return undefined;
+					ghState.attempted++;
+					const pr = await ghPrState(settings, entry);
+					if (!pr) ghState.failed++;
+					return pr;
+				})()
+				: undefined;
 			let git: WtGitState | undefined;
 			let checkoutBytes = 0;
 			if (!gone) {
 				checkoutBytes = await dirSizeAsync(wt);
 				git = await probeWorktreeGit(wt, entry.meta.baseRef);
-			}
-			let pr: WtPrState | undefined;
-			if (/^pull\/\d+$/.test(entry.meta.branch ?? "") && (await prRepoIdentity(settings, entry.meta.repoRoot))) {
-				ghState.attempted++;
-				pr = await ghPrState(settings, entry);
-				if (!pr) ghState.failed++;
 			}
 			const live = livePrefixFor(id);
 			const record = records.get(id);
@@ -390,10 +399,14 @@ export async function collectWorktreeList(opts: {
 							return false;
 						}
 					})(),
-				pr,
 			};
 			infos[i] = info;
 			opts.onItem?.(i, info);
+			const pr = await prTask;
+			if (pr) {
+				info.pr = pr;
+				opts.onUpdate?.(i, info);
+			}
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(limit, entries.length) }, () => worker()));
