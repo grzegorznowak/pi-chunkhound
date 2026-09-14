@@ -329,4 +329,30 @@ describe("worktree manager TUI presenter", () => {
 			await pending;
 		} finally { setKeybindings(original); }
 	});
+
+	test("sandbox rows justify status labels and show checkout size", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const sized = [
+				{ ...items[0]!, sizeBytes: 2048 },
+				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta-tools", branch: "bugfix/longer", path: "/worktrees/two", searchText: "beta bugfix", live: true, pr: { number: 7, state: "OPEN" }, sizeBytes: 3 * 1024 * 1024 },
+			];
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => sized).next(session);
+			const frame = component!.render(100).join("\n");
+			const first = frame.split("\n").find((line) => line.includes("repo · feature"))!;
+			const second = frame.split("\n").find((line) => line.includes("beta-tools · bugfix/longer"))!;
+			await check(t, "every sandbox row shows its checkout size before drilling in", first.includes("checkout 2.0 KB") && second.includes("checkout 3.0 MB"), frame);
+			await check(t, "status labels share a justified column", first.indexOf("indexed") === second.indexOf("indexed") && first.indexOf("indexed") > 0, `${first}\n${second}`);
+			await check(t, "the size column lines up after the badges", first.indexOf("checkout") === second.indexOf("checkout"), `${first}\n${second}`);
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
 });

@@ -22,6 +22,8 @@ export interface ManagerRow {
 	projectKey?: string;
 	label: string;
 	badges: string[];
+	/** Sandbox rows only: the same "checkout <size>" text the details show. */
+	sizeLabel?: string;
 }
 
 export interface ManagerSession {
@@ -128,6 +130,11 @@ export function createManagerSession(initial: Partial<ManagerSession> = {}): Man
 	return { tab: "worktrees", row: 0, filter: "", preselect: undefined, ...initial };
 }
 
+/** The list row and the details share this exact "checkout <size>" text. */
+export function formatCheckoutSize(sizeBytes?: number): string | undefined {
+	return sizeBytes !== undefined ? `checkout ${fmtSize(sizeBytes)}` : undefined;
+}
+
 export function buildManagerRows(session: ManagerSession, items: readonly ManagerSandboxItem[]): ManagerRow[] {
 	const filter = session.filter.toLowerCase();
 	const matching = items.filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
@@ -153,11 +160,13 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 			...(item.live ? ["live"] : []),
 			...(item.pr ? ["pr"] : []),
 		];
+		const sizeLabel = formatCheckoutSize(item.sizeBytes);
 		rows.push({
 			kind: "sandbox",
 			sandboxId: item.sandboxId,
 			label: `${item.projectLabel} · ${item.branch}${item.pr ? ` · #${item.pr.number}` : ""}`,
 			badges,
+			...(sizeLabel ? { sizeLabel } : {}),
 		});
 	}
 	if (session.preselect) {
@@ -171,13 +180,14 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 }
 
 export function describeManagerItem(item: ManagerSandboxItem): string[] {
+	const checkout = formatCheckoutSize(item.sizeBytes);
 	const facts = [
 		`repo ${item.projectKey}`,
 		item.indexed ? "indexed" : "not indexed",
 		...(item.live ? ["live MCP"] : []),
 		...(item.gone ? ["checkout gone"] : []),
 		...(item.pr ? [`PR #${item.pr.number} ${item.pr.state}`] : []),
-		...(item.sizeBytes !== undefined ? [`checkout ${fmtSize(item.sizeBytes)}`] : []),
+		...(checkout ? [checkout] : []),
 		...(item.createdAt ? [`created ${item.createdAt.slice(0, 10)}`] : []),
 	];
 	return [`${item.sandboxId} · ${item.projectLabel} · ${item.branch}`, item.path, facts.join(" · ")];

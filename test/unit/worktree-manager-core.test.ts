@@ -97,6 +97,17 @@ describe("worktree manager core", () => {
 		await check(t, "details expose the read-only sandbox facts", lines.length === 3 && text.includes("beta-pr-42 · beta · pull/42") && text.includes("/worktrees/beta-pr-42/pull-42") && text.includes("repo /repos/beta") && text.includes("indexed") && text.includes("live MCP") && text.includes("PR #42 OPEN") && text.includes("checkout 2.0 KB") && text.includes("created 2026-09-14"), text);
 	});
 
+	test("sandbox rows carry the same checkout size text as the details", async (t) => {
+		const { buildManagerRows, createManagerSession, describeManagerItem } = await import("../../worktree/manager-core.js");
+		const sized = { ...items[0]!, sizeBytes: 2048 };
+		const row = buildManagerRows(createManagerSession(), [sized]).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
+		const details = describeManagerItem(sized).join("\n");
+		const rowLabel = row?.sizeLabel;
+		await check(t, "row size text is verbatim from the details", rowLabel === "checkout 2.0 KB" && details.includes(rowLabel), JSON.stringify({ row, details }));
+		const unsized = buildManagerRows(createManagerSession(), items).find((value: { sandboxId?: string }) => value.sandboxId === "alpha-123");
+		await check(t, "an unknown size stays absent rather than guessed", unsized?.sizeLabel === undefined, JSON.stringify(unsized));
+	});
+
 	test("created from projects switches to worktrees before redisplay", async (t) => {
 		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
 		const session = createManagerSession({ tab: "projects" });

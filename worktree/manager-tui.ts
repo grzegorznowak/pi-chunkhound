@@ -162,10 +162,23 @@ export function createWorktreeManagerTuiPresenter(
 						const emptyLine = !loading && !failed && rows.length === 0
 							? paint("dim", "(no projects yet — n starts a worktree in a repo)")
 							: undefined;
+						// Justified columns: labels and status badges share a width across
+						// rows so the badges (and then the checkout size) line up visually.
+						const badgeText = (item: ManagerRow): string => item.kind !== "create" && item.badges.length ? item.badges.join(" ") : "";
+						const labelWidth = rows.reduce((max, item) => Math.max(max, item.label.length), 0);
+						const badgeWidth = rows.reduce((max, item) => Math.max(max, badgeText(item).length), 0);
+						const rowLine = (item: ManagerRow, index: number): string => {
+							const marker = index === row ? paint("accent", "→ ") : "  ";
+							if (item.kind === "create") return `${marker}${item.label}`;
+							let line = `${marker}${item.label.padEnd(labelWidth)}`;
+							if (badgeWidth > 0) line += `  ${paint("dim", badgeText(item).padEnd(badgeWidth))}`;
+							if (item.sizeLabel) line += `  ${paint("dim", item.sizeLabel)}`;
+							return line;
+						};
 						return [
 							`${tabName("worktrees")}  ${tabName("projects")}`, "",
 							...(filterLine ? [filterLine, ""] : []),
-							...rows.map((item, index) => `${index === row ? paint("accent", "→ ") : "  "}${item.label}${item.kind !== "create" && item.badges.length ? `  ${paint("dim", item.badges.join(" "))}` : ""}`),
+							...rows.map(rowLine),
 							...(emptyLine ? ["", emptyLine] : []),
 							...(loadingLine ? ["", loadingLine] : []),
 							...(status.length ? ["", ...status] : []), "", footer,
