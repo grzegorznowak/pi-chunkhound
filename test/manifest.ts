@@ -11,6 +11,9 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
+	"command/worktree-manager-rpc.test.ts": { tier: "command", subject: "worktree-manager-rpc" },
+	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },
+	"command/worktree-wizard-outcome.test.ts": { tier: "command", subject: "worktree-wizard-outcome" },
 	"engine/baseline.test.ts": { tier: "engine", subject: "baseline" },
 	"engine/mcp-bridge.test.ts": { tier: "engine", subject: "mcp-bridge" },
 	"engine/mcp-restore.test.ts": { tier: "engine", subject: "mcp-restore" },
@@ -33,6 +36,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"unit/pr-identity.test.ts": { tier: "unit", subject: "pr-identity" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 	"unit/worktree-intent.test.ts": { tier: "unit", subject: "worktree-intent" },
+	"unit/worktree-manager-core.test.ts": { tier: "unit", subject: "worktree-manager-core" },
 	"unit/worktree-manage.test.ts": { tier: "unit", subject: "worktree-manage" },
 };
 

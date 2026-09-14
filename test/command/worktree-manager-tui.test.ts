@@ -1,0 +1,67 @@
+import { describe, test } from "node:test";
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
+import type { ManagerSession } from "../../worktree/manager-core.js";
+import { check } from "../lib/checks.js";
+
+// The TUI presenter is live: Tab/Shift+Tab/arrows mutate the panel without
+// ending the mount; only close/create (and future sub-screen back) resolve
+// next(). The shared session is committed when that action resolves.
+const items = [
+	{ sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" },
+];
+
+describe("worktree manager TUI presenter", () => {
+	test("live navigation commits to the session when the panel action resolves", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const tui = { requestRender() {} };
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory(tui, theme, getKeybindings(), resolve); }) } };
+			const presenter = createWorktreeManagerTuiPresenter(ctx, () => items);
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			// The real presenter may await its row provider before mounting; wait one
+			// macrotask so the fake ui.custom has constructed the component.
+			const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+			const rendered = presenter.next(session);
+			await tick();
+			const firstFrame = component!.render(100).join("\n");
+			await check(t, "footer advertises Tab and a close hint", /tab/i.test(firstFrame) && /esc|close/i.test(firstFrame), firstFrame);
+
+			component!.handleInput("\t");
+			component!.handleInput("q");
+			await check(t, "Tab stays live and the session commits on close", (await rendered as { kind?: string })?.kind === "close" && session.tab === "projects", JSON.stringify(session));
+
+			const back = presenter.next(session);
+			await tick();
+			component!.handleInput("\x1b[Z");
+			component!.handleInput("\x1b");
+			await check(t, "Shift+Tab and Esc commit the worktrees view", (await back as { kind?: string })?.kind === "close" && session.tab === "worktrees", JSON.stringify(session));
+
+			session.row = 0;
+			const moved = presenter.next(session);
+			await tick();
+			component!.handleInput("\x1b[B");
+			component!.handleInput("\x1b[A");
+			component!.handleInput("q");
+			await check(t, "Down then Up returns to the create row", (await moved as { kind?: string })?.kind === "close" && session.row === 0, JSON.stringify(session));
+
+			const down = presenter.next(session);
+			await tick();
+			component!.handleInput("\x1b[B");
+			component!.handleInput("q");
+			await check(t, "Down reaches the first sandbox row", (await down as { kind?: string })?.kind === "close" && session.row === 1, JSON.stringify(session));
+
+			session.row = 0;
+			const create = presenter.next(session);
+			await tick();
+			component!.handleInput("\n");
+			await check(t, "Enter on the selected create row requests creation", (await create as { kind?: string })?.kind === "create", JSON.stringify(session));
+		} finally {
+			setKeybindings(original);
+		}
+	});
+});
