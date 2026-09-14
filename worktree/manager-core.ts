@@ -1,3 +1,5 @@
+import { fmtSize } from "../chhound/sandbox.js";
+
 export interface ManagerSandboxItem {
 	sandboxId: string;
 	projectKey: string;
@@ -14,9 +16,10 @@ export interface ManagerSandboxItem {
 }
 
 export interface ManagerRow {
-	kind: "create" | "sandbox";
+	kind: "create" | "sandbox" | "project";
 	/** Present on sandbox rows; the create row has none. */
 	sandboxId?: string;
+	projectKey?: string;
 	label: string;
 	badges: string[];
 }
@@ -40,9 +43,23 @@ export function createManagerSession(initial: Partial<ManagerSession> = {}): Man
 
 export function buildManagerRows(session: ManagerSession, items: readonly ManagerSandboxItem[]): ManagerRow[] {
 	const filter = session.filter.toLowerCase();
+	const matching = items.filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
+	if (session.tab === "projects") {
+		const projects = new Map<string, { label: string; count: number }>();
+		for (const item of matching) {
+			const project = projects.get(item.projectKey);
+			if (project) project.count++;
+			else projects.set(item.projectKey, { label: item.projectLabel, count: 1 });
+		}
+		return [...projects].map(([projectKey, project]) => ({
+			kind: "project",
+			projectKey,
+			label: project.label,
+			badges: [`${project.count} ${project.count === 1 ? "worktree" : "worktrees"}`],
+		}));
+	}
 	const rows: ManagerRow[] = [{ kind: "create", label: "+ new worktree…", badges: [] }];
-	for (const item of items) {
-		if (filter && !item.searchText.toLowerCase().includes(filter)) continue;
+	for (const item of matching) {
 		const badges = [
 			...(item.indexed ? ["indexed"] : []),
 			...(item.gone ? ["gone"] : []),
@@ -66,6 +83,19 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 	return rows;
 }
 
+export function describeManagerItem(item: ManagerSandboxItem): string[] {
+	const facts = [
+		`repo ${item.projectKey}`,
+		item.indexed ? "indexed" : "not indexed",
+		...(item.live ? ["live MCP"] : []),
+		...(item.gone ? ["checkout gone"] : []),
+		...(item.pr ? [`PR #${item.pr.number} ${item.pr.state}`] : []),
+		...(item.sizeBytes !== undefined ? [`checkout ${fmtSize(item.sizeBytes)}`] : []),
+		...(item.createdAt ? [`created ${item.createdAt.slice(0, 10)}`] : []),
+	];
+	return [`${item.sandboxId} · ${item.projectLabel} · ${item.branch}`, item.path, facts.join(" · ")];
+}
+
 export async function runManagerSession(
 	_ctx: unknown,
 	presenter: ManagerPresenter,
@@ -77,6 +107,9 @@ export async function runManagerSession(
 		if (!action || action.kind === "close") return;
 		if (action.kind === "back") continue;
 		const outcome = deps.runCreate ? await deps.runCreate(session, action.positional) : { kind: "failed" as const };
-		if (outcome.kind === "created") session.preselect = outcome.sandboxId;
+		if (outcome.kind === "created") {
+			session.preselect = outcome.sandboxId;
+			session.tab = "worktrees";
+		}
 	}
 }

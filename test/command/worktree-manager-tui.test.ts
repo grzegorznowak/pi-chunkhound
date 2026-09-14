@@ -65,6 +65,78 @@ describe("worktree manager TUI presenter", () => {
 		}
 	});
 
+	test("inline filter edits loaded rows and Esc clears in two stages", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const allItems = [items[0]!, { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" }];
+			let providerCalls = 0;
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const presenter = createWorktreeManagerTuiPresenter(ctx as never, () => { providerCalls++; return allItems; });
+			const session: ManagerSession = { tab: "worktrees", row: 1, filter: "beta" };
+			const pending = presenter.next(session);
+			await new Promise((resolve) => setImmediate(resolve));
+			component!.handleInput("/"); component!.handleInput("x"); component!.handleInput("\x7f");
+			await check(t, "draft is seeded and printable/backspace edit it", component!.render(100).join("\n").includes("filter> beta▮"), component!.render(100).join("\n"));
+			component!.handleInput("\x1b");
+			let frame = component!.render(100).join("\n");
+			await check(t, "first Esc clears draft but preserves applied rows", frame.includes("filter> ▮") && frame.includes("beta") && !frame.includes("repo · feature"), frame);
+			component!.handleInput("\x1b");
+			frame = component!.render(100).join("\n");
+			await check(t, "second Esc closes editor and clears applied filter", !frame.includes("filter>") && frame.includes("repo · feature") && frame.includes("beta · bugfix"), frame);
+			component!.handleInput("/"); component!.handleInput(" "); component!.handleInput("b"); component!.handleInput("e"); component!.handleInput("t"); component!.handleInput("a"); component!.handleInput(" "); component!.handleInput("\n");
+			frame = component!.render(100).join("\n");
+			await check(t, "Enter trims, filters, and anchors the create row", frame.includes("→ + new worktree") && !frame.includes("repo · feature") && session.filter === "beta" && session.row === 0, JSON.stringify({ frame, session }));
+			await check(t, "filter interaction does not re-probe", providerCalls === 1, `calls=${providerCalls}`);
+			component!.handleInput("q"); await pending;
+			await check(t, "filter session commits on close", session.filter === "beta" && session.row === 0, JSON.stringify(session));
+		} finally { setKeybindings(original); }
+	});
+
+	test("projects drill down and sandbox details stay in the panel", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const allItems = [items[0]!, { ...items[0]!, sandboxId: "two", branch: "other", path: "/worktrees/two", searchText: "repo other" }];
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => typeof component) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => allItems).next(session);
+			await new Promise((resolve) => setImmediate(resolve));
+			component!.handleInput("\t");
+			await check(t, "projects render grouped count", component!.render(100).join("\n").includes("repo  2 worktrees"), component!.render(100).join("\n"));
+			component!.handleInput("\n");
+			await check(t, "project Enter drills into anchored filtered worktrees", session.tab === "worktrees" && session.filter === "repo" && session.row === 0 && component!.render(100).join("\n").includes("→ + new worktree"), JSON.stringify(session));
+			component!.handleInput("\x1b[B"); component!.handleInput("\n");
+			const detail = component!.render(100).join("\n");
+			await check(t, "sandbox Enter renders details without resolving", detail.includes("feature") && detail.includes("/worktrees/one") && detail.includes("read-only"), detail);
+			component!.handleInput("q");
+			await check(t, "q closes after details", (await pending as { kind?: string }).kind === "close", JSON.stringify(session));
+		} finally { setKeybindings(original); }
+	});
+
+	test("n creates in the selected row project", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			for (const mode of ["create", "sandbox", "project"] as const) {
+				let component: { handleInput(data: string): void } | undefined;
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+				const session: ManagerSession = { tab: mode === "project" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "" };
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
+				await new Promise((resolve) => setImmediate(resolve)); component!.handleInput("n");
+				const action = await pending as { kind: string; positional?: string };
+				await check(t, `${mode} n positional`, action.kind === "create" && action.positional === (mode === "create" ? undefined : "/repo"), JSON.stringify(action));
+			}
+		} finally { setKeybindings(original); }
+	});
+
 	test("mounts a loading frame before rows resolve and ignores late rows after close", async (t) => {
 		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
 		const original = getKeybindings();

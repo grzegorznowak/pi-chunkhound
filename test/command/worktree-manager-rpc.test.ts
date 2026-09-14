@@ -30,6 +30,34 @@ describe("worktree manager RPC presenter", () => {
 		await check(t, "close maps to close action with one additional call", close?.kind === "close" && calls === 2, JSON.stringify({ close, calls }));
 	});
 
+	test("view switching and project selection mutate the shared session", async (t) => {
+		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
+		const session: ManagerSession = { tab: "worktrees", row: 2, filter: "", preselect: undefined };
+		const calls: Array<{ title: string; options: string[] }> = [];
+		const responses = ["view: projects", "repo (1 worktree)"];
+		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
+		const presenter = createWorktreeManagerRpcPresenter(ctx, items);
+		const switched = await presenter.next(session);
+		await check(t, "view option switches in one select", switched.kind === "back" && calls.length === 1 && session.tab === "projects" && session.row === 0, JSON.stringify({ calls, session }));
+		const project = await presenter.next(session);
+		await check(t, "projects menu has create and grouped project", calls[1]!.options.filter((option) => option === "+ new worktree…").length === 1 && calls[1]!.options.includes("repo (1 worktree)"), JSON.stringify(calls[1]));
+		await check(t, "project selection filters worktrees", project.kind === "back" && session.tab === "worktrees" && session.filter === "repo" && session.row === 0, JSON.stringify(session));
+	});
+
+	test("sandbox details offer only back and close", async (t) => {
+		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
+		for (const detailChoice of ["back", "close", undefined]) {
+			const calls: Array<{ title: string; options: string[] }> = [];
+			const ctx = { ui: { select: async (title: string, options: string[]) => {
+				calls.push({ title, options });
+				return calls.length === 1 ? "repo · feature (indexed)" : detailChoice;
+			} } };
+			const action = await createWorktreeManagerRpcPresenter(ctx, items).next({ tab: "worktrees", row: 0, filter: "" });
+			await check(t, `${String(detailChoice)} detail result`, action.kind === (detailChoice === "close" ? "close" : "back"), JSON.stringify(action));
+			await check(t, `${String(detailChoice)} uses a two-select detail`, calls.length === 2 && calls[1]!.title.includes("Worktree details") && calls[1]!.title.includes("one") && calls[1]!.title.includes("/worktrees/one") && calls[1]!.options.join(",") === "back,close", JSON.stringify(calls));
+		}
+	});
+
 	test("rows are obtained afresh for every presentation", async (t) => {
 		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
 		let version = 0;

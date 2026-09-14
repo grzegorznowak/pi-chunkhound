@@ -78,6 +78,37 @@ describe("worktree manager core", () => {
 		await check(t, "exactly one redisplay", calls === 2, `calls=${calls}`);
 	});
 
+	test("projects group matching worktrees in first-appearance order", async (t) => {
+		const { buildManagerRows, createManagerSession } = await import("../../worktree/manager-core.js");
+		const grouped = [...items, { ...items[0]!, sandboxId: "alpha-456", branch: "feature/two", searchText: "alpha feature two" }];
+		const session = createManagerSession({ tab: "projects" });
+		const rows = buildManagerRows(session, grouped);
+		await check(t, "projects have no create row and retain order", rows.map((row) => row.label).join(",") === "alpha,beta,gone" && rows.every((row) => row.kind === "project"), JSON.stringify(rows));
+		await check(t, "project keys and aggregate badges survive", rows[0]?.projectKey === "/repos/alpha" && rows[0]?.badges.includes("2 worktrees") === true && rows[1]?.badges.includes("1 worktree") === true, JSON.stringify(rows));
+		session.filter = "pull 42";
+		const filtered = buildManagerRows(session, grouped);
+		await check(t, "filter applies before grouping", filtered.length === 1 && filtered[0]?.label === "beta", JSON.stringify(filtered));
+	});
+
+	test("sandbox details include identity, path, and optional facts", async (t) => {
+		const { describeManagerItem } = await import("../../worktree/manager-core.js");
+		const lines = describeManagerItem({ ...items[1]!, sizeBytes: 2048, createdAt: "2026-09-14T12:00:00Z" });
+		const text = lines.join("\n");
+		await check(t, "details expose the read-only sandbox facts", lines.length === 3 && text.includes("beta-pr-42 · beta · pull/42") && text.includes("/worktrees/beta-pr-42/pull-42") && text.includes("repo /repos/beta") && text.includes("indexed") && text.includes("live MCP") && text.includes("PR #42 OPEN") && text.includes("checkout 2.0 KB") && text.includes("created 2026-09-14"), text);
+	});
+
+	test("created from projects switches to worktrees before redisplay", async (t) => {
+		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
+		const session = createManagerSession({ tab: "projects" });
+		let calls = 0;
+		await runManagerSession({}, { next: async (current: typeof session) => {
+			calls++;
+			if (calls === 1) return { kind: "create" } as const;
+			await check(t, "redisplay sees worktrees and pending id", current.tab === "worktrees" && current.preselect === "fresh", JSON.stringify(current));
+			return { kind: "close" } as const;
+		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "fresh" }) });
+	});
+
 	test("close and an absent action terminate", async (t) => {
 		const { runManagerSession } = await import("../../worktree/manager-core.js");
 		for (const finalAction of [{ kind: "close" } as const, undefined]) {
