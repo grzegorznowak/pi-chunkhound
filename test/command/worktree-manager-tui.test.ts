@@ -163,4 +163,82 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(original);
 		}
 	});
+
+	test("keyboard-protocol encoded keys drive the panel", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			// A live pi TUI negotiates Kitty CSI-u / modifyOtherKeys at startup:
+			// Esc/Enter/q arrive encoded, so raw "\x1b"/"\n"/"q" checks miss them
+			// (the stuck-panel bug). These sequences pin the real terminal path.
+			const twoItems = [items[0]!, { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" }];
+			const mount = async (row = 0) => {
+				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+				const session: ManagerSession = { tab: "worktrees", row, filter: "" };
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => twoItems).next(session);
+				await new Promise((resolve) => setImmediate(resolve));
+				return { component: component!, pending, session };
+			};
+
+			const kittyEsc = await mount();
+			kittyEsc.component.handleInput("\x1b[27u");
+			await check(t, "Kitty Esc closes the panel", (await kittyEsc.pending as { kind?: string })?.kind === "close", JSON.stringify(kittyEsc.session));
+
+			const modifyOtherEsc = await mount();
+			modifyOtherEsc.component.handleInput("\x1b[27;1;27~");
+			await check(t, "modifyOtherKeys Esc closes the panel", (await modifyOtherEsc.pending as { kind?: string })?.kind === "close", "");
+
+			const kittyCtrlC = await mount();
+			kittyCtrlC.component.handleInput("\x1b[99;5u");
+			await check(t, "Kitty Ctrl+C closes the panel", (await kittyCtrlC.pending as { kind?: string })?.kind === "close", "");
+
+			const kittyQ = await mount();
+			kittyQ.component.handleInput("\x1b[113u");
+			await check(t, "Kitty q closes the panel", (await kittyQ.pending as { kind?: string })?.kind === "close", "");
+
+			const kittyEnter = await mount();
+			kittyEnter.component.handleInput("\x1b[13u");
+			await check(t, "Kitty Enter selects the create row", (await kittyEnter.pending as { kind?: string })?.kind === "create", "");
+
+			const kittyN = await mount(1);
+			kittyN.component.handleInput("\x1b[110u");
+			const nAction = await kittyN.pending as { kind: string; positional?: string };
+			await check(t, "Kitty n creates in the selected project", nAction.kind === "create" && nAction.positional === "/repo", JSON.stringify(nAction));
+
+			const kittyFilter = await mount();
+			for (const sequence of ["\x1b[47u", "\x1b[98u", "\x1b[101u", "\x1b[116u", "\x1b[97u", "\x1b[13u"]) kittyFilter.component.handleInput(sequence);
+			const frame = kittyFilter.component.render(100).join("\n");
+			await check(t, "Kitty-encoded / typing filters the list", frame.includes("→ + new worktree") && !frame.includes("repo · feature") && kittyFilter.session.filter === "beta", JSON.stringify({ frame, session: kittyFilter.session }));
+			kittyFilter.component.handleInput("\x1b[113u");
+			await check(t, "filter session commits on close", (await kittyFilter.pending as { kind?: string })?.kind === "close" && kittyFilter.session.filter === "beta", JSON.stringify(kittyFilter.session));
+		} finally { setKeybindings(original); }
+	});
+
+	test("loading frame offers creation immediately and shows progression", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let resolveRows: ((value: typeof items) => void) | undefined;
+			const rows = new Promise<typeof items>((resolve) => { resolveRows = resolve; });
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => rows).next(session);
+			const firstFrame = component!.render(100).join("\n");
+			await check(t, "create row and spinner are available before the library loads", firstFrame.includes("+ new worktree…") && /loading worktrees/i.test(firstFrame) && /creates without waiting/i.test(firstFrame), firstFrame);
+			t.mock.timers.tick(250);
+			await check(t, "spinner advances while loading", component!.render(100).join("\n") !== firstFrame, component!.render(100).join("\n"));
+			component!.handleInput("\x1b[13u");
+			await check(t, "Enter creates without waiting for rows", (await pending as { kind?: string })?.kind === "create", JSON.stringify(session));
+			resolveRows!(items);
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			t.mock.timers.reset();
+			setKeybindings(original);
+		}
+	});
 });
