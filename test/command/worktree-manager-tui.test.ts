@@ -1,7 +1,10 @@
 import { describe, test } from "node:test";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import type { ManagerBaselineItem, ManagerLoadProgress, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
 import { check } from "../lib/checks.js";
+import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
 // The TUI presenter is live: Tab/Shift+Tab/arrows mutate the panel without
 // ending the mount; only close/create (and future sub-screen back) resolve
@@ -469,5 +472,68 @@ describe("worktree manager TUI presenter", () => {
 			const action = await pending as { kind: string; positional?: string };
 			await check(t, "n without a selection still opens the create wizard", action.kind === "create" && action.positional === undefined, JSON.stringify(action));
 		} finally { setKeybindings(original); }
+	});
+
+	test("a session keeps one manager store across command invocations", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-cmd-manager-store-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const { registerWorktreeCommand } = await import("../../worktree/command.js");
+			const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+			const { loadSettings } = await import("../../chhound/settings.js");
+			const { sandboxRoot } = await import("../../chhound/paths.js");
+			const { writeSandboxMeta } = await import("../../chhound/sandbox.js");
+			let stores = 0;
+			let collects = 0;
+			let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+			const pi = { registerCommand(_name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) { handler = def.handler; } };
+			registerWorktreeCommand(pi as never, {} as never, {
+				createItemStore: (loader) => {
+					stores++;
+					return createManagerItemStore((onProgress) => {
+						collects++;
+						return loader(onProgress);
+					});
+				},
+			});
+			const openManager = async (): Promise<void> => {
+				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+				const ctx = {
+					cwd: root,
+					mode: "tui",
+					hasUI: true,
+					ui: {
+						notify() {},
+						custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+							component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve);
+						}),
+					},
+				};
+				const pending = handler!("", ctx as never);
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				component!.handleInput("q");
+				await pending;
+			};
+
+			await openManager();
+			await check(t, "the first open creates the session store and collects once", stores === 1 && collects === 1, `stores=${stores} collects=${collects}`);
+			await openManager();
+			await check(t, "a reopen with an unchanged library reuses the cached collect", stores === 1 && collects === 1, `stores=${stores} collects=${collects}`);
+			const { settings } = loadSettings(root);
+			const sandboxId = "sb-new-00000001";
+			const sandboxState = path.join(sandboxRoot(settings), ".state", sandboxId);
+			writeSandboxMeta(sandboxState, {
+				version: 1, worktree: path.join(root, "not-checked-out"), repoRoot: path.join(root, "repo"), branch: "feat",
+				baseRef: "main", baseCommit: "0000000000000000000000000000000000000000", chhoundVersion: "test",
+				createdAt: "2026-09-14T00:00:00.000Z", copiedFrom: "", dbPath: path.join(sandboxState, "db"),
+			});
+			await openManager();
+			await check(t, "a library change recollects into the same session store", stores === 1 && collects === 2, `stores=${stores} collects=${collects}`);
+		} finally {
+			applyEnv(env);
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });

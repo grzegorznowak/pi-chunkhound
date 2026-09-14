@@ -246,6 +246,40 @@ describe("worktree manager core", () => {
 		await check(t, "the live subscriber still receives progress", published.join(",") === "0", JSON.stringify(published));
 	});
 
+	test("an unchanged fingerprint reuses the cached collect", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		let calls = 0;
+		const store = createManagerItemStore(async () => { calls++; return items; });
+		const first = store.load(undefined, "library-a");
+		await check(t, "the first stamped load collects", !Array.isArray(first) && calls === 1, `calls=${calls}`);
+		await first;
+		const hit = store.load(undefined, "library-a");
+		await check(t, "a reopen with the same fingerprint is a synchronous cache hit", Array.isArray(hit) && hit === items && calls === 1, `calls=${calls}`);
+		const changed = store.load(undefined, "library-b");
+		await check(t, "a changed fingerprint drops the cache and recollects", !Array.isArray(changed) && calls === 2, `calls=${calls}`);
+		await changed;
+		await check(t, "the recollected result is cached under the new fingerprint", Array.isArray(store.load(undefined, "library-b")) && calls === 2, `calls=${calls}`);
+	});
+
+	test("a fingerprint change while collecting expires the stale load", async (t) => {
+		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
+		let calls = 0;
+		const resolvers: Array<(value: typeof items) => void> = [];
+		const store = createManagerItemStore(() => {
+			calls++;
+			return new Promise<typeof items>((resolve) => { resolvers.push(resolve); });
+		});
+		const stale = store.load(undefined, "library-a");
+		const fresh = store.load(undefined, "library-b");
+		await check(t, "the changed fingerprint starts a fresh collect instead of joining the stale one", calls === 2 && !Array.isArray(fresh), `calls=${calls}`);
+		resolvers[0]!([items[0]!]);
+		await stale;
+		const freshItems = [items[1]!];
+		resolvers[1]!(freshItems);
+		const resolved = await fresh;
+		await check(t, "the stale result is discarded and the fresh one cached", resolved === freshItems && Array.isArray(store.load(undefined, "library-b")) && calls === 2, `calls=${calls}`);
+	});
+
 	test("a failed collect is not cached and the next load retries", async (t) => {
 		const { createManagerItemStore } = await import("../../worktree/manager-core.js");
 		let calls = 0;

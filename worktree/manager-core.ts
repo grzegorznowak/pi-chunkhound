@@ -94,9 +94,19 @@ export interface ManagerPresenter {
  * close/reopen never launches a second collect. `invalidate()` drops the
  * cache — create success calls it so the new sandbox is collected for the
  * preselect.
+ *
+ * `load` also takes an optional `fingerprint`: a cheap digest of the inputs
+ * the loader reads (library identity/liveness, not probe results). When it
+ * differs from the digest of the cached/in-flight result, the cache is
+ * dropped and a fresh collect starts — so a reopen after a create/remove (or
+ * a liveness change) never serves a stale list, while a reopen with nothing
+ * changed never pays for the probes. A load without a fingerprint opts out.
  */
 export interface ManagerItemStore {
-	load(onProgress?: (progress: ManagerLoadProgress) => void): readonly ManagerItem[] | Promise<readonly ManagerItem[]>;
+	load(
+		onProgress?: (progress: ManagerLoadProgress) => void,
+		fingerprint?: string,
+	): readonly ManagerItem[] | Promise<readonly ManagerItem[]>;
 	invalidate(): void;
 }
 
@@ -104,7 +114,8 @@ export function createManagerItemStore(
 	loader: (onProgress?: (progress: ManagerLoadProgress) => void) => Promise<readonly ManagerItem[]>,
 ): ManagerItemStore {
 	let cached: readonly ManagerItem[] | undefined;
-	let inFlight: { promise: Promise<readonly ManagerItem[]>; generation: number } | undefined;
+	let cachedFingerprint: string | undefined;
+	let inFlight: { promise: Promise<readonly ManagerItem[]>; generation: number; fingerprint?: string } | undefined;
 	let generation = 0;
 	let lastProgress: ManagerLoadProgress | undefined;
 	const listeners = new Set<(progress: ManagerLoadProgress) => void>();
@@ -115,8 +126,24 @@ export function createManagerItemStore(
 		lastProgress = progress;
 		for (const listener of listeners) listener(progress);
 	};
+	/** Digest of the collect that the current cache/in-flight state describes. */
+	const liveFingerprint = (): string | undefined => {
+		if (cached !== undefined) return cachedFingerprint;
+		if (inFlight && inFlight.generation === generation) return inFlight.fingerprint;
+		return undefined;
+	};
 	return {
-		load(onProgress) {
+		load(onProgress, fingerprint) {
+			// Inputs changed under the cached/in-flight collect: expiring it here
+			// is equivalent to invalidate() — the generation guard discards the old
+			// load's result and progress.
+			const live = liveFingerprint();
+			if (fingerprint !== undefined && live !== undefined && live !== fingerprint) {
+				generation++;
+				cached = undefined;
+				cachedFingerprint = undefined;
+				lastProgress = undefined;
+			}
 			if (cached) return cached;
 			if (onProgress) {
 				listeners.add(onProgress);
@@ -134,6 +161,7 @@ export function createManagerItemStore(
 				return inFlight.promise;
 			}
 			const startedAt = generation;
+			const startedFingerprint = fingerprint;
 			const pending = loader((progress) => {
 				// Progress from an expired load is stale too: it may describe a
 				// library that predates the change that invalidated it.
@@ -144,6 +172,7 @@ export function createManagerItemStore(
 					if (inFlight?.promise === pending) inFlight = undefined;
 					if (generation === startedAt) {
 						cached = items;
+						cachedFingerprint = startedFingerprint;
 						lastProgress = { done: items.length, total: items.length, items };
 					}
 					return items;
@@ -155,12 +184,13 @@ export function createManagerItemStore(
 					throw error;
 				},
 			);
-			inFlight = { promise: pending, generation: startedAt };
+			inFlight = { promise: pending, generation: startedAt, fingerprint: startedFingerprint };
 			return pending;
 		},
 		invalidate() {
 			generation++;
 			cached = undefined;
+			cachedFingerprint = undefined;
 			lastProgress = undefined;
 		},
 	};

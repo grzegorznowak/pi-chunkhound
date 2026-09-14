@@ -190,7 +190,23 @@ async function freeBranchName(repoRoot: string, base: string): Promise<string> {
 	throw new Error(`could not derive a free branch name from '${base}'`);
 }
 
-export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): void {
+/** Context the manager collector reads — kept as a mutable holder because the
+ * session's item store outlives any single command invocation. */
+type ManagerCtx = Parameters<typeof collectManagerItems>[0];
+
+export interface WorktreeCommandDeps {
+	/** Test seam: builds the session-lifetime manager item store. */
+	createItemStore?: typeof createManagerItemStore;
+}
+
+export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, deps: WorktreeCommandDeps = {}): void {
+	// The manager's item store lives for the whole session (one store per
+	// registered command), so closing and re-running /chworktree reuses the last
+	// collect while the library fingerprint is unchanged. The loader reads the
+	// current invocation's ctx through this holder — a store that outlives one
+	// invocation must never capture that invocation's ctx.
+	let managerCtx: ManagerCtx | undefined;
+	let managerStore: ReturnType<typeof createManagerItemStore> | undefined;
 	pi.registerCommand("chworktree", {
 		description:
 			"Create a git worktree with its own chunkhound index, or manage the worktree library. " +
@@ -220,6 +236,8 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 				const rest = positionals.slice(1);
 				if (verb === "remove") {
 					await runWorktreeRemove(pi, ctx, rest, flags);
+					// The library changed; the session cache must not serve the removed row.
+					managerStore?.invalidate();
 					return;
 				}
 				await runWorktreeList(ctx, rest, flags);
@@ -238,11 +256,15 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 
 			// ── TUI manager: the bare command owns one session across remounts. The
 			// item store lives in this closure, so wizard cancel/failure returns to
-			// the cached list without recomputing; create success invalidates it. ──
+			// the cached list without recomputing; create success invalidates it. A
+			// fingerprint check drops the cache when the library changed underneath
+			// (create/remove/liveness), so a reopen never serves a stale list. ──
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
+				managerCtx = ctx;
+				managerStore ??= (deps.createItemStore ?? createManagerItemStore)((onProgress) => collectManagerItems(managerCtx!, onProgress));
+				const store = managerStore;
 				const session = createManagerSession();
-				const store = createManagerItemStore((onProgress) => collectManagerItems(ctx, onProgress));
-				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, (_session, onProgress) => store.load(onProgress), { onRefresh: () => store.invalidate() }), {
+				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, (_session, onProgress) => store.load(onProgress, managerFingerprint(managerCtx!)), { onRefresh: () => store.invalidate() }), {
 					session,
 					onCreated: () => store.invalidate(),
 					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
@@ -1111,6 +1133,31 @@ export async function collectManagerItems(
 		return ordered.length === total ? ordered : [...result.infos.map(managerItemFrom), ...baselineItems];
 	} catch {
 		return [];
+	}
+}
+
+/**
+ * Cheap change detector for the session's manager item cache: sandbox/baseline
+ * row identity and liveness, never probe results. A reopened manager recollects
+ * only when the library changed (create/remove, checkout presence, a live MCP
+ * prefix); sizes, git and PR facts refresh via `r` or such a library change.
+ */
+function managerFingerprint(ctx: ManagerCtx): string {
+	try {
+		const { settings } = loadSettings(ctx.cwd);
+		const parts = [`cwd:${ctx.cwd}`, `root:${sandboxRoot(settings)}`];
+		for (const entry of listSandboxes(settings)) {
+			const id = path.basename(entry.dir);
+			parts.push(["sandbox", id, entry.meta.createdAt, fs.existsSync(entry.meta.worktree) ? "present" : "gone", getMcpConnection(id)?.prefix ?? ""].join(":"));
+		}
+		for (const baseline of listBaselines(settings).filter((value) => value.meta !== undefined).sort((a, b) => a.dir.localeCompare(b.dir))) {
+			parts.push(`baseline:${baseline.dir}:${baseline.meta?.updatedAt ?? ""}`);
+		}
+		return parts.join("\n");
+	} catch {
+		// An unreadable library cannot be compared — a constant stamp avoids a
+		// full recollect on every open while the error persists.
+		return "unreadable";
 	}
 }
 
