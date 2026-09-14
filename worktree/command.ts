@@ -12,6 +12,7 @@ import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
+import { promptPick } from "../chhound/pick-panel.js";
 import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
 import { findConflictingIndexed, indexedWorktreePaths, listSandboxes, sandboxBranchLabel, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta, dirSize, dirSizeAsync, readClaimedRoot } from "../chhound/sandbox.js";
 import { loadSettings } from "../chhound/settings.js";
@@ -807,7 +808,8 @@ async function pickRepoInteractive(ctx: WizardCtx, deps: Pick<WizardDeps, "suppr
 		if (typeof s.meta.repoRoot === "string") addRepo(s.meta.repoRoot, "indexed");
 	}
 	const options = [...candidates.values(), PICK_PR, OTHER_REPO];
-	const choice = await ctx.ui.select(REPO_PICKER_TITLE, options);
+	// Plugin-owned panel (band cursor like the manager); ui.select in RPC/print.
+	const choice = await promptPick(ctx.ui, { title: REPO_PICKER_TITLE, options });
 	if (choice === undefined) {
 		notifyCancelled(ctx, deps);
 		return { kind: "cancelled" };
@@ -1266,7 +1268,8 @@ async function runWorktreeList(
  * deleted (branchDeleteIntent); pull/N and remote-ref slots never are.
  *
  * Interactive (no target, UI present): pick from the sandbox list
- * (ui.select), then a confirm dialog with the full impact preview
+ * (the plugin's band-highlighted picker; native select without ctx.ui.custom),
+ * then a confirm dialog with the full impact preview
  * (removePreviewLines) — including what is NOT touched. Headless without a
  * target: usage + hint. One-go (explicit target): no confirm (assumed
  * default the operator accepted) — the outcome summary reports each step.
@@ -1280,6 +1283,7 @@ async function runWorktreeRemove(
 			notify(msg: string, type?: "info" | "warning" | "error"): void;
 			select?(title: string, options: string[]): Promise<string | undefined>;
 			confirm?(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean>;
+			custom?: PathPromptUI["custom"];
 		};
 		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
 	},
@@ -1301,7 +1305,7 @@ async function runWorktreeRemove(
 	if (target === undefined) {
 		// Interactive: pick a sandbox (numbered selectable list) then confirm
 		// with the impact preview. Headless: show what would be removable.
-		if (typeof ctx.ui.select === "function" && typeof ctx.ui.confirm === "function") {
+		if ((typeof ctx.ui.select === "function" || typeof ctx.ui.custom === "function") && typeof ctx.ui.confirm === "function") {
 			const entries = listSandboxes(settings);
 			if (entries.length === 0) {
 				notify("No worktrees to remove — /ch-worktree creates them.", "info");
@@ -1314,7 +1318,7 @@ async function runWorktreeRemove(
 					(info.gone ? " (gone)" : info.git?.dirty ? " (dirty)" : "") +
 					` — ${path.basename(info.entry.dir)}`,
 			);
-			const choice = await ctx.ui.select("Remove which worktree sandbox?", options);
+			const choice = await promptPick(ctx.ui, { title: "Remove which worktree sandbox?", options });
 			if (choice === undefined) {
 				notify("Cancelled.", "info");
 				return;

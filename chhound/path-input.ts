@@ -50,8 +50,8 @@ export interface PathInputOptions {
 	paramLabel?: string;
 }
 
-/** Structural theme slice (pi's Theme satisfies it). */
-export type ThemeLike = { fg(color: string, text: string): string };
+/** Structural theme slice for plugin dialogs (pi's Theme satisfies it). */
+export type ThemeLike = { fg(color: string, text: string): string; bg(color: string, text: string): string; bold(text: string): string };
 
 /** Structural slice of ctx.ui used by promptPath (real ui satisfies it). */
 export interface PathPromptUI {
@@ -233,7 +233,7 @@ export class TextPromptComponent extends Container {
 }
 
 /** Full-width border line (dialog chrome, like the built-in input dialog). */
-class BorderLine implements Component {
+export class BorderLine implements Component {
 	constructor(private readonly theme: ThemeLike) {}
 	render(width: number): string[] {
 		return [this.theme.fg("border", "─".repeat(Math.max(1, width)))];

@@ -10,6 +10,7 @@ export interface TestClassification {
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
+	"command/pick-panel.test.ts": { tier: "command", subject: "pick-panel" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
 	"command/worktree-manager-rpc.test.ts": { tier: "command", subject: "worktree-manager-rpc" },
 	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },

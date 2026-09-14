@@ -30,7 +30,7 @@ describe("path input", () => {
 			fs.mkdirSync(path.join(pathProj, "src", "nested"), { recursive: true });
 			fs.mkdirSync(path.join(pathProj, "docs"), { recursive: true });
 			const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
-			const themeStub = { fg: (_c: string, t: string) => t };
+			const themeStub = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t };
 			const makeComp = (startValue?: string, includeFiles?: boolean) => {
 				let out: string | undefined = "unset";
 				const c = new PathInputComponent(tuiStub, themeStub, getKeybindings(), { title: "p", cwd: pathProj, ...(startValue ? { startValue } : {}), ...(includeFiles ? { includeFiles } : {}) }, (v) => {
