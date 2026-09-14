@@ -241,4 +241,30 @@ describe("worktree manager TUI presenter", () => {
 			setKeybindings(original);
 		}
 	});
+
+	test("streams completed sandboxes with real done/total progress", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const twoItems = [items[0]!, { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix" }];
+			let finishLoad: ((value: typeof twoItems) => void) | undefined;
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
+			const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => {
+				onProgress?.({ done: 0, total: 2, items: [] });
+				onProgress?.({ done: 1, total: 2, items: [twoItems[0]!] });
+				return new Promise<typeof twoItems>((resolve) => { finishLoad = resolve; });
+			}).next(session);
+			const streaming = component!.render(100).join("\n");
+			await check(t, "partial progress shows done/total and the completed row", streaming.includes("1/2") && streaming.includes("repo · feature") && !streaming.includes("beta · bugfix"), streaming);
+			finishLoad!(twoItems);
+			await new Promise((resolve) => setImmediate(resolve));
+			const complete = component!.render(100).join("\n");
+			await check(t, "resolved load shows every row and ends the loading line", complete.includes("beta · bugfix") && !/loading worktrees/i.test(complete), complete);
+			component!.handleInput("q");
+			await check(t, "loaded session still closes", (await pending as { kind?: string })?.kind === "close", JSON.stringify(session));
+		} finally { setKeybindings(original); }
+	});
 });

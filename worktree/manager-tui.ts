@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, decodeKittyPrintable, matchesKey } from "@earendil-works/pi-tui";
-import { buildManagerRows, describeManagerItem, type ManagerRow, type ManagerSandboxItem, type ManagerSession, type PanelAction } from "./manager-core.js";
+import { buildManagerRows, describeManagerItem, type ManagerLoadProgress, type ManagerRow, type ManagerSandboxItem, type ManagerSession, type PanelAction } from "./manager-core.js";
 
 /**
  * pi-tui negotiates the terminal keyboard protocol at startup (Kitty CSI-u
@@ -36,7 +36,10 @@ const CREATE_ROW: ManagerRow = { kind: "create", label: "+ new worktree…", bad
 
 export function createWorktreeManagerTuiPresenter(
 	ctx: { ui: Pick<ExtensionCommandContext["ui"], "custom"> },
-	getRows: (session: ManagerSession) => readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
+	getRows: (
+		session: ManagerSession,
+		onProgress?: (progress: ManagerLoadProgress) => void,
+	) => readonly ManagerSandboxItem[] | Promise<readonly ManagerSandboxItem[]>,
 ): { next(session: ManagerSession): Promise<PanelAction | undefined> } {
 	return {
 		next(session) {
@@ -49,6 +52,7 @@ export function createWorktreeManagerTuiPresenter(
 				let rows: ManagerRow[] = [CREATE_ROW];
 				let loading = true;
 				let failed = false;
+				let progress: { done: number; total: number } | undefined;
 				let filterDraft: string | undefined;
 				let status: string[] = [];
 				let spinnerFrame = 0;
@@ -84,10 +88,19 @@ export function createWorktreeManagerTuiPresenter(
 					session.row = row;
 				};
 				const paint = (color: Parameters<typeof theme.fg>[0], text: string) => theme.fg(color, text);
-				void Promise.resolve(getRows(session)).then(
+				void Promise.resolve(getRows(session, (update) => {
+					if (finished) return;
+					items = update.items;
+					progress = { done: update.done, total: update.total };
+					loading = update.done < update.total;
+					if (!loading) stopSpinner();
+					rebuild();
+					tui.requestRender();
+				})).then(
 					(loaded) => {
 						if (finished) return;
 						items = loaded;
+						progress = { done: loaded.length, total: loaded.length };
 						loading = false;
 						stopSpinner();
 						rebuild();
@@ -114,7 +127,7 @@ export function createWorktreeManagerTuiPresenter(
 							? `${theme.bold(paint("accent", "filter>"))} ${filterDraft}▮   ${paint("dim", "⏎ keep · Esc clear")}`
 							: session.filter ? paint("dim", `(showing ${items?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${items?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
 						const loadingLine = loading
-							? `${paint("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!)} ${paint("dim", `Loading ${tab === "projects" ? "projects" : "worktrees"}… ${((Date.now() - loadingStartedAt) / 1000).toFixed(1)}s — Enter on “+ new worktree…” creates without waiting`)}`
+							? `${paint("accent", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!)} ${paint("dim", `Loading ${tab === "projects" ? "projects" : "worktrees"}…${progress ? ` ${progress.done}/${progress.total}` : ""} ${((Date.now() - loadingStartedAt) / 1000).toFixed(1)}s — Enter on “+ new worktree…” creates without waiting`)}`
 							: failed ? paint("error", "Unable to load worktrees — Esc closes, reopen the manager to retry.") : undefined;
 						const emptyLine = !loading && !failed && rows.length === 0
 							? paint("dim", "(no projects yet — n starts a worktree in a repo)")

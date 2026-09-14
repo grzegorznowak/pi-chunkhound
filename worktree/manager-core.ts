@@ -33,6 +33,13 @@ export interface ManagerSession {
 
 export type PanelAction = { kind: "close" } | { kind: "create"; positional?: string } | { kind: "back" };
 export type WizardOutcome = { kind: "created"; sandboxId: string } | { kind: "cancelled" } | { kind: "failed" };
+
+/** Incremental load state: completed items in library order (prefix-stable, never reordered). */
+export interface ManagerLoadProgress {
+	done: number;
+	total: number;
+	items: readonly ManagerSandboxItem[];
+}
 export interface ManagerPresenter {
 	next(session: ManagerSession): Promise<PanelAction | undefined>;
 }

@@ -21,7 +21,7 @@ import { disconnectMcp } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
-import { createManagerSession, runManagerSession, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createManagerSession, runManagerSession, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
 import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
@@ -239,7 +239,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState): v
 			// ── TUI manager: the bare command owns one session across remounts. ──
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
 				const session = createManagerSession();
-				const provider = () => collectManagerItems(ctx);
+				const provider = (_session: unknown, onProgress?: (progress: ManagerLoadProgress) => void) => collectManagerItems(ctx, onProgress);
 				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, provider), {
 					session,
 					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
@@ -1043,10 +1043,13 @@ async function oneGoLocation(
 // ── Manager: /chworktree ls ─────────────────────────────────────────────────
 
 /** Read-only adapter for the TUI manager. Collection failures deliberately render an empty list. */
-async function collectManagerItems(ctx: {
-	cwd: string;
-	sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
-}): Promise<ManagerSandboxItem[]> {
+async function collectManagerItems(
+	ctx: {
+		cwd: string;
+		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
+	},
+	onProgress?: (progress: ManagerLoadProgress) => void,
+): Promise<ManagerSandboxItem[]> {
 	try {
 		const repoRoot = await gitRootOrNull(ctx.cwd);
 		const settings = loadSettings(repoRoot ?? ctx.cwd).settings;
@@ -1055,30 +1058,56 @@ async function collectManagerItems(ctx: {
 		try {
 			if (ctx.sessionManager) records = rehydrateConnections(ctx.sessionManager.getBranch());
 		} catch { /* session log is optional */ }
-		const result = await collectWorktreeList({ entries, settings, records });
-		return result.infos.map((info: WtListInfo) => {
-			const { entry } = info;
-			const meta = entry.meta;
-			const projectKey = meta.repoRoot ?? entry.dir;
-			const sandboxId = path.basename(entry.dir);
-			return {
-				sandboxId,
-				projectKey,
-				projectLabel: path.basename(projectKey),
-				branch: meta.branch,
-				path: meta.worktree,
-				indexed: Boolean(entry.claimedRoot ?? readClaimedRoot(sandboxDbDir(entry.dir))),
-				gone: !fs.existsSync(meta.worktree),
-				live: Boolean(info.liveMcpPrefix),
-				...(info.pr ? { pr: { number: info.pr.number, state: info.pr.state } } : {}),
-				searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, info.pr ? `#${info.pr.number}` : ""].join(" "),
-				sizeBytes: info.checkoutBytes,
-				createdAt: meta.createdAt,
-			};
+		// Report the total as soon as the library listing is known, then stream
+		// completed sandboxes in library order (the probe pool finishes out of
+		// order; buffering keeps the visible list prefix-stable).
+		const ordered: ManagerSandboxItem[] = [];
+		const buffered = new Map<number, ManagerSandboxItem>();
+		let done = 0;
+		const report = (): void => { onProgress?.({ done, total: entries.length, items: ordered }); };
+		report();
+		const result = await collectWorktreeList({
+			entries,
+			settings,
+			records,
+			onItem: (index, info) => {
+				buffered.set(index, managerItemFrom(info));
+				done++;
+				let head = buffered.get(ordered.length);
+				while (head !== undefined) {
+					ordered.push(head);
+					buffered.delete(ordered.length - 1);
+					head = buffered.get(ordered.length);
+				}
+				report();
+			},
 		});
+		return ordered.length === entries.length ? ordered : result.infos.map(managerItemFrom);
 	} catch {
 		return [];
 	}
+}
+
+/** Adapter from one collected list row to the renderer-free manager item. */
+function managerItemFrom(info: WtListInfo): ManagerSandboxItem {
+	const { entry } = info;
+	const meta = entry.meta;
+	const projectKey = meta.repoRoot ?? entry.dir;
+	const sandboxId = path.basename(entry.dir);
+	return {
+		sandboxId,
+		projectKey,
+		projectLabel: path.basename(projectKey),
+		branch: meta.branch,
+		path: meta.worktree,
+		indexed: Boolean(entry.claimedRoot ?? readClaimedRoot(sandboxDbDir(entry.dir))),
+		gone: !fs.existsSync(meta.worktree),
+		live: Boolean(info.liveMcpPrefix),
+		...(info.pr ? { pr: { number: info.pr.number, state: info.pr.state } } : {}),
+		searchText: [projectKey, path.basename(projectKey), meta.branch, sandboxId, meta.worktree, info.pr ? `#${info.pr.number}` : ""].join(" "),
+		sizeBytes: info.checkoutBytes,
+		createdAt: meta.createdAt,
+	};
 }
 
 /**

@@ -344,6 +344,8 @@ export async function collectWorktreeList(opts: {
 	records: ReadonlyMap<string, ConnectionRecord>;
 	livePrefixFor?: (id: string) => string | undefined;
 	concurrency?: number;
+	/** Called once per entry as soon as its probes settle (worker-completion order). */
+	onItem?: (index: number, info: WtListInfo) => void;
 }): Promise<WtListResult> {
 	const { entries, settings, records } = opts;
 	const livePrefixFor = opts.livePrefixFor ?? ((id: string) => getMcpConnection(id)?.prefix);
@@ -391,6 +393,7 @@ export async function collectWorktreeList(opts: {
 				pr,
 			};
 			infos[i] = info;
+			opts.onItem?.(i, info);
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(limit, entries.length) }, () => worker()));

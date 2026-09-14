@@ -108,13 +108,16 @@ describe("worktree manager (fs)", () => {
 				mkEntry({ wt: path.join(root, "sandboxes", "gone-wt"), repo: repoA, branch: "gone", baseCommit: m2, id: goneId }),
 			];
 
+			const reported: number[] = [];
 			const result = await collectWorktreeList({
 				entries,
 				settings,
 				records: new Map([[fixId, { sandboxId: fixId, state: "connected" }]]),
 				livePrefixFor: (id) => (id === fixId ? undefined : id === otherId ? "chh_other" : undefined),
+				onItem: (index) => { reported.push(index); },
 			});
 			await check(t, "four rows collected", result.infos.length === 4, String(result.infos.length));
+			await check(t, "onItem reports every entry exactly once with its own index", reported.length === 4 && new Set(reported).size === 4 && reported.every((index) => entries[index] !== undefined), JSON.stringify(reported));
 
 			const [fix, other, pr, gone] = result.infos;
 			// Fix sandbox: dirty, on branch fix, +1/-1 vs recorded baseRef main.
