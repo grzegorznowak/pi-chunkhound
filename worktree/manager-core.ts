@@ -200,10 +200,37 @@ export function scopedManagerItems(items: readonly ManagerItem[], projectKey?: s
 	return items.filter((item) => item.kind !== "sandbox" || item.projectKey === projectKey);
 }
 
+/** One list row for a sandbox item (shared by the worktrees tab and the scoped project view). */
+function sandboxRow(item: ManagerSandboxItem): ManagerRow {
+	const badges = [
+		...(item.indexed ? ["indexed"] : []),
+		...(item.gone ? ["gone"] : []),
+		...(item.live ? ["live"] : []),
+		...(item.pr ? ["pr"] : []),
+	];
+	const sizeCells = formatSizeCells(item.dbBytes, item.sizeBytes);
+	return {
+		kind: "sandbox",
+		sandboxId: item.sandboxId,
+		label: `${item.projectLabel} · ${item.branch}${item.pr ? ` · #${item.pr.number}` : ""}`,
+		badges,
+		...(sizeCells ? { sizeCells } : {}),
+	};
+}
+
 export function buildManagerRows(session: ManagerSession, items: readonly ManagerItem[]): ManagerRow[] {
 	const filter = session.filter.toLowerCase();
 	const matching = scopedManagerItems(items, session.project?.key).filter((item) => !filter || item.searchText.toLowerCase().includes(filter));
 	if (session.tab === "projects") {
+		// Scoped project view: the projects tab stays active and lists the
+		// project's worktrees instead of the groups.
+		if (session.project) {
+			const rows: ManagerRow[] = [];
+			for (const item of matching) {
+				if (item.kind === "sandbox") rows.push(sandboxRow(item));
+			}
+			return rows;
+		}
 		const projects = new Map<string, { label: string; count: number }>();
 		for (const item of matching) {
 			if (item.kind !== "sandbox") continue;
@@ -237,20 +264,7 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 	const rows: ManagerRow[] = [{ kind: "create", label: "+ new worktree…", badges: [] }];
 	for (const item of matching) {
 		if (item.kind !== "sandbox") continue;
-		const badges = [
-			...(item.indexed ? ["indexed"] : []),
-			...(item.gone ? ["gone"] : []),
-			...(item.live ? ["live"] : []),
-			...(item.pr ? ["pr"] : []),
-		];
-		const sizeCells = formatSizeCells(item.dbBytes, item.sizeBytes);
-		rows.push({
-			kind: "sandbox",
-			sandboxId: item.sandboxId,
-			label: `${item.projectLabel} · ${item.branch}${item.pr ? ` · #${item.pr.number}` : ""}`,
-			badges,
-			...(sizeCells ? { sizeCells } : {}),
-		});
+		rows.push(sandboxRow(item));
 	}
 	if (session.preselect) {
 		const index = rows.findIndex((row) => row.kind === "sandbox" && row.sandboxId === session.preselect);
@@ -304,6 +318,9 @@ export async function runManagerSession(
 		if (outcome.kind === "created") {
 			session.preselect = outcome.sandboxId;
 			session.tab = "worktrees";
+			// The created sandbox is selected in the full worktrees view, not
+			// inside the project scope the create may have started from.
+			session.project = undefined;
 			// Only a created sandbox changes the library; cancelled/failed
 			// creations reuse whatever the session already loaded.
 			deps.onCreated?.();

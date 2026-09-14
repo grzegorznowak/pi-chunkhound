@@ -34,17 +34,17 @@ describe("worktree manager RPC presenter", () => {
 		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
 		const session: ManagerSession = { tab: "worktrees", row: 2, filter: "", preselect: undefined };
 		const calls: Array<{ title: string; options: string[] }> = [];
-		const responses = ["view: projects", "repo (1 worktree)", "back to all worktrees"];
+		const responses = ["view: projects", "repo (1 worktree)", "back to all projects"];
 		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
 		const presenter = createWorktreeManagerRpcPresenter(ctx, items);
 		const switched = await presenter.next(session);
 		await check(t, "view option switches in one select", switched.kind === "back" && calls.length === 1 && session.tab === "projects" && session.row === 0, JSON.stringify({ calls, session }));
 		const project = await presenter.next(session);
 		await check(t, "projects menu has create and grouped project", calls[1]!.options.filter((option) => option === "+ new worktree…").length === 1 && calls[1]!.options.includes("repo (1 worktree)"), JSON.stringify(calls[1]));
-		await check(t, "project selection scopes worktrees by project key", project.kind === "back" && session.tab === "worktrees" && session.project?.key === "/repo" && session.filter === "" && session.row === 0, JSON.stringify(session));
+		await check(t, "project selection scopes the projects view by project key", project.kind === "back" && session.tab === "projects" && session.project?.key === "/repo" && session.filter === "" && session.row === 0, JSON.stringify(session));
 		const unscoped = await presenter.next(session);
-		await check(t, "scoped view names the project and offers a way back", calls[2]!.title.includes("in “repo”") && calls[2]!.options.includes("back to all worktrees"), JSON.stringify(calls[2]));
-		await check(t, "back to all worktrees clears the scope", unscoped.kind === "back" && session.project === undefined && session.row === 0, JSON.stringify(session));
+		await check(t, "scoped view names the project and offers a way back", calls[2]!.title.includes("1 worktree in “repo”") && calls[2]!.options.includes("back to all projects"), JSON.stringify(calls[2]));
+		await check(t, "back to all projects clears the scope", unscoped.kind === "back" && session.project === undefined && session.tab === "projects" && session.row === 0, JSON.stringify(session));
 	});
 
 	test("sandbox details offer only back and close", async (t) => {

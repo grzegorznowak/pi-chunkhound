@@ -71,28 +71,28 @@ describe("worktree manager core", () => {
 	test("back and unsuccessful creates redisplay the same session values", async (t) => {
 		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
 		for (const outcome of [{ kind: "cancelled" } as const, { kind: "failed" } as const]) {
-			const session = createManagerSession({ tab: "projects", row: 3, filter: "fix" });
-			const seen: Array<{ tab: string; row: number; filter: string }> = [];
+			const session = createManagerSession({ tab: "projects", row: 3, filter: "fix", project: { key: "/repos/alpha", label: "alpha" } });
+			const seen: Array<{ tab: string; row: number; filter: string; projectKey?: string }> = [];
 			const actions = [{ kind: "back" } as const, { kind: "create", positional: "./repo" } as const, { kind: "close" } as const];
 			const positionals: Array<string | undefined> = [];
-			await runManagerSession({}, { next: async (current: typeof session) => { seen.push({ tab: current.tab, row: current.row, filter: current.filter }); return actions.shift(); } }, {
+			await runManagerSession({}, { next: async (current: typeof session) => { seen.push({ tab: current.tab, row: current.row, filter: current.filter, projectKey: current.project?.key }); return actions.shift(); } }, {
 				session,
 				runCreate: async (_current: typeof session, positional?: string) => { positionals.push(positional); return outcome; },
 			});
 			await check(t, `${outcome.kind}: one back and one create each redisplay`, seen.length === 3, JSON.stringify(seen));
-			await check(t, `${outcome.kind}: session values survive`, seen.every((value) => value.tab === "projects" && value.row === 3 && value.filter === "fix"), JSON.stringify({ seen, session }));
+			await check(t, `${outcome.kind}: session values survive`, seen.every((value) => value.tab === "projects" && value.row === 3 && value.filter === "fix" && value.projectKey === "/repos/alpha"), JSON.stringify({ seen, session }));
 			await check(t, `${outcome.kind}: positional forwarded`, positionals[0] === "./repo", JSON.stringify(positionals));
 		}
 	});
 
 	test("created sandbox becomes pending preselection before redisplay", async (t) => {
 		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
-		const session = createManagerSession();
+		const session = createManagerSession({ tab: "projects", project: { key: "/repos/alpha", label: "alpha" } });
 		let calls = 0;
 		await runManagerSession({}, { next: async (current: typeof session) => {
 			calls++;
 			if (calls === 1) return { kind: "create" } as const;
-			await check(t, "new id is visible to the next presentation", current.preselect === "new-sandbox", JSON.stringify(current));
+			await check(t, "created id is visible on the full worktrees view", current.preselect === "new-sandbox" && current.tab === "worktrees" && current.project === undefined, JSON.stringify(current));
 			return { kind: "close" } as const;
 		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "new-sandbox" }) });
 		await check(t, "exactly one redisplay", calls === 2, `calls=${calls}`);
@@ -115,10 +115,12 @@ describe("worktree manager core", () => {
 		// Live bug: every searchText carries the shared library root, so a label
 		// filter matched unrelated projects (chunkhound/pi-chhound, repo/repo-tools).
 		const lookalike: ManagerSandboxItem = { ...items[0]!, sandboxId: "alpha-tools-1", projectKey: "/repos/alpha-tools", projectLabel: "alpha-tools", branch: "main", path: "/worktrees/alpha-tools-1/main", searchText: "/repos/alpha-tools alpha-tools main /worktrees/alpha-tools-1/main alpha" };
-		const scoped = buildManagerRows(createManagerSession({ project: { key: "/repos/alpha", label: "alpha" } }), [...items, lookalike]).filter((row) => row.kind === "sandbox");
-		await check(t, "scoped worktrees contain only the project key", scoped.length === 1 && scoped[0]?.sandboxId === "alpha-123", JSON.stringify(scoped));
-		const textFiltered = buildManagerRows(createManagerSession({ project: { key: "/repos/alpha", label: "alpha" }, filter: "feature" }), [...items, lookalike]).filter((row) => row.kind === "sandbox");
+		const scoped = buildManagerRows(createManagerSession({ tab: "projects", project: { key: "/repos/alpha", label: "alpha" } }), [...items, lookalike]);
+		await check(t, "scoped projects view lists only the project's worktree rows", scoped.length === 1 && scoped[0]?.kind === "sandbox" && scoped[0]?.sandboxId === "alpha-123", JSON.stringify(scoped));
+		const textFiltered = buildManagerRows(createManagerSession({ tab: "projects", project: { key: "/repos/alpha", label: "alpha" }, filter: "feature" }), [...items, lookalike]);
 		await check(t, "text filter still applies within the scope", textFiltered.length === 1 && textFiltered[0]?.sandboxId === "alpha-123", JSON.stringify(textFiltered));
+		const grouped = buildManagerRows(createManagerSession({ tab: "projects" }), [...items, lookalike]);
+		await check(t, "unscoped projects tab still groups sandboxes", grouped.length === 4 && grouped.every((row) => row.kind === "project"), JSON.stringify(grouped.map((row) => row.label)));
 		await check(t, "without scope the lookalike stays visible", buildManagerRows(createManagerSession(), [...items, lookalike]).filter((row) => row.kind === "sandbox").length === 4, "");
 		await check(t, "scope passes baselines through untouched", scopedManagerItems([...items, ...baselines], "/repos/alpha").filter((item) => item.kind === "baseline").length === 1, "");
 	});

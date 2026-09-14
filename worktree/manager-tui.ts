@@ -163,14 +163,14 @@ export function createWorktreeManagerTuiPresenter(
 					},
 					render(_width: number): string[] {
 						const tabName = (name: ManagerSession["tab"]) => tab === name ? theme.bold(paint("accent", `[${name}]`)) : name;
-						const footer = paint("dim", "Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close");
+						const footer = paint("dim", `Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · ${session.project ? "Esc back" : "Esc close"}`);
 						const scope = session.project;
 						const visibleItems = items ? scopedManagerItems(items, scope?.key) : undefined;
 						const filterLine = filterDraft !== undefined
 							? `${theme.bold(paint("accent", "filter>"))} ${filterDraft}▮   ${paint("dim", "⏎ keep · Esc clear")}`
 							: session.filter ? paint("dim", `(showing ${visibleItems?.filter((item) => item.searchText.toLowerCase().includes(session.filter.toLowerCase())).length ?? 0} of ${visibleItems?.length ?? 0} matching "${session.filter}" — / edits, Esc clears)`) : undefined;
 						const scopeLine = scope
-							? paint("dim", `(project "${scope.label}" — showing ${rows.filter((item) => item.kind === "sandbox").length} of ${visibleItems?.filter((item) => item.kind === "sandbox").length ?? 0} worktrees · Esc back to all)`)
+							? paint("dim", `(project "${scope.label}" — showing ${rows.filter((item) => item.kind === "sandbox").length} of ${visibleItems?.filter((item) => item.kind === "sandbox").length ?? 0} worktrees · Esc back to projects)`)
 							: undefined;
 						const notices = [filterLine, scopeLine].filter((line): line is string => line !== undefined);
 						const loadingLine = loading
@@ -272,7 +272,6 @@ export function createWorktreeManagerTuiPresenter(
 						if (selected?.kind === "create") { finish({ kind: "create", positional: session.project?.key }); return; }
 						if (selected?.kind === "project") {
 							if (selected.projectKey) session.project = { key: selected.projectKey, label: selected.label };
-							tab = "worktrees";
 							session.filter = "";
 							row = 0;
 							status = [];

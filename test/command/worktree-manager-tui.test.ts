@@ -115,13 +115,13 @@ describe("worktree manager TUI presenter", () => {
 			await check(t, "projects render grouped count", /repo\s+2 worktrees/.test(frame) && frame.includes("repo-tools"), frame);
 			component!.handleInput("\n");
 			frame = component!.render(100).join("\n");
-			await check(t, "project Enter scopes worktrees by project key", session.tab === "worktrees" && session.project?.key === "/repo" && session.filter === "" && session.row === 0 && frame.includes('project "repo"') && frame.includes("repo · feature") && !frame.includes("repo-tools"), frame);
-			component!.handleInput("\x1b");
-			frame = component!.render(100).join("\n");
-			await check(t, "Esc backs out of the project scope without closing", session.project === undefined && frame.includes("repo-tools · tooling") && frame.includes("→ + new worktree"), frame);
-			component!.handleInput("\x1b[B"); component!.handleInput("\n");
+			await check(t, "project Enter keeps the projects tab and lists its worktrees", session.tab === "projects" && session.project?.key === "/repo" && session.filter === "" && session.row === 0 && frame.includes("[projects]") && !frame.includes("[worktrees]") && frame.includes('project "repo"') && frame.includes("repo · feature") && !frame.includes("repo-tools") && !frame.includes("+ new worktree") && frame.includes("Esc back"), frame);
+			component!.handleInput("\n");
 			const detail = component!.render(100).join("\n");
 			await check(t, "sandbox Enter renders details without resolving", detail.includes("feature") && detail.includes("/worktrees/one") && detail.includes("read-only"), detail);
+			component!.handleInput("\x1b");
+			frame = component!.render(100).join("\n");
+			await check(t, "Esc backs out to the project list without closing", session.project === undefined && frame.includes("repo-tools") && !frame.includes('project "repo"') && !frame.includes("read-only"), frame);
 			component!.handleInput("q");
 			await check(t, "q closes after details", (await pending as { kind?: string }).kind === "close", JSON.stringify(session));
 		} finally { setKeybindings(original); }
@@ -135,7 +135,7 @@ describe("worktree manager TUI presenter", () => {
 			for (const mode of ["create", "sandbox", "project", "scoped"] as const) {
 				let component: { handleInput(data: string): void } | undefined;
 				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { handleInput(data: string): void }) => await new Promise<unknown>((resolve) => { component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text }, getKeybindings(), resolve); }) } };
-				const session: ManagerSession = { tab: mode === "project" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "", ...(mode === "scoped" ? { project: { key: "/repo", label: "repo" } } : {}) };
+				const session: ManagerSession = { tab: mode === "project" || mode === "scoped" ? "projects" : "worktrees", row: mode === "sandbox" ? 1 : 0, filter: "", ...(mode === "scoped" ? { project: { key: "/repo", label: "repo" } } : {}) };
 				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => items).next(session);
 				await new Promise((resolve) => setImmediate(resolve)); component!.handleInput("n");
 				const action = await pending as { kind: string; positional?: string };

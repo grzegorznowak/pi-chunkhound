@@ -9,8 +9,9 @@ export function createWorktreeManagerRpcPresenter(
 			const items = await getRows(session);
 			const rows = buildManagerRows(session, items);
 			const count = session.tab === "worktrees" ? rows.filter((row) => row.kind === "sandbox").length : rows.length;
-			const noun = session.tab === "worktrees" ? (count === 1 ? "worktree" : "worktrees") : session.tab === "projects" ? (count === 1 ? "project" : "projects") : (count === 1 ? "baseline" : "baselines");
-			const scope = session.tab === "worktrees" ? session.project : undefined;
+			const scopedProjects = session.tab === "projects" && session.project !== undefined;
+			const noun = scopedProjects ? (count === 1 ? "worktree" : "worktrees") : session.tab === "worktrees" ? (count === 1 ? "worktree" : "worktrees") : session.tab === "projects" ? (count === 1 ? "project" : "projects") : (count === 1 ? "baseline" : "baselines");
+			const scope = scopedProjects ? session.project : undefined;
 			const title = [
 				`Worktree manager — ${session.tab}`,
 				`${count} ${noun}${session.filter ? ` matching “${session.filter}”` : ""}${scope ? ` in “${scope.label}”` : ""}`,
@@ -33,7 +34,7 @@ export function createWorktreeManagerRpcPresenter(
 			};
 
 			addOption("+ new worktree…", () => ({ kind: "create" }), true);
-			if (session.project) addOption("back to all worktrees", () => {
+			if (session.project) addOption("back to all projects", () => {
 				session.project = undefined; session.filter = ""; session.row = 0;
 				return { kind: "back" };
 			});
@@ -43,7 +44,7 @@ export function createWorktreeManagerRpcPresenter(
 				if (row.kind === "project") {
 					const projectKey = row.projectKey;
 					addOption(label, () => {
-						session.tab = "worktrees"; session.filter = ""; session.row = 0;
+						session.filter = ""; session.row = 0;
 						session.project = projectKey ? { key: projectKey, label: row.label } : undefined;
 						return { kind: "back" };
 					});
