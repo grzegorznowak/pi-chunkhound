@@ -30,7 +30,7 @@ describe("worktree wizard outcomes", () => {
 	test("repo-picker cancellation returns cancelled", async (t) => {
 		const { runWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home }));
@@ -47,7 +47,7 @@ describe("worktree wizard outcomes", () => {
 	test("manager-launched cancellation suppresses only its Cancelled notification", async (t) => {
 		const { runWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home }));
@@ -64,7 +64,7 @@ describe("worktree wizard outcomes", () => {
 	test("branch prompt cancellation uses input fallback and returns cancelled", async (t) => {
 		const { runBranchWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home }));
@@ -87,7 +87,7 @@ describe("worktree wizard outcomes", () => {
 	test("exhausted PR URL attempts fail and retain error notifications", async (t) => {
 		const { runWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home }));
@@ -107,7 +107,7 @@ describe("worktree wizard outcomes", () => {
 			import("../../chhound/sandbox.js"),
 		]);
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			const library = path.join(root, "library");
@@ -133,7 +133,7 @@ describe("worktree wizard outcomes", () => {
 	test("injected create result becomes created or failed", async (t) => {
 		const { runBranchWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();
-		const root = await makeFixtureRoot("chworktree-wizard-");
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
 		try {
 			const home = await makeFakeHome(root);
 			applyEnv(isolatedEnv({ home }));

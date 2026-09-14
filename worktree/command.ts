@@ -26,8 +26,8 @@ import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
 const HELP = [
-	"/chworktree [repo] [branch] [options]     — create a worktree sandbox",
-	"/chworktree ls [<query>] [--search <t>] [--sort <k>]  — manage: list sandboxes",
+	"/ch-worktree [repo] [branch] [options]     — create a worktree sandbox",
+	"/ch-worktree ls [<query>] [--search <t>] [--sort <k>]  — manage: list sandboxes",
 	"",
 	"required:",
 	"  [repo]              a git repository: a path inside one, the repo's own",
@@ -50,11 +50,11 @@ const HELP = [
 	"  --refresh-baseline force baseline re-prime",
 	"",
 	"Two ways to create:",
-	"  wizard:  /chworktree [repo] with no other arguments — asks for the branch name",
+	"  wizard:  /ch-worktree [repo] with no other arguments — asks for the branch name",
 	"           and the worktree library root interactively (with no argument at all",
 	"           it also lets you pick the repo). Path prompts support TAB completion",
 	"           (dirs only, drill-down; TAB accepts, Enter confirms, Esc cancels).",
-	"  one-go:  /chworktree [repo] -b <branch> [--dest <dir>] [options] — everything",
+	"  one-go:  /ch-worktree [repo] -b <branch> [--dest <dir>] [options] — everything",
 	"           on one line, non-interactive (agents). The first argument is always",
 	"           the repo.",
 	"",
@@ -68,7 +68,7 @@ const HELP = [
 	"  --search <text>     case-insensitive filter over repo, branch, id and paths",
 	"  --sort <key>        created (default, newest first) | name | db | checkout | total",
 	"                      (numeric keys: largest first; name: A→Z)",
-	"  examples: /chworktree ls — /chworktree ls fix — /chworktree ls --search mcp --sort db",
+	"  examples: /ch-worktree ls — /ch-worktree ls fix — /ch-worktree ls --search mcp --sort db",
 	"",
 	"Manage (rm):",
 	"  rm removes a worktree sandbox: its storage (sandbox dir + .state index),",
@@ -78,9 +78,9 @@ const HELP = [
 	"  disconnected first (the daemon exits on its own) and the session record",
 	"  tombstoned. Shared baselines and the rest of the host repo are never",
 	"  touched.",
-	"  /chworktree rm                 interactive: pick a sandbox, then confirm",
+	"  /ch-worktree rm                 interactive: pick a sandbox, then confirm",
 	"                                 the impact preview (headless: shows usage)",
-	"  /chworktree rm <target>        one-go removal of one sandbox — <target> is",
+	"  /ch-worktree rm <target>        one-go removal of one sandbox — <target> is",
 	"                                 a worktree path, storage id, or basename",
 	"                                 (no confirm; guards still apply)",
 	"  --force                        remove the sandbox that runs THIS extension",
@@ -91,7 +91,7 @@ const HELP = [
 	"library — config, index db, daemon state and checkout together, mirroring the",
 	"'/workspaces' pattern. Nothing is ever written into the worktree checkout or",
 	"the source repo (no .chunkhound/, no git-exclude edits).",
-	"Removal of sandboxes is coming as a follow-up slice (/chworktree rm).",
+	"Removal of sandboxes is coming as a follow-up slice (/ch-worktree rm).",
 ].join("\n");
 
 /**
@@ -201,21 +201,21 @@ export interface WorktreeCommandDeps {
 
 export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, deps: WorktreeCommandDeps = {}): void {
 	// The manager's item store lives for the whole session (one store per
-	// registered command), so closing and re-running /chworktree reuses the last
+	// registered command), so closing and re-running /ch-worktree reuses the last
 	// collect while the library fingerprint is unchanged. The loader reads the
 	// current invocation's ctx through this holder — a store that outlives one
 	// invocation must never capture that invocation's ctx.
 	let managerCtx: ManagerCtx | undefined;
 	let managerStore: ReturnType<typeof createManagerItemStore> | undefined;
-	pi.registerCommand("chworktree", {
+	pi.registerCommand("ch-worktree", {
 		description:
 			"Create a git worktree with its own chunkhound index, or manage the worktree library. " +
-			"Creation: /chworktree [repo] [-b <branch>] [--dest <dir>] [--from <ref>] [--config <file>] " +
-			"[--no-index] [--force-reindex] [--refresh-baseline], or /chworktree <PR-URL> for a " +
-			"pull request sandbox — bare /chworktree [repo] runs an interactive wizard. " +
-			"Manage: /chworktree ls [<query>] [--search <text>] [--sort <key>] lists every sandbox " +
-			"grouped by project with space/git-state/liveness columns; /chworktree rm [<target>] [--force] " +
-			"removes a sandbox (disconnect, storage, worktree registration, -b branch) — /chworktree --help for details",
+			"Creation: /ch-worktree [repo] [-b <branch>] [--dest <dir>] [--from <ref>] [--config <file>] " +
+			"[--no-index] [--force-reindex] [--refresh-baseline], or /ch-worktree <PR-URL> for a " +
+			"pull request sandbox — bare /ch-worktree [repo] runs an interactive wizard. " +
+			"Manage: /ch-worktree ls [<query>] [--search <text>] [--sort <key>] lists every sandbox " +
+			"grouped by project with space/git-state/liveness columns; /ch-worktree rm [<target>] [--force] " +
+			"removes a sandbox (disconnect, storage, worktree registration, -b branch) — /ch-worktree --help for details",
 		getArgumentCompletions: (argumentPrefix) => worktreeArgumentCompletions(argumentPrefix, process.cwd()),
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
@@ -227,7 +227,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				return;
 			}
 
-			// ── Manager verbs: /chworktree ls … (removal verbs reserved) — the
+			// ── Manager verbs: /ch-worktree ls … (removal verbs reserved) — the
 			// first positional names the VERB only when it is one; anything else
 			// falls through to the creation flows below (repo paths, PR URLs,
 			// branches and the bare wizard keep their existing meanings). ──
@@ -248,7 +248,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 			// instead of silently creating (or mis-parsing) a worktree.
 			if (listFlagIn(flags)) {
 				notify(
-					`--${listFlagIn(flags)} manages the worktree LIST — creation ignores it: /chworktree ls [--search <text>] [--sort <key>].`,
+					`--${listFlagIn(flags)} manages the worktree LIST — creation ignores it: /ch-worktree ls [--search <text>] [--sort <key>].`,
 					"error",
 				);
 				return;
@@ -281,7 +281,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				return;
 			}
 
-			// ── Wizard mode: /chworktree [repo] with no branch and no flags ──
+			// ── Wizard mode: /ch-worktree [repo] with no branch and no flags ──
 			if (isWizardInvocation(positionals, flags)) {
 				await runWizard(wctx, state, positionals[0]);
 				return;
@@ -289,13 +289,13 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 
 			// ── One-go mode (fully non-interactive) ──
 			if (flags["dest"] === true) {
-				notify("--dest requires a directory: /chworktree [repo] --dest <dir>", "error");
+				notify("--dest requires a directory: /ch-worktree [repo] --dest <dir>", "error");
 				return;
 			}
 			let dest = typeof flags["dest"] === "string" ? path.resolve(ctx.cwd, expandHome(flags["dest"])) : undefined;
 			const wtArg = positionals[0];
 			// PR URL as the repo slot — the URL carries the repo identity:
-			// /chworktree https://github.com/<owner>/<repo>/pull/<n> [--dest …]
+			// /ch-worktree https://github.com/<owner>/<repo>/pull/<n> [--dest …]
 			const prFromArg = wtArg ? parsePrUrl(wtArg) : undefined;
 			if (prFromArg) {
 				if (positionals[1]) {
@@ -341,7 +341,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				else if (choice.remoteRef) remoteRef = choice.remoteRef;
 			}
 			if (flags["b"] === true && !positionals[1]) {
-				notify("-b requires a branch name: /chworktree <path> -b <new-branch>", "error");
+				notify("-b requires a branch name: /ch-worktree <path> -b <new-branch>", "error");
 				return;
 			}
 			// Remote-branch checkout = detached at the remote tip: resolve the ref
@@ -404,7 +404,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 }
 
 /**
- * Wizard mode = no branch positional, no flags: /chworktree [repo] alone asks
+ * Wizard mode = no branch positional, no flags: /ch-worktree [repo] alone asks
  * for the branch name and the sandbox library root (and, with no argument at
  * all, the repo).
  */
@@ -439,11 +439,11 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 		: `${cwd} is not inside a git repo.`;
 	return [
 		`No git repo found: ${base}`,
-		"/chworktree creates a worktree OF an existing git repo.",
+		"/ch-worktree creates a worktree OF an existing git repo.",
 		"Try: run it from inside the repo, or pass the repo's own directory as the first argument",
 		"(the worktree + its index land in the worktree library). If the project should be a repo:",,
 		`git init ${wtArg ?? cwd} && git -C ${wtArg ?? cwd} add -A && git -C ${wtArg ?? cwd} commit -m init, then retry.`,
-		"Bare /chworktree (no arguments) opens an interactive repo picker.",
+		"Bare /ch-worktree (no arguments) opens an interactive repo picker.",
 	].join("\n");
 }
 
@@ -464,9 +464,9 @@ export async function createIndexedWorktree(
 		baseRef?: string;
 		/** Logical branch recorded in meta + summary when the checkout is detached (remote refs, PRs) — otherwise the checkout's branch. */
 		branchLabel?: string;
-		/** PR head branch name — recorded in sandbox meta for /chworktree display. */
+		/** PR head branch name — recorded in sandbox meta for /ch-worktree display. */
 		headRef?: string;
-		/** PR head commit — recorded in sandbox meta for /chworktree display. */
+		/** PR head commit — recorded in sandbox meta for /ch-worktree display. */
 		headOid?: string;
 		flags: Record<string, string | true>;
 	},
@@ -507,7 +507,7 @@ export async function createIndexedWorktree(
 			notify(
 				`Worktree created (no index): ${wtPath} @ ${branchNow}\n` +
 					`The storage dir has no index yet (nothing is written into the checkout). Re-indexing an\n` +
-					`existing worktree is not wired up yet — remove it and re-create with /chworktree instead.`,
+					`existing worktree is not wired up yet — remove it and re-create with /ch-worktree instead.`,
 				"info",
 			);
 			return { ok: true, sandboxId };
@@ -540,7 +540,7 @@ export async function createIndexedWorktree(
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
-				"Progress updates in the footer. Tip: /chworktree --no-index creates the worktree without indexing.",
+				"Progress updates in the footer. Tip: /ch-worktree --no-index creates the worktree without indexing.",
 			"warning",
 		);
 		const baseline = await ensureBaseline({
@@ -661,7 +661,7 @@ export async function createIndexedWorktree(
 		}
 		return { ok: true, sandboxId };
 	} catch (err) {
-		notify(`/chworktree failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+		notify(`/ch-worktree failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 		return { ok: false };
 	} finally {
 		progress.done();
@@ -702,7 +702,7 @@ export async function runWizard(ctx: WizardCtx, state: PluginState, positional?:
 		const probe = fs.existsSync(requestedPath) ? requestedPath : path.dirname(requestedPath);
 		const repoRoot = (await gitRootOrNull(ctx.cwd)) ?? (await findRepoRoot(probe));
 		if (!repoRoot) {
-			notify(`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own directory, or run /chworktree with no arguments to pick a repo from the library.`, "error");
+			notify(`${positional} does not resolve to a git repo. Run it from inside the repo, pass the repo's own directory, or run /ch-worktree with no arguments to pick a repo from the library.`, "error");
 			return { kind: "failed" };
 		}
 		return runBranchWizard(ctx, state, path.resolve(repoRoot), deps);
@@ -775,10 +775,10 @@ export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRo
 
 export const OTHER_REPO = "select local repository";
 const PICK_PR = "a pull request — paste its GitHub URL";
-/** Title of the bare-/chworktree repo-source picker (exported for smoke). */
+/** Title of the bare-/ch-worktree repo-source picker (exported for smoke). */
 export const REPO_PICKER_TITLE = "Select a repository";
 
-/** Repo picker for bare /chworktree: current repo + library repos, a PR (URL
+/** Repo picker for bare /ch-worktree: current repo + library repos, a PR (URL
  * prompt), or a typed path. */
 async function pickRepoInteractive(ctx: WizardCtx, deps: Pick<WizardDeps, "suppressCancelNotify">): Promise<PromptResult<RepoPick>> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
@@ -904,7 +904,7 @@ async function promptLibraryRoot(
 		({ sandboxDir, wtPath, conflict } = compute(dest));
 	}
 	if (conflict) {
-		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /chworktree ls lists worktrees.`, "error");
+		notify(`Blocked: ${wtPath} would overlap the chunkhound worktree ${conflict}. /ch-worktree ls lists worktrees.`, "error");
 		return { kind: "blocked" };
 	}
 	return { kind: "picked", value: { dest, sandboxDir, wtPath } };
@@ -1000,7 +1000,7 @@ export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: strin
 	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
 }
 
-/** One-go PR path (/chworktree <PR URL> [--dest …]): fully non-interactive. */
+/** One-go PR path (/ch-worktree <PR URL> [--dest …]): fully non-interactive. */
 async function runPrOneGo(
 	ctx: WizardCtx,
 	state: PluginState,
@@ -1044,7 +1044,7 @@ async function oneGoLocation(
 	if (conflict) {
 		notify(
 			`Refusing: ${wtPath} is already part of the chunkhound index for ${conflict}. ` +
-				"Pick a different destination (/chworktree ls lists indexed worktrees).",
+				"Pick a different destination (/ch-worktree ls lists indexed worktrees).",
 			"error",
 		);
 		return undefined;
@@ -1053,7 +1053,7 @@ async function oneGoLocation(
 	if (sandboxConflict) {
 		notify(
 			`Refusing: the storage dir ${sandboxDir} would overlap worktree ${sandboxConflict}. ` +
-				"Pick a different destination (/chworktree ls lists worktrees).",
+				"Pick a different destination (/ch-worktree ls lists worktrees).",
 			"error",
 		);
 		return undefined;
@@ -1065,7 +1065,7 @@ async function oneGoLocation(
 	return { sandboxDir, wtPath };
 }
 
-// ── Manager: /chworktree ls ─────────────────────────────────────────────────
+// ── Manager: /ch-worktree ls ─────────────────────────────────────────────────
 
 /** Read-only adapter for the TUI manager. Collection failures deliberately render an empty list. */
 export async function collectManagerItems(
@@ -1189,7 +1189,7 @@ async function baselineItemFrom(dir: string, meta: BaselineMeta | undefined): Pr
 }
 
 /**
- * /chworktree ls — list the worktree library. Pure render (headless AND
+ * /ch-worktree ls — list the worktree library. Pure render (headless AND
  * interactive — the notify dialog shows the same text; /ch-status precedent)
  * assembled from the collectors in manage.ts: async checkout sizing, git
  * probes, gh PR-state lookups (all degrading, never throwing).
@@ -1255,10 +1255,10 @@ async function runWorktreeList(
 	);
 }
 
-// ── Manager: /chworktree rm ─────────────────────────────────────────────────
+// ── Manager: /ch-worktree rm ─────────────────────────────────────────────────
 
 /**
- * /chworktree rm — remove one worktree sandbox (storage, worktree
+ * /ch-worktree rm — remove one worktree sandbox (storage, worktree
  * registration, optional -b-created branch), with the guards from the
  * planning: live MCP connections are disconnected first (daemon self-exits)
  * and session records tombstoned; the extension-source sandbox needs an
@@ -1304,7 +1304,7 @@ async function runWorktreeRemove(
 		if (typeof ctx.ui.select === "function" && typeof ctx.ui.confirm === "function") {
 			const entries = listSandboxes(settings);
 			if (entries.length === 0) {
-				notify("No worktrees to remove — /chworktree creates them.", "info");
+				notify("No worktrees to remove — /ch-worktree creates them.", "info");
 				return;
 			}
 			const { infos } = await collectWorktreeList({ entries, settings, records: sessionRecords(ctx) });
@@ -1337,8 +1337,8 @@ async function runWorktreeRemove(
 		}
 		notify(
 			[
-				"rm needs a target when no interactive picker is available: /chworktree rm <worktree path|storage id>.",
-				"/chworktree ls lists every sandbox with its storage id.",
+				"rm needs a target when no interactive picker is available: /ch-worktree rm <worktree path|storage id>.",
+				"/ch-worktree ls lists every sandbox with its storage id.",
 			].join("\n"),
 			"error",
 		);
@@ -1351,7 +1351,7 @@ async function runWorktreeRemove(
 		notify(
 			[
 				`No worktree or storage id matches '${target}'.`,
-				"/chworktree ls lists every sandbox with its storage id; remove by id: /chworktree rm <id>.",
+				"/ch-worktree ls lists every sandbox with its storage id; remove by id: /ch-worktree rm <id>.",
 			].join("\n"),
 			"error",
 		);
@@ -1378,7 +1378,7 @@ async function runWorktreeRemove(
 			[
 				`${path.basename(entry.dir)} runs THIS extension (the loaded code lives in its checkout).`,
 				"Removing it breaks the plugin until ~/.pi/agent/extensions/pi-chhound is repointed to another checkout.",
-				"Re-run with --force to remove it anyway: /chworktree rm " + target + " --force",
+				"Re-run with --force to remove it anyway: /ch-worktree rm " + target + " --force",
 			].join("\n"),
 			"error",
 		);

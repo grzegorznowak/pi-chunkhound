@@ -1,5 +1,5 @@
 /**
- * /chworktree manager surface — LIST of managed sandboxes (grouped by
+ * /ch-worktree manager surface — LIST of managed sandboxes (grouped by
  * project, searchable/sortable, with space, git-state and liveness columns).
  * REMOVAL lands in a follow-up slice on the same verb dispatch.
  *
@@ -31,7 +31,7 @@ import type { ConnectionRecord } from "../mcp/persist.js";
 
 // ── Verb dispatch ────────────────────────────────────────────────────────────
 
-/** List verbs: /chworktree ls [<query>] … (alias: list). */
+/** List verbs: /ch-worktree ls [<query>] … (alias: list). */
 export const LS_VERBS: readonly string[] = ["ls", "list"];
 /** Removal verbs (reserved — the remove flow lands in a follow-up slice). */
 export const RM_VERBS: readonly string[] = ["rm", "remove"];
@@ -40,7 +40,7 @@ export type WorktreeVerb = "list" | "remove";
 /**
  * The manager verb carried by the FIRST positional, when any. Anything else
  * (undefined, a repo path, a PR URL, a branch) stays a creation invocation —
- * bare /chworktree keeps the wizard, positional[0] keeps meaning "repo".
+ * bare /ch-worktree keeps the wizard, positional[0] keeps meaning "repo".
  */
 export function worktreeVerb(first: string | undefined): WorktreeVerb | undefined {
 	if (first === undefined) return undefined;
@@ -87,7 +87,7 @@ export interface ListOptions {
 export type ListInvocationResult = { ok: true; options: ListOptions } | { ok: false; error: string };
 
 /**
- * Validate the arguments AFTER the verb: /chworktree ls [<query>] [--search
+ * Validate the arguments AFTER the verb: /ch-worktree ls [<query>] [--search
  * <text>] [--sort <key>]. Creation flags are rejected here (they steer the
  * creation pipeline and silently doing nothing would mislead), as are
  * unknown flags, a bare value flag, an unknown sort key and extra
@@ -101,7 +101,7 @@ export function parseListInvocation(
 	if (creationFlag) {
 		return {
 			ok: false,
-			error: `--${creationFlag} is a creation option — not applicable to ls (creation: /chworktree [repo] …).`,
+			error: `--${creationFlag} is a creation option — not applicable to ls (creation: /ch-worktree [repo] …).`,
 		};
 	}
 	for (const key of Object.keys(flags)) {
@@ -118,7 +118,7 @@ export function parseListInvocation(
 		return { ok: false, error: `--sort needs a key: ${LIST_SORT_KEYS.join("|")} (default: created).` };
 	}
 	if (flags["search"] === true) {
-		return { ok: false, error: "--search needs text: /chworktree ls --search <text>." };
+		return { ok: false, error: "--search needs text: /ch-worktree ls --search <text>." };
 	}
 	const sortRaw = typeof flags["sort"] === "string" ? flags["sort"] : DEFAULT_LIST_SORT;
 	const sort = sortRaw as ListSortKey;
@@ -592,7 +592,7 @@ export interface ListRenderInput {
 }
 
 /**
- * Full /chworktree ls rendering (pure — the handler assembles the inputs
+ * Full /ch-worktree ls rendering (pure — the handler assembles the inputs
  * and notifies the result). Group header carries the project rollups; each
  * row is two lines: identity + state badges, then the space columns (db
  * first) and the worktree path.
@@ -609,8 +609,8 @@ export function buildWorktreeListLines(opts: ListRenderInput): string[] {
 	if (groups.length === 0) {
 		lines.push(
 			total === 0
-				? "  (no worktrees yet — /chworktree <repo> [branch] creates the first; a PR URL creates a pull-request sandbox)"
-				: `  (no worktree matches "${search}" — /chworktree ls lists everything)`,
+				? "  (no worktrees yet — /ch-worktree <repo> [branch] creates the first; a PR URL creates a pull-request sandbox)"
+				: `  (no worktree matches "${search}" — /ch-worktree ls lists everything)`,
 		);
 		return lines;
 	}
@@ -654,7 +654,7 @@ export interface RemoveOptions {
 export type RemoveInvocationResult = { ok: true; options: RemoveOptions } | { ok: false; error: string };
 
 /**
- * Validate the arguments AFTER the verb: /chworktree rm [<target>]
+ * Validate the arguments AFTER the verb: /ch-worktree rm [<target>]
  * [--force]. One positional at most; creation and list flags are rejected
  * (they steer other flows — silently ignoring them would mislead).
  */

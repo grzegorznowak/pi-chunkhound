@@ -132,7 +132,7 @@ export async function branchCompletions(cwd: string, includeTags = false): Promi
 		}));
 }
 
-/** Known /chworktree flags for flag-position completion. */
+/** Known /ch-worktree flags for flag-position completion. */
 export const WORKTREE_FLAGS = [
 	"--no-index",
 	"--force-reindex",
@@ -143,7 +143,7 @@ export const WORKTREE_FLAGS = [
 	"-b",
 ] as const;
 
-/** /chworktree flags that take a value (space form AND `--flag=value` form). */
+/** /ch-worktree flags that take a value (space form AND `--flag=value` form). */
 // (Set lives in args.ts as WORKTREE_VALUE_FLAGS — parser configuration.)
 
 /**
@@ -256,7 +256,7 @@ function managerVerbItems(rawPrefix: string): CompletionItem[] {
 }
 
 /**
- * /chworktree argument completions (natural typing AND TAB — the plugin's
+ * /ch-worktree argument completions (natural typing AND TAB — the plugin's
  * ChhoundArgumentProvider wrapper routes every request in this command's
  * argument position here, so pristine pi's file picker never shows there;
  * TAB-without-space stays command-name completion — a pi-tui behavior).

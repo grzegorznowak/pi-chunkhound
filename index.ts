@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI): void {
 			apiKey: state.apiKey,
 		});
 
-		// TAB in /chworktree's argument position must show the plugin's dir picker
+		// TAB in /ch-worktree's argument position must show the plugin's dir picker
 		// (pristine pi's TAB opens its own file picker there). pi resets all
 		// autocomplete provider wrappers on /reload, so registering on every
 		// session_start is safe and self-healing.

@@ -14,7 +14,7 @@ describe("worktree intent", () => {
 	test("legacy wizard + conflict obligations", async (t) => {
 		const base = "/tmp/pi-chhound-worktree-intent"; // pure string anchor, never created
 		const idx = [path.join(base, "idx-a")];
-		await check(t, "wizard: bare /chworktree", isWizardInvocation([], {}), JSON.stringify(isWizardInvocation([], {})));
+		await check(t, "wizard: bare /ch-worktree", isWizardInvocation([], {}), JSON.stringify(isWizardInvocation([], {})));
 		await check(t, "wizard: repo only", isWizardInvocation(["repo"], {}));
 		await check(t, "one-go: branch given", isWizardInvocation(["repo", "main"], {}) === false);
 		await check(t, "one-go: --dest given", isWizardInvocation(["repo"], { dest: "~/wt" }) === false);

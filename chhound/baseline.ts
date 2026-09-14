@@ -304,7 +304,7 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 	return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: true, reason: reason ?? "primed" };
 }
 
-/** List baseline dirs (for the /chworktree manager). One level deep: <root>/<repo>/<ref>. */
+/** List baseline dirs (for the /ch-worktree manager). One level deep: <root>/<repo>/<ref>. */
 export function listBaselines(settings: ChhoundSettings): Array<{ dir: string; meta?: BaselineMeta }> {
 	const root = baseRoot(settings);
 	const out: Array<{ dir: string; meta?: BaselineMeta }> = [];

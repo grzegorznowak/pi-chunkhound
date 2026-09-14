@@ -56,7 +56,7 @@ export function buildStatusLines(opts: {
 	// lives inside it), not the worktree.
 	let problems = 0;
 	if (sandboxes.length === 0) {
-		lines.push("  (no sandboxes — run /chworktree <path>)");
+		lines.push("  (no sandboxes — run /ch-worktree <path>)");
 	} else {
 		for (const s of sandboxes) {
 			const repoName = s.meta.repoRoot ? path.basename(s.meta.repoRoot) : path.basename(s.dir);

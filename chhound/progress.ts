@@ -3,7 +3,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 /**
  * Live progress machinery for long-running chunkhound invocations
- * (`/chworktree` baseline prime + worktree top-up).
+ * (`/ch-worktree` baseline prime + worktree top-up).
  *
  * A single run consists of two SEQUENTIAL passes, each with its own progress
  * signal inside `chhound index --verbose` output (both piped streams, see

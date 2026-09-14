@@ -297,8 +297,8 @@ describe("mcp view", () => {
 				healthMismatch.includes("fix: run chunkhound index/mcp from the expected root"),
 			healthMismatch,
 		);
-		// The worktree/baseline listings now live in the /chworktree manager and
-		// `/chworktree ls`; /ch-status must not print them again.
+		// The worktree/baseline listings now live in the /ch-worktree manager and
+		// `/ch-worktree ls`; /ch-status must not print them again.
 		await check(
 			t,
 			"status: worktree/baseline listings are gone",
