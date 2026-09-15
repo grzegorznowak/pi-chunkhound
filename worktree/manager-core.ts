@@ -64,7 +64,6 @@ export interface ManagerSession {
 	filter: string;
 	/** Project drill-down scope: the worktrees list is narrowed to this repo until Esc. */
 	project?: { key: string; label: string };
-	preselect?: string;
 }
 
 export type PanelAction = { kind: "close" } | { kind: "create"; positional?: string } | { kind: "back" };
@@ -92,8 +91,7 @@ export interface ManagerPresenter {
  * recomputing). A cache hit returns synchronously so the renderer paints rows
  * on its first frame; a miss starts the shared in-flight load, so a rapid
  * close/reopen never launches a second collect. `invalidate()` drops the
- * cache — create success calls it so the new sandbox is collected for the
- * preselect.
+ * cache — create success calls it so the next open collects the new sandbox.
  *
  * `load` also takes an optional `fingerprint`: a cheap digest of the inputs
  * the loader reads (library identity/liveness, not probe results). When it
@@ -229,7 +227,7 @@ export function sandboxMetaItem(
 }
 
 export function createManagerSession(initial: Partial<ManagerSession> = {}): ManagerSession {
-	return { tab: "worktrees", row: 0, filter: "", preselect: undefined, ...initial };
+	return { tab: "worktrees", row: 0, filter: "", ...initial };
 }
 
 /**
@@ -337,13 +335,6 @@ export function buildManagerRows(session: ManagerSession, items: readonly Manage
 		if (item.kind !== "sandbox") continue;
 		rows.push(sandboxRow(item));
 	}
-	if (session.preselect) {
-		const index = rows.findIndex((row) => row.kind === "sandbox" && row.sandboxId === session.preselect);
-		if (index >= 0) {
-			session.row = index;
-			session.preselect = undefined;
-		}
-	}
 	return rows;
 }
 
@@ -387,14 +378,13 @@ export async function runManagerSession(
 		if (action.kind === "back") continue;
 		const outcome = deps.runCreate ? await deps.runCreate(session, action.positional) : { kind: "failed" as const };
 		if (outcome.kind === "created") {
-			session.preselect = outcome.sandboxId;
-			session.tab = "worktrees";
-			// The created sandbox is selected in the full worktrees view, not
-			// inside the project scope the create may have started from.
-			session.project = undefined;
-			// Only a created sandbox changes the library; cancelled/failed
-			// creations reuse whatever the session already loaded.
+			// Create success changes the library and ends the session: the
+			// caller gets control back (the chat prompt in TUI, its requester
+			// in RPC) instead of the panel reopening on the new row. The next
+			// open collects it. Cancelled/failed creations fall through to
+			// the loop with whatever the session already loaded.
 			deps.onCreated?.();
+			return;
 		}
 	}
 }

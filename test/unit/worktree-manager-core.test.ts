@@ -49,23 +49,13 @@ describe("worktree manager core", () => {
 		const { buildManagerRows, createManagerSession } = await import("../../worktree/manager-core.js");
 		const session = createManagerSession();
 		const rows = buildManagerRows(session, items);
-		await check(t, "default lands on the first create row", session.tab === "worktrees" && session.row === 0 && session.filter === "" && session.preselect === undefined, JSON.stringify(session));
+		await check(t, "default lands on the first create row", session.tab === "worktrees" && session.row === 0 && session.filter === "", JSON.stringify(session));
 		await check(t, "create is first", rows[0]?.kind === "create" && rows[0]?.label === "+ new worktree…", JSON.stringify(rows[0]));
 		const pr = rows.find((row: { sandboxId?: string }) => row.sandboxId === "beta-pr-42");
 		const gone = rows.find((row: { sandboxId?: string }) => row.sandboxId === "gone-7");
 		await check(t, "indexed row exposes its stable id and badge", rows.some((row: { sandboxId?: string; badges?: string[] }) => row.sandboxId === "alpha-123" && row.badges?.includes("indexed")), JSON.stringify(rows));
 		await check(t, "PR row carries PR identity, not merely its branch", Boolean(pr?.label.includes("42") && pr.badges.includes("pr")), JSON.stringify(pr));
 		await check(t, "gone/live row exposes both state badges, live as the plug glyph", Boolean(gone?.badges.includes("gone") && gone.badges.includes("🔌") && !gone.badges.includes("live")), JSON.stringify(gone));
-	});
-
-	test("pending preselect resolves only when its row is visible", async (t) => {
-		const { buildManagerRows, createManagerSession } = await import("../../worktree/manager-core.js");
-		const visible = createManagerSession({ row: 0, preselect: "beta-pr-42" });
-		const visibleRows = buildManagerRows(visible, items);
-		await check(t, "visible preselect moves the cursor and clears itself", visibleRows[visible.row]?.sandboxId === "beta-pr-42" && visible.preselect === undefined, JSON.stringify({ visible, visibleRows }));
-		const hidden = createManagerSession({ row: 0, filter: "alpha", preselect: "beta-pr-42" });
-		const hiddenRows = buildManagerRows(hidden, items);
-		await check(t, "hidden preselect preserves filter, cursor, and pending id", hidden.filter === "alpha" && hidden.row === 0 && hidden.preselect === "beta-pr-42" && !hiddenRows.some((row: { sandboxId?: string }) => row.sandboxId === "beta-pr-42"), JSON.stringify({ hidden, hiddenRows }));
 	});
 
 	test("back and unsuccessful creates redisplay the same session values", async (t) => {
@@ -85,17 +75,30 @@ describe("worktree manager core", () => {
 		}
 	});
 
-	test("created sandbox becomes pending preselection before redisplay", async (t) => {
+	test("a created sandbox exits the loop instead of reopening on the new row", async (t) => {
 		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
-		const session = createManagerSession({ tab: "projects", project: { key: "/repos/alpha", label: "alpha" } });
+		const session = createManagerSession({ row: 2, filter: "beta" });
+		const seen: Array<{ tab: string; row: number; filter: string }> = [];
 		let calls = 0;
 		await runManagerSession({}, { next: async (current: typeof session) => {
 			calls++;
-			if (calls === 1) return { kind: "create" } as const;
-			await check(t, "created id is visible on the full worktrees view", current.preselect === "new-sandbox" && current.tab === "worktrees" && current.project === undefined, JSON.stringify(current));
-			return { kind: "close" } as const;
+			seen.push({ tab: current.tab, row: current.row, filter: current.filter });
+			return calls === 1 ? { kind: "create" } as const : { kind: "close" } as const;
 		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "new-sandbox" }) });
-		await check(t, "exactly one redisplay", calls === 2, `calls=${calls}`);
+		await check(t, "the presenter is never asked to redisplay after a create", calls === 1, `calls=${calls}`);
+		await check(t, "the session was presented exactly as it came in", seen.every((value) => value.row === 2 && value.filter === "beta" && value.tab === "worktrees"), JSON.stringify(seen));
+	});
+
+	test("created from a project scope returns to the caller without switching tabs", async (t) => {
+		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
+		const session = createManagerSession({ tab: "projects", row: 3, filter: "fix", project: { key: "/repos/alpha", label: "alpha" } });
+		let calls = 0;
+		await runManagerSession({}, { next: async () => {
+			calls++;
+			return calls === 1 ? { kind: "create", positional: "/repos/alpha" } as const : { kind: "close" } as const;
+		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "fresh" }) });
+		await check(t, "create success from the scoped projects view exits after one presentation", calls === 1, `calls=${calls}`);
+		await check(t, "the scoped session is left untouched", session.tab === "projects" && session.row === 3 && session.filter === "fix" && session.project?.key === "/repos/alpha", JSON.stringify(session));
 	});
 
 	test("projects group matching worktrees in first-appearance order", async (t) => {
@@ -156,18 +159,6 @@ describe("worktree manager core", () => {
 		await check(t, "baselines never join project grouping", projects.find((row) => row.label === "alpha")?.badges.includes("1 worktree") === true, JSON.stringify(projects));
 	});
 
-	test("created from projects switches to worktrees before redisplay", async (t) => {
-		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
-		const session = createManagerSession({ tab: "projects" });
-		let calls = 0;
-		await runManagerSession({}, { next: async (current: typeof session) => {
-			calls++;
-			if (calls === 1) return { kind: "create" } as const;
-			await check(t, "redisplay sees worktrees and pending id", current.tab === "worktrees" && current.preselect === "fresh", JSON.stringify(current));
-			return { kind: "close" } as const;
-		} }, { session, runCreate: async () => ({ kind: "created", sandboxId: "fresh" }) });
-	});
-
 	test("only a created outcome invalidates loaded items", async (t) => {
 		const { createManagerSession, runManagerSession } = await import("../../worktree/manager-core.js");
 		for (const outcome of [{ kind: "created", sandboxId: "new-sandbox" } as const, { kind: "cancelled" } as const, { kind: "failed" } as const]) {
@@ -178,7 +169,8 @@ describe("worktree manager core", () => {
 				calls++;
 				return calls === 1 ? { kind: "create" } as const : { kind: "close" } as const;
 			} }, { session, runCreate: async () => outcome, onCreated: () => { invalidations++; } });
-			await check(t, `${outcome.kind} ${outcome.kind === "created" ? "invalidates once" : "reuses the cache"}`, invalidations === (outcome.kind === "created" ? 1 : 0), `invalidations=${invalidations}`);
+			const created = outcome.kind === "created";
+			await check(t, `${outcome.kind} ${created ? "invalidates once and ends the session" : "reuses the cache and returns to the panel"}`, invalidations === (created ? 1 : 0) && calls === (created ? 1 : 2), `invalidations=${invalidations} calls=${calls}`);
 		}
 	});
 

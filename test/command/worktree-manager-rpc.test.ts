@@ -10,7 +10,7 @@ describe("worktree manager RPC presenter", () => {
 		const calls: Array<{ title: string; options: string[] }> = [];
 		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return "+ new worktree…"; } } };
 		const presenter = createWorktreeManagerRpcPresenter(ctx, items);
-		const action = await presenter.next({ tab: "worktrees", row: 0, filter: "", preselect: undefined } satisfies ManagerSession);
+		const action = await presenter.next({ tab: "worktrees", row: 0, filter: "" } satisfies ManagerSession);
 		await check(t, "create selection maps to create", action?.kind === "create", JSON.stringify(action));
 		await check(t, "one select call per next", calls.length === 1, JSON.stringify(calls));
 		await check(t, "title conveys active worktrees view", calls[0]!.title.includes("worktrees"), calls[0]!.title);
@@ -23,7 +23,7 @@ describe("worktree manager RPC presenter", () => {
 		let calls = 0;
 		const ctx = { ui: { select: async () => { calls++; return responses.shift(); } } };
 		const presenter = createWorktreeManagerRpcPresenter(ctx, items);
-		const session: ManagerSession = { tab: "projects", row: 0, filter: "", preselect: undefined };
+		const session: ManagerSession = { tab: "projects", row: 0, filter: "" };
 		const back = await presenter.next(session);
 		await check(t, "cancel maps to shared back action", back?.kind === "back" && calls === 1, JSON.stringify({ back, calls }));
 		const close = await presenter.next(session);
@@ -32,7 +32,7 @@ describe("worktree manager RPC presenter", () => {
 
 	test("view switching and project selection mutate the shared session", async (t) => {
 		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
-		const session: ManagerSession = { tab: "worktrees", row: 2, filter: "", preselect: undefined };
+		const session: ManagerSession = { tab: "worktrees", row: 2, filter: "" };
 		const calls: Array<{ title: string; options: string[] }> = [];
 		const responses = ["view: projects", "repo (1 worktree)", "back to all projects"];
 		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
@@ -68,7 +68,7 @@ describe("worktree manager RPC presenter", () => {
 		const responses: Array<string | undefined> = ["view: baselines", "repo · main", "close"];
 		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
 		const presenter = createWorktreeManagerRpcPresenter(ctx, () => [items()[0]!, baseline]);
-		const session: ManagerSession = { tab: "projects", row: 0, filter: "", preselect: undefined };
+		const session: ManagerSession = { tab: "projects", row: 0, filter: "" };
 		await presenter.next(session);
 		await check(t, "projects view offers the baselines switch", calls[0]!.options.includes("view: baselines") && session.tab === "baselines", JSON.stringify(calls[0]));
 		const detail = await presenter.next(session);
@@ -85,7 +85,7 @@ describe("worktree manager RPC presenter", () => {
 			version++;
 			return [{ kind: "sandbox", sandboxId: `fresh-${version}`, projectKey: "/repo", projectLabel: "repo", branch: "feature", path: `/worktrees/${version}`, indexed: true, gone: false, live: false, searchText: `fresh ${version}` }];
 		});
-		const session: ManagerSession = { tab: "worktrees", row: 0, filter: "", preselect: undefined };
+		const session: ManagerSession = { tab: "worktrees", row: 0, filter: "" };
 		await presenter.next(session);
 		await presenter.next(session);
 		await check(t, "provider runs once per next", version === 2, `version=${version}; titles=${JSON.stringify(titles)}`);
