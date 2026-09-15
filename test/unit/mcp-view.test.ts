@@ -12,10 +12,11 @@ import type { SandboxEntry } from "../../chhound/sandbox.js";
 // (repo/branch identity, tool list suffixes, listed-tools-only usage examples,
 // buildStatusLines sandbox-meta join by id with recreated-sandbox guard and
 // bare-format fallback, same-name repo disambiguation tokens, indexLabelFor
-// PR-head / repoRoot-absent / collision behavior) and 5 index-root health /
+// PR-head / repoRoot-absent / collision behavior) and 7 index-root health /
 // listing-removal checks (clean one-liner, unclaimed fix, claimed/expected
 // mismatch fix, missing storage dir flagged instead of a false clean,
-// worktree+baseline listing sections gone). The fs-backed
+// unreadable library warned instead of a false-empty hint, true-empty hint
+// intact, worktree+baseline listing sections gone). The fs-backed
 // target/picker lists moved to fs/sandbox-catalog.test.ts; the live
 // protocol/replay to engine/mcp-bridge.test.ts.
 
@@ -324,6 +325,35 @@ describe("mcp view", () => {
 			"status: worktree/baseline listings are gone",
 			!joined.includes("worktrees (") && !joined.includes("baselines ("),
 			joined,
+		);
+		// N-05: a library scan that could not read the state root must warn about
+		// the read failure — `(no sandboxes …)` would claim an empty library.
+		const unreadableLibrary = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [],
+			conns: [],
+			libraryIssue: "cannot read the worktree library /x/sandboxes: EACCES: permission denied, scandir '/x/sandboxes/.state'",
+		}).join("\n");
+		await check(
+			t,
+			"status: unreadable library warns instead of claiming an empty one",
+			unreadableLibrary.includes("⚠ cannot read the worktree library /x/sandboxes: EACCES") &&
+				unreadableLibrary.includes("fix: check the library root's permissions") &&
+				!unreadableLibrary.includes("(no sandboxes"),
+			unreadableLibrary,
+		);
+		const emptyLibrary = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: a genuinely empty library keeps the create hint",
+			emptyLibrary.includes("index roots (0):") && emptyLibrary.includes("(no sandboxes — run /ch-worktree <path>)") && !emptyLibrary.includes("⚠"),
+			emptyLibrary,
 		);
 	});
 });

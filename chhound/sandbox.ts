@@ -177,15 +177,45 @@ export async function dirSizeAsync(p: string): Promise<number | undefined> {
 	};
 	return walk(p);
 }
-/** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
-export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
+/** Test seams for the library scan. Only `readdirSync` needs widening (the
+ * race / unreadable-root pins); everything else hits the real filesystem, so a
+ * seam never fakes the behavior under test wholesale. ESM namespace properties
+ * (`import * as fs`) are read-only — patching the default `fs` object from a
+ * test cannot reach this module, which is exactly why the seam is injected. */
+export interface SandboxScanSeams {
+	/** List the state root's entry names. Defaults to `fs.readdirSync`. */
+	readdirSync?: (stateRoot: string) => string[];
+}
+
+/** A library listing plus the read failure that must be surfaced instead of
+ * rendering as an empty library. */
+export interface SandboxLibrary {
+	entries: SandboxEntry[];
+	/** Set when the state root exists but could not be read (EACCES/EPERM/…):
+	 * `entries` is the part that survived, not the library. A missing state root
+	 * (ENOENT) is NOT an issue — an absent library is an empty one. */
+	issue?: string;
+}
+
+/** Library listing that keeps its failure distinguishable from an empty
+ * library. Callers that render a count must render `issue` when set; the
+ * convenience `listSandboxes` drops it (N-05). */
+export function listSandboxLibrary(settings: ChhoundSettings, seams: SandboxScanSeams = {}): SandboxLibrary {
 	const root = sandboxRoot(settings);
 	const stateRoot = path.join(root, STATE_DIR_NAME);
+	const readdir = seams.readdirSync ?? ((dir: string): string[] => fs.readdirSync(dir));
 	let names: string[];
 	try {
-		names = fs.readdirSync(stateRoot);
-	} catch {
-		return []; // library missing or unreadable
+		names = readdir(stateRoot);
+	} catch (err) {
+		// No library yet is a real empty library; anything else (EACCES, EPERM,
+		// ENOTDIR, …) is a read failure — returning [] for those would print
+		// "(no sandboxes …)" for a library that is merely unreadable.
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [] };
+		return {
+			entries: [],
+			issue: `cannot read the worktree library ${root}: ${err instanceof Error ? err.message : String(err)}`,
+		};
 	}
 	const out: SandboxEntry[] = [];
 	for (const name of names) {
@@ -216,7 +246,12 @@ export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
 			continue;
 		}
 	}
-	return out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt));
+	return { entries: out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt)) };
+}
+
+/** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
+export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
+	return listSandboxLibrary(settings).entries;
 }
 
 /** Remove sandboxes whose worktree no longer exists. Returns removed dirs. */

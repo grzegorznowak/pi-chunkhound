@@ -132,7 +132,16 @@ export interface TextPromptOptions {
 export async function promptText(ui: PathPromptUI, opts: TextPromptOptions): Promise<string | undefined> {
 	const viaCustom = await promptViaCustom<string | undefined>(ui, (_tui, theme, keybindings, done) => new TextPromptComponent(theme, keybindings, opts, done));
 	if (viaCustom.kind === "custom") return viaCustom.value;
-	return ui.input?.(opts.title, opts.startValue);
+	const value = await ui.input?.(opts.title, opts.startValue);
+	if (value === undefined) return undefined;
+	// pi's ui.input has NO prefill — its second argument is only a dim
+	// placeholder, so a plain Enter (the only way to submit a default in a
+	// fallback host) returns "". The TUI component prefills the field and
+	// returns startValue on an untouched Enter, so map the empty submit onto
+	// the prefill here too: otherwise every fallback host silently drops the
+	// default (N-01: the wizard's <repo>-wt branch was skipped, losing the
+	// collision handling). Empty stays empty when there is no startValue.
+	return value === "" ? opts.startValue ?? "" : value;
 }
 
 export class TextPromptComponent extends Container {

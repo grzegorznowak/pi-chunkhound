@@ -382,10 +382,30 @@ export async function collectWorktreeList(opts: {
 	const { entries, settings, records } = opts;
 	const livePrefixFor = opts.livePrefixFor ?? ((id: string) => getMcpConnection(id)?.prefix);
 	const limit = Math.max(1, opts.concurrency ?? 4);
-	const ghState = { failed: 0, attempted: 0, pending: 0 };
+	const ghState = { failed: 0, attempted: 0 };
 	const infos: WtListInfo[] = new Array(entries.length);
 	// Rows whose gh task had not settled when the collector returned.
 	const pendingPr = new Set<number>();
+	// Detached gh lookups, capped by `limit` so the row walk never waits on the
+	// network: time-to-output is bounded by the caller's budget, not by N hung
+	// lookups (review V2-25).
+	const ghTasks = new Set<Promise<void>>();
+	let ghActive = 0;
+	const ghQueue: (() => void)[] = [];
+	const acquireGh = (): Promise<void> => {
+		if (ghActive < limit) {
+			ghActive++;
+			return Promise.resolve();
+		}
+		return new Promise((resolve) => ghQueue.push(() => { ghActive++; resolve(); }));
+	};
+	const releaseGh = (): void => {
+		ghActive--;
+		ghQueue.shift()?.();
+	};
+	// Set once the collector returns: a late gh result still lands on its row
+	// object, but must not fire callbacks into a caller that already rendered.
+	let closed = false;
 	let next = 0;
 	let reported = 0;
 	let onAllReported: (() => void) | undefined;
@@ -401,15 +421,20 @@ export async function collectWorktreeList(opts: {
 			const wt = entry.meta.worktree;
 			const gone = wt.length === 0 || !fs.existsSync(wt);
 			// Start the gh lookup before the local probes: the network round-trip
-			// overlaps the checkout walk, so a slow/failing gh delays only the PR
-			// cell (via onUpdate), never the size/git cells.
+			// overlaps the checkout walk, and the detached task only ever updates
+			// its own PR cell (via onUpdate) — it never gates the row walk.
 			const prTask = /^pull\/\d+$/.test(entry.meta.branch ?? "")
 				? (async (): Promise<WtPrState | undefined> => {
-					if (!(await prRepoIdentity(settings, entry.meta.repoRoot))) return undefined;
-					ghState.attempted++;
-					const pr = await ghPrState(settings, entry);
-					if (!pr) ghState.failed++;
-					return pr;
+					await acquireGh();
+					try {
+						if (!(await prRepoIdentity(settings, entry.meta.repoRoot))) return undefined;
+						ghState.attempted++;
+						const pr = await ghPrState(settings, entry);
+						if (!pr) ghState.failed++;
+						return pr;
+					} finally {
+						releaseGh();
+					}
 				})()
 				: undefined;
 			let git: WtGitState | undefined;
@@ -441,32 +466,45 @@ export async function collectWorktreeList(opts: {
 			opts.onItem?.(i, info);
 			if (reported === entries.length) onAllReported?.();
 			if (prTask) {
-				// Awaiting here keeps gh concurrency at ≤ `limit` (one lookup per
-				// worker slot) while the caller's budget caps how long IT waits.
-				ghState.pending++;
+				// Detached: the row is already reported; the lookup lands later
+				// (bounded by the caller's budget) without holding this worker slot.
 				pendingPr.add(i);
-				try {
-					const pr = await prTask;
-					if (pr) {
-						info.pr = pr;
-						opts.onUpdate?.(i, info);
-					}
-				} finally {
-					ghState.pending--;
-					pendingPr.delete(i);
-				}
+				const task = prTask
+					.then((pr) => {
+						if (pr) {
+							info.pr = pr;
+							if (!closed) {
+								try {
+									opts.onUpdate?.(i, info);
+								} catch {
+									// A presenter callback must never reject the detached task:
+									// an unhandled rejection would take the process down.
+								}
+							}
+						}
+					}, () => {
+						ghState.failed++;
+					})
+					.finally(() => {
+						pendingPr.delete(i);
+						ghTasks.delete(task);
+					});
+				ghTasks.add(task);
 			}
 		}
 	};
 	const workers = Promise.all(Array.from({ length: Math.min(limit, entries.length) }, () => worker()));
 	if (opts.ghWaitMs === undefined) {
 		await workers;
+		await Promise.allSettled([...ghTasks]);
 	} else {
 		// Displayable rows first (that is what the caller renders), then a bounded
-		// wait for the late PR states — a hung gh delays the emission, never blocks it.
+		// wait for the detached gh lookups — a hung gh can neither delay the rows
+		// nor stretch the emission past the budget, however many rows there are.
 		if (entries.length > 0) await allReported;
-		await waitWithDeadline(workers, opts.ghWaitMs);
+		await waitWithDeadline(Promise.allSettled([...ghTasks]), opts.ghWaitMs);
 	}
+	closed = true;
 	for (const index of pendingPr) infos[index]!.prPending = true;
 	return { infos, ghFailed: ghState.failed, ghAttempted: ghState.attempted, ghPending: pendingPr.size };
 }
@@ -856,13 +894,17 @@ function errText(e: unknown): string {
 }
 
 /**
- * Did `git worktree prune -v` actually remove an admin entry? Git reports each
- * removal as `Removing worktrees/<id>: <reason>` on STDERR (exit code 0 also
- * when there was nothing to prune), so exit code alone cannot tell — a `prune`
- * that swept nothing must never be reported as `pruned` (review V2-05).
+ * Did `git worktree prune -v` actually remove THIS target's admin entry? Git
+ * reports each removal as `Removing worktrees/<id>: <reason>` on STDERR (exit
+ * code 0 also when there was nothing to prune), so exit code alone cannot tell,
+ * and a repo-global sweep may remove some OTHER stale entry: match the target's
+ * own id — `basename(worktree)`, which is how git names the admin entry
+ * (reviews V2-05, N-03). A `prune` that swept nothing — or only other entries —
+ * must never be reported as `pruned` for this target.
  */
-function pruneRemovedSomething(r: { code: number; stderr: string }): boolean {
-	return r.code === 0 && r.stderr.split("\n").some((line) => line.startsWith("Removing "));
+function pruneRemovedSomething(r: { code: number; stderr: string }, worktree: string): boolean {
+	const base = path.basename(worktree.replace(/[\\/]+$/, ""));
+	return r.code === 0 && r.stderr.split("\n").some((line) => line.startsWith(`Removing worktrees/${base}:`));
 }
 
 /**
@@ -956,20 +998,20 @@ export async function removeWorktreeEntry(opts: {
 	// 2) git worktree remove --force in the host repo — while the checkout
 	//    still exists. On any failure the storage halves are still removed
 	//    and a `git worktree prune -v` sweep cleans the admin metadata (the
-	//    sweep reports `pruned` ONLY when it actually removed something).
+	//    sweep reports `pruned` ONLY when it removed THIS target's entry).
 	if (hostAlive && meta.worktree.length > 0 && fs.existsSync(meta.worktree)) {
 		const r = await runGit(["worktree", "remove", "--force", meta.worktree], { cwd: hostRoot! });
 		if (r.code === 0) outcome.worktreeRemoved = true;
 		else {
 			outcome.warnings.push(`git worktree remove failed: ${r.stderr || r.stdout || "unknown error"}`);
 			const p = await runGit(["worktree", "prune", "-v"], { cwd: hostRoot! });
-			if (pruneRemovedSomething(p)) outcome.pruned = true;
+			if (pruneRemovedSomething(p, meta.worktree)) outcome.pruned = true;
 		}
 	} else if (hostAlive && meta.worktree.length > 0) {
 		// Checkout already gone — sweep the stale admin registration so the
 		// branch (if deletable) is not seen as "still checked out".
 		const p = await runGit(["worktree", "prune", "-v"], { cwd: hostRoot! });
-		if (pruneRemovedSomething(p)) outcome.pruned = true;
+		if (pruneRemovedSomething(p, meta.worktree)) outcome.pruned = true;
 	}
 
 	// 3) Storage halves: the sandbox dir (checkout + config + engine dir)

@@ -66,8 +66,10 @@ Don't use both install paths at once — the commands would register twice. Conf
   With no argument at all it also lets you pick the repo. Path prompts support
   TAB completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
 - **One-go (agents)** — everything on one line, fully non-interactive:
-  `/ch-worktree [repo] -b <branch> [--dest <dir>]`. The first argument is always
-  the repo. A **PR URL in the repo slot** (`/ch-worktree https://github.com/<owner>/<repo>/pull/<n>`)
+  `/ch-worktree [repo] -b <branch> [--dest <dir>]`. Except for the reserved
+  manager verbs (`ls`/`list`/`rm`/`remove`, which dispatch before the repo slot),
+  the first argument is the repo — a repo literally named `ls` needs `./ls`. A
+  **PR URL in the repo slot** (`/ch-worktree https://github.com/<owner>/<repo>/pull/<n>`)
   creates a pull-request sandbox the same way the wizard's PR option does.
 - **Remote branches** — the branch slot also accepts `<remote>/<branch>`
   (e.g. `origin/feature`): the remote branch is checked out **detached at its

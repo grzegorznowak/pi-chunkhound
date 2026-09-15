@@ -217,7 +217,11 @@ export function createWorktreeManagerTuiPresenter(
 						const sizeColumns = sizeColumnKeys.filter((key) => sizeColumnWidths.has(key));
 						const sizeSegment = (item: ManagerRow): string | undefined => {
 							if (!item.sizeCells || sizeColumns.length === 0) return undefined;
-							return sizeColumns.map((key) => (item.sizeCells?.[key] ?? "").padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
+							// A cell this row could not measure renders as `—` (the same marker
+							// `ls`/fmtSizeMaybe uses) instead of a blank slot under a column a
+							// sibling row earned (N-04): unmeasured stays unmeasured, never blank
+							// and never a made-up 0.
+							return sizeColumns.map((key) => (item.sizeCells?.[key] ?? "—").padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
 						};
 						// The header shares the row prefix (marker · padded label · padded
 						// badges) so its labels sit exactly over the numeric columns.

@@ -569,6 +569,23 @@ describe("removal flow over a fixture library (throwaway)", () => {
 			await check(t, "prune swept nothing → pruned stays false", outNever.pruned === false, JSON.stringify(outNever));
 			await check(t, "never-registered: storage removed without the false note", outNever.sandboxDirRemoved === true && outNever.stateDirRemoved === true, JSON.stringify(outNever));
 
+			// ── B2) prune attribution (N-03): a repo-global sweep that removes an
+			// OTHER stale entry must not claim THIS target was pruned ──
+			const otherWt = path.join(root, "sandboxes", "otherprune-wt");
+			await git(["worktree", "add", "-b", "otherprune-b", otherWt, "main"], { cwd: repo });
+			fs.rmSync(otherWt, { recursive: true, force: true }); // stale admin entry stays
+			// Target: a directory that was never registered as a worktree, so
+			// `worktree remove` fails, the sweep runs — and its one removal
+			// belongs to the OTHER entry, not to this target.
+			const strayId = "sb-strayprune-000005";
+			const strayWt = path.join(root, "sandboxes", "stray-wt");
+			fs.mkdirSync(strayWt, { recursive: true });
+			fs.writeFileSync(path.join(strayWt, "file.txt"), "x\n");
+			const strayEntry = mkEntry({ id: strayId, wt: strayWt, branch: "stray-b", baseRef: "main" });
+			const outStray = await removeWorktreeEntry({ row: await rowFor(strayEntry), settings, mcp: seams });
+			await check(t, "sweep removed another entry → pruned stays false for this target", outStray.pruned === false, JSON.stringify(outStray));
+			await check(t, "stray target: removal failed, storage still cleaned", outStray.worktreeRemoved === false && outStray.warnings.some((w) => w.includes("git worktree remove failed")), JSON.stringify(outStray));
+
 			// ── C) storage-failure ordering (V2-07): sandbox first, .state kept ──
 			// The failure is injected through the engine's storage seam (patching `fs`
 			// internals is not portable: Node 24 no longer routes `rmSync` through
@@ -766,6 +783,71 @@ describe("removal flow over a fixture library (throwaway)", () => {
 			const deadline = Date.now() + 5_000;
 			while (result.infos[0]?.pr === undefined && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
 			await check(t, "the late gh state lands after release", result.infos[0]?.pr?.state === "MERGED" && result.ghAttempted === 1 && result.ghFailed === 0, JSON.stringify({ pr: result.infos[0]?.pr, attempted: result.ghAttempted, failed: result.ghFailed }));
+		} finally {
+			try { fs.writeFileSync(gate, "go"); } catch { /* teardown is best-effort */ }
+			applyEnv(env);
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("the gh budget holds for N hung rows, not just the tail (V2-25)", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-fs-gh-budget-n-");
+		const gate = path.join(root, "gh-release");
+		const count = 8;
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const ghShim = path.join(root, "gh-shim");
+			fs.mkdirSync(ghShim);
+			fs.writeFileSync(path.join(ghShim, "gh"), `#!/bin/sh\nwhile [ ! -f '${gate}' ]; do sleep 0.05; done\necho '{"state":"MERGED","isDraft":false}'\n`);
+			fs.chmodSync(path.join(ghShim, "gh"), 0o755);
+			process.env.PATH = ghShim + path.delimiter + (process.env.PATH ?? "");
+			const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
+			const repo = path.join(root, "budget-n-repo");
+			fs.mkdirSync(repo);
+			const git = async (args: string[]): Promise<void> => {
+				const r = await runGit(args, { cwd: repo });
+				if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+			};
+			await git(["init", "-q", "-b", "main"]);
+			await git(["remote", "add", "origin", "https://github.com/acme/widgets.git"]);
+			const entries: SandboxEntry[] = [];
+			for (let n = 1; n <= count; n++) {
+				const wt = path.join(root, "checkouts", `pull-${n}`);
+				fs.mkdirSync(wt, { recursive: true });
+				fs.writeFileSync(path.join(wt, "file.txt"), "content\n");
+				entries.push({
+					dir: path.join(settings.sandboxRoot!, `sb-pr-0000000${n}`),
+					stateDir: path.join(settings.sandboxRoot!, ".state", `sb-pr-0000000${n}`),
+					dbSizeBytes: 0,
+					meta: {
+						version: 1,
+						worktree: wt,
+						repoRoot: repo,
+						branch: `pull/${n}`,
+						baseRef: "main",
+						baseCommit: "0".repeat(40),
+						chhoundVersion: "test",
+						createdAt: "2026-09-14T00:00:00.000Z",
+						copiedFrom: "",
+						dbPath: path.join(settings.sandboxRoot!, ".state", `sb-pr-0000000${n}`, "db"),
+					},
+				});
+			}
+			const started = Date.now();
+			const result = await collectWorktreeList({ entries, settings, records: new Map(), ghWaitMs: 1 });
+			const elapsed = Date.now() - started;
+			await check(t, "N hung rows: emission stays inside the budget", elapsed < 5_000, `${elapsed}ms`);
+			await check(t, "all N rows are pending at return", result.ghPending === count && result.infos.every((i) => i.prPending === true), JSON.stringify({ ghPending: result.ghPending, pending: result.infos.map((i) => i.prPending) }));
+			await check(t, "gh concurrency stays capped at the worker limit", result.ghAttempted <= 4, `attempted=${result.ghAttempted}`);
+			// Release the shim: every queued lookup still runs, and each late
+			// state lands on its OWN row object.
+			fs.writeFileSync(gate, "go");
+			const deadline = Date.now() + 10_000;
+			while (result.infos.some((i) => i.pr === undefined) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+			await check(t, "all queued lookups complete after release", result.ghFailed === 0 && result.infos.every((i) => i.pr?.state === "MERGED"), JSON.stringify({ attemptedAtReturn: result.ghAttempted, failed: result.ghFailed, states: result.infos.map((i) => i.pr?.state) }));
+			await check(t, "late updates never fire after the collector returned", result.infos.every((i) => i.prPending === true), JSON.stringify(result.infos.map((i) => i.prPending)));
 		} finally {
 			try { fs.writeFileSync(gate, "go"); } catch { /* teardown is best-effort */ }
 			applyEnv(env);

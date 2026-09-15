@@ -5,7 +5,7 @@ import { chhoundBinary, chhoundVersion } from "../chhound/cli.js";
 import { parseArgs } from "../chhound/args.js";
 import { gitRootOrNull } from "../chhound/git.js";
 import { baseRoot, sandboxRoot } from "../chhound/paths.js";
-import { listSandboxes, pruneSandboxes, claimedRootMatches, sandboxBranchLabel } from "../chhound/sandbox.js";
+import { listSandboxLibrary, pruneSandboxes, claimedRootMatches, sandboxBranchLabel } from "../chhound/sandbox.js";
 import { listMcpConnections, indexDisambigToken } from "../mcp/manager.js";
 import { loadSettings } from "../chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "../chhound/types.js";
@@ -36,8 +36,11 @@ export function buildStatusLines(opts: {
 	settings: ChhoundSettings;
 	sandboxes: SandboxEntry[];
 	conns: readonly McpStatusConn[];
+	/** The library scan failed to read the state root (N-05) — `sandboxes` is
+	 * what could be read, not the library, so the empty-library hint would lie. */
+	libraryIssue?: string;
 }): string[] {
-	const { version, settings, sandboxes, conns } = opts;
+	const { version, settings, sandboxes, conns, libraryIssue } = opts;
 	const lines: string[] = [
 		`chunkhound: ${version.replace(/^chunkhound\s+/, "")} (${chhoundBinary()})`,
 		`worktree library root: ${sandboxRoot(settings)}${settings.worktreeBase && !settings.sandboxRoot ? ` (legacy worktreeBase)` : ""}`,
@@ -55,9 +58,14 @@ export function buildStatusLines(opts: {
 	// claimed root is the SANDBOX dir (the daemon's project dir — the checkout
 	// lives inside it), not the worktree.
 	let problems = 0;
-	if (sandboxes.length === 0) {
+	if (libraryIssue) {
+		// An unreadable state root must never render as an empty library (N-05):
+		// the count below is what could be read, so say so and drop the hint.
+		lines.push(`  ⚠ ${libraryIssue}`, "      fix: check the library root's permissions, or re-run /ch-worktree ls");
+	} else if (sandboxes.length === 0) {
 		lines.push("  (no sandboxes — run /ch-worktree <path>)");
-	} else {
+	}
+	if (sandboxes.length > 0) {
 		for (const s of sandboxes) {
 			const repoName = s.meta.repoRoot ? path.basename(s.meta.repoRoot) : path.basename(s.dir);
 			const label = `${repoName}/${sandboxBranchLabel(s.meta)}`;
@@ -206,10 +214,10 @@ export function registerStatusCommand(pi: ExtensionAPI, state: PluginState): voi
 			}
 
 			const version = await chhoundVersion();
-			const sandboxes = listSandboxes(settings);
+			const library = listSandboxLibrary(settings);
 
 			ctx.ui.notify(
-				buildStatusLines({ version, settings, sandboxes, conns: listMcpConnections() }).join("\n"),
+				buildStatusLines({ version, settings, sandboxes: library.entries, libraryIssue: library.issue, conns: listMcpConnections() }).join("\n"),
 				"info",
 			);
 		},

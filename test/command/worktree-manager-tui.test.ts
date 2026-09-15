@@ -774,6 +774,46 @@ describe("worktree manager TUI presenter", () => {
 		} finally { setKeybindings(original); }
 	});
 
+	test("an unmeasured checkout renders — inside a sibling's CHECKOUT column (N-04)", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			// One row measured both halves (so the CHECKOUT/TOTAL columns exist for
+			// the whole table) and one whose checkout walk returned undefined: `ls`
+			// renders that cell as `—`, so the TUI must not render it blank.
+			const sized = [
+				{ ...items[0]!, sizeBytes: 2048, dbBytes: 1024 * 1024 },
+				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix", dbBytes: 2 * 1024 * 1024 },
+			];
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => sized).next({ tab: "worktrees", row: 1, filter: "" });
+			await new Promise((resolve) => setImmediate(resolve));
+			const lines = component!.render(100);
+			const measuredLine = lines.find((line) => line.includes("repo · feature"))!;
+			const unmeasuredLine = lines.find((line) => line.includes("beta · bugfix"))!;
+			const header = lines.find((line) => line.includes("CHECKOUT"))!;
+			await check(t, "the measured row still carries its real numbers", measuredLine.includes("1.0 MB") && measuredLine.includes("2.0 KB") && !measuredLine.includes("—"), JSON.stringify(measuredLine));
+			await check(
+				t,
+				"the unmeasured checkout and total render the honest — marker",
+				(unmeasuredLine.match(/—/g) ?? []).length === 2 && unmeasuredLine.trimEnd().endsWith("—") && !unmeasuredLine.includes("0 B"),
+				JSON.stringify(unmeasuredLine),
+			);
+			await check(
+				t,
+				"the db cells stay right-aligned under the shared header",
+				measuredLine.indexOf("1.0 MB") + "1.0 MB".length === unmeasuredLine.indexOf("2.0 MB") + "2.0 MB".length && header.includes("TOTAL"),
+				`${header}\n${measuredLine}\n${unmeasuredLine}`,
+			);
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
+
 	test("a session keeps one manager store across command invocations", async (t) => {
 		const env = snapshotEnv();
 		const root = await makeFixtureRoot("pi-chhound-cmd-manager-store-");

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { baselineDirFor, listBaselines } from "../../chhound/baseline.js";
 import { runGit } from "../../chhound/git.js";
-import { claimedRootMatches, listSandboxes, pruneSandboxes, readClaimedRoot, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
+import { claimedRootMatches, listSandboxLibrary, listSandboxes, pruneSandboxes, readClaimedRoot, sandboxConfigPath, sandboxDbDir, sandboxDirFor, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { BaselineMeta, ChhoundSettings, SandboxMeta } from "../../chhound/types.js";
 import { mcpSelectOptions, mcpTargetLines } from "../../mcp/command.js";
 import { check } from "../lib/checks.js";
@@ -95,25 +95,34 @@ describe("sandbox catalog", () => {
 			fs.rmSync(claimPath, { force: true });
 			await check(t, "missing sidecar → unclaimed", listSandboxes(settings)[0]!.claimedRoot === undefined);
 			// V2-26: a state entry removed between readdirSync and statSync (a
-			// concurrent rm/prune) must be skipped, never abort the listing.
+			// concurrent rm/prune) must be skipped, never abort the listing. The
+			// seam widens the REAL listing with the vanished name — patching the
+			// default `fs` object cannot work here: production imports the ESM
+			// namespace (`import * as fs`), whose properties are read-only, so the
+			// old patch was invisible and this pin passed even without the skip.
 			const vanishedName = "vanished-00000000";
-			const realReaddirSync = fs.readdirSync;
-			try {
-				fs.readdirSync = ((p: fs.PathLike, o?: unknown) => {
-					const names = (realReaddirSync as unknown as (p: fs.PathLike, o?: unknown) => unknown)(p, o);
-					if (path.resolve(String(p)) === path.resolve(path.dirname(stateDir)) && Array.isArray(names)) names.push(vanishedName);
-					return names;
-				}) as unknown as typeof fs.readdirSync;
-				const afterRace = listSandboxes(settings);
-				await check(
-					t,
-					"listing skips an entry vanishing between readdir and stat",
-					afterRace.length === 1 && afterRace[0]!.meta.worktree === wt && afterRace[0]!.dirExists === true,
-					JSON.stringify(afterRace.map((s) => ({ name: path.basename(s.stateDir), dirExists: s.dirExists }))),
-				);
-			} finally {
-				fs.readdirSync = realReaddirSync;
-			}
+			const afterRace = listSandboxLibrary(settings, {
+				readdirSync: (dir) => [...fs.readdirSync(dir), vanishedName],
+			}).entries;
+			await check(
+				t,
+				"listing skips an entry vanishing between readdir and stat",
+				afterRace.length === 1 && afterRace[0]!.meta.worktree === wt && afterRace[0]!.dirExists === true,
+				JSON.stringify(afterRace.map((s) => ({ name: path.basename(s.stateDir), dirExists: s.dirExists }))),
+			);
+			// N-05: an unreadable state root must not look like an empty library.
+			// A missing root is the genuine empty library (ENOENT, no issue) …
+			const missing = listSandboxLibrary({ version: 1, sandboxRoot: path.join(root, "no-such-sandboxes"), baseRoot: path.join(root, "bases") });
+			await check(t, "missing library root is a true empty library (no issue)", missing.entries.length === 0 && missing.issue === undefined, JSON.stringify(missing));
+			// … while any other readdir failure is reported to the caller.
+			const denied = Object.assign(new Error("EACCES: permission denied, scandir"), { code: "EACCES" });
+			const unreadable = listSandboxLibrary(settings, { readdirSync: () => { throw denied; } });
+			await check(
+				t,
+				"unreadable state root is reported instead of silently empty",
+				unreadable.entries.length === 0 && typeof unreadable.issue === "string" && unreadable.issue.includes("EACCES") && unreadable.issue.includes(path.resolve(settings.sandboxRoot!)),
+				JSON.stringify(unreadable),
+			);
 			// V2-22 signal: a surviving .state half whose sandbox dir was deleted
 			// exposes dirExists=false instead of pretending the entry is healthy.
 			const orphanStateDir = path.join(path.dirname(stateDir), "orphan-00000001");

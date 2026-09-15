@@ -78,6 +78,42 @@ describe("worktree wizard outcomes", () => {
 		}
 	});
 
+	test("N-01: fallback host + plain Enter resolves the default <repo>-wt branch", async (t) => {
+		// In a fallback host (no ui.custom) the branch prompt's plain Enter comes
+		// back as "" — pi's ui.input has no prefill. The wizard must read that as
+		// "accept <repo>-wt" (the TUI's untouched-prefill meaning) and still run
+		// resolveBranchChoice, instead of skipping it and letting git derive the
+		// branch from the path (losing reuse/collision handling).
+		const { runBranchWizard } = await import("../../worktree/command.js");
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const repoRoot = path.join(root, "repo");
+			const library = path.join(root, "library");
+			await fs.mkdir(repoRoot);
+			let created: { branch?: string; createBranch?: string } | undefined;
+			const fake = fakeCtx(repoRoot, ["", library]);
+			const outcome = await runBranchWizard(fake.ctx as never, {} as never, repoRoot, {
+				create: async (_ctx, _state, opts) => {
+					created = { branch: opts.branch, createBranch: opts.createBranch };
+					return { ok: true, sandboxId: "repo-wt" };
+				},
+			});
+			await check(
+				t,
+				"plain Enter accepts the default branch instead of skipping resolution",
+				created?.createBranch === "repo-wt" && created?.branch === undefined,
+				JSON.stringify({ created, notifications: fake.notifications }),
+			);
+			await check(t, "the resolved default flows through to created", outcome.kind === "created", JSON.stringify(outcome));
+		} finally {
+			restoreEnv(env);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("invalid PR URL returns failed", async (t) => {
 		const { runPrWizard } = await import("../../worktree/command.js");
 		const outcome = await runPrWizard(fakeCtx(process.cwd(), []).ctx as never, {} as never, "not-a-pr-url");

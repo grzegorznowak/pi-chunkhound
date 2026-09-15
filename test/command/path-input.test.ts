@@ -273,6 +273,22 @@ describe("path input", () => {
 			} as never, { title: "Text title" });
 			await check(t, "promptText: a throwing custom falls back to ui.input", textThrown === "fallback" && textThrowCalls.length === 1, JSON.stringify({ textThrown, textThrowCalls }));
 
+			// N-01: pi's ui.input has NO prefill (its second argument is a dim
+			// placeholder), so a plain Enter — the only way a fallback host can
+			// submit a default — returns "". The TUI component returns the untouched
+			// startValue, so the fallback maps the empty submit onto the prefill too;
+			// without a prefill an empty submit stays empty.
+			const emptySubmit = await promptText({
+				custom: async () => undefined,
+				input: async () => "",
+			} as never, { title: "Branch name", startValue: "repo-wt" });
+			await check(t, "promptText: empty fallback submit accepts the prefill (N-01)", emptySubmit === "repo-wt", String(emptySubmit));
+			const emptyNoPrefill = await promptText({
+				custom: async () => undefined,
+				input: async () => "",
+			} as never, { title: "PR URL" });
+			await check(t, "promptText: empty stays empty without a prefill", emptyNoPrefill === "", String(emptyNoPrefill));
+
 			// promptPath: the same seam for the TAB-completion dialog.
 			const pathCalls: Array<[string, string | undefined]> = [];
 			const path = await promptPath({
