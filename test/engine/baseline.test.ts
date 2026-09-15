@@ -167,18 +167,33 @@ describe("baseline prime", () => {
 			const b2 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
 			await check(tc, "baseline fresh on re-run", b2.fresh === false);
 
-			// Engine version change must NOT trigger a re-prime: the baseline db is
-			// reused and topped up in place (the engine migrates its own schema).
+			// Engine version change must NOT trigger a re-prime: the existing db is
+			// reused and left in place (it is copied + topped up per sandbox, where
+			// the engine migrates its own schema). The db inode pins that nothing
+			// was wiped/recreated.
 			const metaFile = path.join(b1.dir, "meta.json");
 			const tampered = JSON.parse(fs.readFileSync(metaFile, "utf8")) as { chhoundVersion: string };
 			tampered.chhoundVersion = "chhound 0.0.0-old";
 			fs.writeFileSync(metaFile, JSON.stringify(tampered, null, 2) + "\n");
+			const dbInoBefore = fs.statSync(b1.dbDir).ino;
 			const b2v = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			const dbInoAfter = fs.existsSync(b1.dbDir) ? fs.statSync(b1.dbDir).ino : -1;
 			await check(
 				tc,
 				"engine version change reuses baseline in place",
-				b2v.fresh === false && b2v.reason === "fresh" && fs.existsSync(b1.dbDir),
-				`fresh=${b2v.fresh} reason=${b2v.reason}`,
+				b2v.fresh === false && b2v.reason === "fresh" && dbInoAfter === dbInoBefore,
+				`fresh=${b2v.fresh} reason=${b2v.reason} ino=${dbInoBefore}->${dbInoAfter}`,
+			);
+
+			// A missing db must re-prime even when the recorded engine version is old:
+			// freshness requires the db on disk, not just a fresh-looking meta.
+			fs.rmSync(b1.dbDir, { recursive: true, force: true });
+			const b2m = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			await check(
+				tc,
+				"missing db re-primes despite an old engine version in meta",
+				b2m.fresh === true && fs.existsSync(b1.dbDir),
+				`fresh=${b2m.fresh} db=${fs.existsSync(b1.dbDir)} reason=${b2m.reason}`,
 			);
 
 			// Base moved → refresh must re-prime via in-place top-up.

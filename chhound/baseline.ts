@@ -249,7 +249,7 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 
 	let meta = readBaselineMeta(dir);
 	let reason = staleReason(meta, { baseCommit, force: opts.force, settings: opts.settings });
-	if (meta && !reason) {
+	if (meta && !reason && fs.existsSync(dbDir)) {
 		emitNote?.(`baseline fresh (${ref} @ ${meta.baseCommit.slice(0, 12)})`);
 		sweepBaselineGarbage(opts.settings); // cheap GC — piggyback on every prime
 		return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: false, reason: "fresh" };
@@ -259,7 +259,7 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 		// Re-check under the lock — another process may have primed meanwhile.
 		const meta2 = readBaselineMeta(dir);
 		const reason2 = staleReason(meta2, { baseCommit, force: opts.force, settings: opts.settings });
-		if (meta2 && !reason2) return;
+		if (meta2 && !reason2 && fs.existsSync(dbDir)) return;
 
 		emitNote?.(`priming ${ref} @ ${baseCommit?.slice(0, 12) ?? "unknown"}`);
 		const tmp = path.join(os.tmpdir(), `pi-chhound-prime-${process.pid}-${Date.now()}`);
