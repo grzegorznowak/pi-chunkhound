@@ -12,6 +12,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"command/pick-panel.test.ts": { tier: "command", subject: "pick-panel" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
+	"command/worktree-manage-rm.test.ts": { tier: "command", subject: "worktree-manage" },
 	"command/worktree-manager-rpc.test.ts": { tier: "command", subject: "worktree-manager-rpc" },
 	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },
 	"command/worktree-wizard-outcome.test.ts": { tier: "command", subject: "worktree-wizard-outcome" },

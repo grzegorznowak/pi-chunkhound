@@ -1,5 +1,7 @@
 import { describe, test } from "node:test";
+import fs from "node:fs/promises";
 import { check } from "../lib/checks.js";
+import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 import type { ManagerBaselineItem, ManagerItem, ManagerSession } from "../../worktree/manager-core.js";
 
 const items = (): ManagerItem[] => [{ kind: "sandbox", sandboxId: "one", projectKey: "/repo", projectLabel: "repo", branch: "feature", path: "/worktrees/one", indexed: true, gone: false, live: false, searchText: "repo feature" }];
@@ -28,6 +30,60 @@ describe("worktree manager RPC presenter", () => {
 		await check(t, "cancel maps to shared back action", back?.kind === "back" && calls === 1, JSON.stringify({ back, calls }));
 		const close = await presenter.next(session);
 		await check(t, "close maps to close action with one additional call", close?.kind === "close" && calls === 2, JSON.stringify({ close, calls }));
+	});
+
+	test("create carries the scoped project key and omits it when unscoped", async (t) => {
+		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
+		const calls: Array<{ title: string; options: string[] }> = [];
+		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return "+ new worktree…"; } } };
+		const presenter = createWorktreeManagerRpcPresenter(ctx, items);
+		const scoped = await presenter.next({ tab: "projects", row: 0, filter: "", project: { key: "/repos/x", label: "x" } });
+		await check(t, "a scoped create rides the project key", scoped.kind === "create" && scoped.positional === "/repos/x", JSON.stringify(scoped));
+		await check(t, "the scoped menu names the project", calls[0]!.title.includes("in “x”"), calls[0]!.title);
+		const unscoped = await presenter.next({ tab: "projects", row: 0, filter: "" });
+		await check(t, "an unscoped create has no positional", unscoped.kind === "create" && unscoped.positional === undefined, JSON.stringify(unscoped));
+	});
+
+	test("a dialog cancel loops back to the same menu before close ends the session", async (t) => {
+		const { createWorktreeManagerRpcPresenter } = await import("../../worktree/manager-rpc.js");
+		const { runManagerSession } = await import("../../worktree/manager-core.js");
+		const calls: Array<{ title: string; options: string[] }> = [];
+		const responses: Array<string | undefined> = [undefined, "close"];
+		const ctx = { ui: { select: async (title: string, options: string[]) => { calls.push({ title, options }); return responses.shift(); } } };
+		await runManagerSession(ctx, createWorktreeManagerRpcPresenter(ctx, items));
+		await check(t, "cancel re-presents the identical menu", calls.length === 2 && calls[0]!.title === calls[1]!.title && calls[0]!.options.join("|") === calls[1]!.options.join("|"), JSON.stringify(calls));
+		await check(t, "close ends the loop after the second round-trip", responses.length === 0 && calls[1]!.options.includes("close"), JSON.stringify({ calls: calls.length, remaining: responses.length }));
+	});
+
+	test("the registered command dispatches the RPC manager to the native select", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-rpc-dispatch-");
+		try {
+			applyEnv(isolatedEnv({ home: await makeFakeHome(root) }));
+			const { registerWorktreeCommand } = await import("../../worktree/command.js");
+			let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+			const pi = { registerCommand(_name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) { handler = def.handler; } };
+			registerWorktreeCommand(pi as never, {} as never);
+			const selects: Array<{ title: string; options: string[] }> = [];
+			const notices: string[] = [];
+			const ctx = {
+				cwd: root,
+				mode: "rpc",
+				hasUI: true,
+				ui: {
+					select: async (title: string, options: string[]) => { selects.push({ title, options }); return "close"; },
+					notify: (message: string) => { notices.push(message); },
+					confirm: async () => true,
+				},
+			};
+			await handler!("", ctx as never);
+			await check(t, "the handler shows the manager menu through the host ctx", selects.length === 1 && selects[0]!.title.includes("Worktree manager — worktrees"), JSON.stringify(selects));
+			await check(t, "the menu offers create and close", selects[0]!.options.includes("+ new worktree…") && selects[0]!.options.includes("close"), JSON.stringify(selects[0]!.options));
+			await check(t, "close ends the session without starting a wizard", selects.length === 1 && notices.length === 0, JSON.stringify({ selects: selects.length, notices }));
+		} finally {
+			applyEnv(env);
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	test("view switching and project selection mutate the shared session", async (t) => {

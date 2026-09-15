@@ -22,7 +22,7 @@ import { disconnectMcp, getMcpConnection } from "../mcp/manager.js";
 import { rehydrateConnections, recordConnection } from "../mcp/persist.js";
 import type { ConnectionRecord } from "../mcp/persist.js";
 import { branchDeleteIntent, buildWorktreeListLines, collectWorktreeList, groupListInfos, listFlagIn, lifeMarker, parseListInvocation, parseRemoveInvocation, removePreviewLines, removeWorktreeEntry, worktreeVerb, type WtListInfo } from "./manage.js";
-import { createManagerItemStore, createManagerSession, runManagerSession, sandboxMetaItem, type ManagerBaselineItem, type ManagerItem, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
+import { createManagerItemStore, createManagerSession, runManagerSession, baselineMetaItem, managerItemCacheKey, sandboxMetaItem, type ManagerBaselineItem, type ManagerItem, type ManagerLoadProgress, type ManagerSandboxItem, type WizardOutcome } from "./manager-core.js";
 import { createWorktreeManagerRpcPresenter } from "./manager-rpc.js";
 import { createWorktreeManagerTuiPresenter } from "./manager-tui.js";
 
@@ -92,7 +92,7 @@ const HELP = [
 	"library — config, index db, daemon state and checkout together, mirroring the",
 	"'/workspaces' pattern. Nothing is ever written into the worktree checkout or",
 	"the source repo (no .chunkhound/, no git-exclude edits).",
-	"Removal of sandboxes is coming as a follow-up slice (/ch-worktree rm).",
+	"/ch-worktree rm removes a sandbox; /ch-worktree ls lists the library.",
 ].join("\n");
 
 /**
@@ -203,11 +203,20 @@ export interface WorktreeCommandDeps {
 export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, deps: WorktreeCommandDeps = {}): void {
 	// The manager's item store lives for the whole session (one store per
 	// registered command), so closing and re-running /ch-worktree reuses the last
-	// collect while the library fingerprint is unchanged. The loader reads the
-	// current invocation's ctx through this holder — a store that outlives one
-	// invocation must never capture that invocation's ctx.
-	let managerCtx: ManagerCtx | undefined;
+	// collect while the library fingerprint is unchanged. The store must never
+	// capture an invocation's ctx: each invocation binds its own context — and
+	// the library root its settings resolve to — for the duration of the load
+	// (`activeLoad`). A second concurrent invocation (impossible while the panel
+	// is modal, honored anyway) gets its own isolated store instead of
+	// clobbering this one.
+	let activeLoad: { ctx: ManagerCtx; settingsRoot: string } | undefined;
 	let managerStore: ReturnType<typeof createManagerItemStore> | undefined;
+	// Single invalidation funnel: rm, the panel's `r` refresh and a successful
+	// create all come through here, so a future write path cannot silently skip
+	// the store invalidation (review V3-06).
+	const invalidateManagerItems = (): void => {
+		managerStore?.invalidate();
+	};
 	pi.registerCommand("ch-worktree", {
 		description:
 			"Create a git worktree with its own chunkhound index, or manage the worktree library. " +
@@ -228,7 +237,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				return;
 			}
 
-			// ── Manager verbs: /ch-worktree ls … (removal verbs reserved) — the
+			// ── Manager verbs: /ch-worktree ls … and rm … — the
 			// first positional names the VERB only when it is one; anything else
 			// falls through to the creation flows below (repo paths, PR URLs,
 			// branches and the bare wizard keep their existing meanings). ──
@@ -238,7 +247,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				if (verb === "remove") {
 					await runWorktreeRemove(pi, ctx, rest, flags);
 					// The library changed; the session cache must not serve the removed row.
-					managerStore?.invalidate();
+					invalidateManagerItems();
 					return;
 				}
 				await runWorktreeList(ctx, rest, flags);
@@ -261,21 +270,35 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 			// fingerprint check drops the cache when the library changed underneath
 			// (create/remove/liveness), so a reopen never serves a stale list. ──
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "tui" && typeof ctx.ui.custom === "function") {
-				managerCtx = ctx;
-				managerStore ??= (deps.createItemStore ?? createManagerItemStore)((onProgress) => collectManagerItems(managerCtx!, onProgress));
+				// Bind THIS invocation's ctx + settings root; the fingerprint resolves
+				// settings exactly like the collector (`gitRoot ?? cwd` — project
+				// settings are exact-root only, review V2-08).
+				const bound = { ctx, settingsRoot: (await gitRootOrNull(ctx.cwd)) ?? ctx.cwd };
+				const concurrent = activeLoad !== undefined;
+				activeLoad = bound;
+				if (managerStore === undefined || concurrent) {
+					managerStore = (deps.createItemStore ?? createManagerItemStore)((onProgress) => {
+						const active = activeLoad ?? bound;
+						return collectManagerItems(active.ctx, onProgress, { settingsRoot: active.settingsRoot });
+					});
+				}
 				const store = managerStore;
 				const session = createManagerSession();
-				await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, (_session, onProgress) => store.load(onProgress, managerFingerprint(managerCtx!)), { onRefresh: () => store.invalidate() }), {
-					session,
-					onCreated: () => store.invalidate(),
-					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
-				});
+				try {
+					await runManagerSession(ctx, createWorktreeManagerTuiPresenter(ctx, (_session, onProgress) => store.load(onProgress, managerFingerprint(bound.settingsRoot)), { onRefresh: invalidateManagerItems }), {
+						session,
+						onCreated: invalidateManagerItems,
+						runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
+					});
+				} finally {
+					if (activeLoad === bound) activeLoad = undefined;
+				}
 				return;
 			}
 
 			// ── RPC manager: one native select round-trip per manager action. ──
 			if (positionals.length === 0 && Object.keys(flags).length === 0 && ctx.mode === "rpc" && typeof ctx.ui.select === "function") {
-				await runManagerSession(ctx, createWorktreeManagerRpcPresenter(ctx, () => collectManagerItems(ctx)), {
+				await runManagerSession(ctx, createWorktreeManagerRpcPresenter(ctx, () => collectManagerItems(ctx, undefined, { ghWaitMs: GH_STATE_WAIT_MS })), {
 					session: createManagerSession(),
 					runCreate: (_session, positional) => runWizard(wctx, state, positional, { suppressCancelNotify: true }),
 				});
@@ -1069,6 +1092,12 @@ async function oneGoLocation(
 
 // ── Manager: /ch-worktree ls ─────────────────────────────────────────────────
 
+/** How long a NON-STREAMING caller (headless `ls`, the RPC menu) waits for the
+ * late gh PR states before rendering without them — never the full gh timeout
+ * grid (⌈pullRows/4⌉ × 12 s). The TUI streams rows and lands PR updates live,
+ * so it does not need a budget. */
+const GH_STATE_WAIT_MS = 2_000;
+
 /** Read-only adapter for the TUI manager. Collection failures deliberately render an empty list. */
 export async function collectManagerItems(
 	ctx: {
@@ -1076,10 +1105,11 @@ export async function collectManagerItems(
 		sessionManager?: { getBranch(): readonly import("@earendil-works/pi-coding-agent").SessionEntry[] };
 	},
 	onProgress?: (progress: ManagerLoadProgress) => void,
+	opts: { settingsRoot?: string; ghWaitMs?: number } = {},
 ): Promise<ManagerItem[]> {
 	try {
-		const repoRoot = await gitRootOrNull(ctx.cwd);
-		const settings = loadSettings(repoRoot ?? ctx.cwd).settings;
+		const settingsRoot = opts.settingsRoot ?? (await gitRootOrNull(ctx.cwd)) ?? ctx.cwd;
+		const settings = loadSettings(settingsRoot).settings;
 		const entries = listSandboxes(settings);
 		// Meta-less baseline dirs are garbage (failed/abandoned primes), not rows.
 		// A racing removal here must not cost us the whole sandbox listing.
@@ -1110,6 +1140,7 @@ export async function collectManagerItems(
 			entries,
 			settings,
 			records,
+			ghWaitMs: opts.ghWaitMs,
 			onItem: (index, info) => {
 				ordered[index] = managerItemFrom(info);
 				done++;
@@ -1139,21 +1170,24 @@ export async function collectManagerItems(
 }
 
 /**
- * Cheap change detector for the session's manager item cache: sandbox/baseline
- * row identity and liveness, never probe results. A reopened manager recollects
- * only when the library changed (create/remove, checkout presence, a live MCP
- * prefix); sizes, git and PR facts refresh via `r` or such a library change.
+ * Cheap change detector for the session's manager item cache: the identity
+ * fields of every row (`managerItemCacheKey` — built from the same builders
+ * the rows use, so claim/identity membership cannot drift) plus the resolved
+ * library root. Its settings scope MUST match the collector's (`gitRoot ??
+ * cwd`; project settings are exact-root only) or a reopen from a repo subdir
+ * would serve a stale library (review V2-08). Probe results (sizes, git, PR)
+ * are deliberately excluded — they refresh via `r` or such a change (D10).
  */
-function managerFingerprint(ctx: ManagerCtx): string {
+function managerFingerprint(settingsRoot: string): string {
 	try {
-		const { settings } = loadSettings(ctx.cwd);
-		const parts = [`cwd:${ctx.cwd}`, `root:${sandboxRoot(settings)}`];
+		const { settings } = loadSettings(settingsRoot);
+		const parts = [`root:${sandboxRoot(settings)}`];
 		for (const entry of listSandboxes(settings)) {
 			const id = path.basename(entry.dir);
-			parts.push(["sandbox", id, entry.meta.createdAt, fs.existsSync(entry.meta.worktree) ? "present" : "gone", getMcpConnection(id)?.prefix ?? ""].join(":"));
+			parts.push(managerItemCacheKey(sandboxMetaItem(entry, { live: Boolean(getMcpConnection(id)?.prefix) })));
 		}
 		for (const baseline of listBaselines(settings).filter((value) => value.meta !== undefined).sort((a, b) => a.dir.localeCompare(b.dir))) {
-			parts.push(`baseline:${baseline.dir}:${baseline.meta?.updatedAt ?? ""}`);
+			parts.push(managerItemCacheKey(baselineMetaItem(baseline.dir, baseline.meta)));
 		}
 		return parts.join("\n");
 	} catch {
@@ -1174,20 +1208,9 @@ function managerItemFrom(info: WtListInfo): ManagerSandboxItem {
 
 /** Adapter from one cached baseline to the renderer-free manager item. */
 async function baselineItemFrom(dir: string, meta: BaselineMeta | undefined): Promise<ManagerBaselineItem> {
-	const repoRoot = meta?.repoRoot && meta.repoRoot.length > 0 ? meta.repoRoot : dir;
-	return {
-		kind: "baseline",
-		baselineDir: dir,
-		projectKey: repoRoot,
-		projectLabel: path.basename(repoRoot),
-		ref: meta?.baseRef ?? path.basename(dir),
-		path: repoRoot,
-		dbBytes: await dirSizeAsync(baselineDbPathIn(dir)),
-		...(meta?.baseCommit ? { baseCommit: meta.baseCommit } : {}),
-		...(meta?.chhoundVersion ? { chhoundVersion: meta.chhoundVersion } : {}),
-		...(meta?.updatedAt ? { updatedAt: meta.updatedAt } : {}),
-		searchText: [repoRoot, path.basename(repoRoot), meta?.baseRef ?? path.basename(dir), dir].join(" "),
-	};
+	// Identity comes from the shared builder (same fields the cache key uses);
+	// only the db size is measured here.
+	return { ...baselineMetaItem(dir, meta), dbBytes: await dirSizeAsync(baselineDbPathIn(dir)) };
 }
 
 /**
@@ -1242,7 +1265,7 @@ async function runWorktreeList(
 		// no session log available — liveness columns degrade gracefully
 	}
 
-	const result = await collectWorktreeList({ entries, settings, records });
+	const result = await collectWorktreeList({ entries, settings, records, ghWaitMs: GH_STATE_WAIT_MS });
 	const groups = groupListInfos(result.infos, { search: search.length > 0 ? search : undefined, sort });
 	notify(
 		buildWorktreeListLines({
@@ -1252,6 +1275,7 @@ async function runWorktreeList(
 			search: search.length > 0 ? search : undefined,
 			ghFailed: result.ghFailed,
 			ghAttempted: result.ghAttempted,
+			ghPending: result.ghPending,
 		}).join("\n"),
 		"info",
 	);
@@ -1305,7 +1329,12 @@ async function runWorktreeRemove(
 	if (target === undefined) {
 		// Interactive: pick a sandbox (numbered selectable list) then confirm
 		// with the impact preview. Headless: show what would be removable.
-		if ((typeof ctx.ui.select === "function" || typeof ctx.ui.custom === "function") && typeof ctx.ui.confirm === "function") {
+		// `ctx.hasUI` is the capability gate: print/json hosts expose no-op
+		// select/confirm/custom stubs that resolve undefined/false without ever
+		// prompting, which used to swallow this branch as a silent "Cancelled."
+		// and make the usage/hint below unreachable (review V2-04).
+		const canPick = typeof ctx.ui.select === "function" || typeof ctx.ui.custom === "function";
+		if (ctx.hasUI && canPick && typeof ctx.ui.confirm === "function") {
 			const entries = listSandboxes(settings);
 			if (entries.length === 0) {
 				notify("No worktrees to remove — /ch-worktree creates them.", "info");
@@ -1417,7 +1446,7 @@ async function performRemoval(
 ): Promise<void> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
 	const id = path.basename(info.entry.dir);
-	notify(`Removing ${id} — disconnect first, then storage + worktree registration…`, "info");
+	notify(`Removing ${id}…`, "info");
 	const outcome = await removeWorktreeEntry({
 		row: info,
 		settings,
@@ -1429,6 +1458,19 @@ async function performRemoval(
 		},
 		force: opts.force,
 	});
+	// The engine refuses locked worktrees and the extension-source sandbox
+	// (without force) BEFORE any side effect — report that as a refusal, never
+	// as a partial removal.
+	if (outcome.refused !== undefined) {
+		notify(
+			[
+				`Removal refused (${outcome.refused}) — nothing was changed.`,
+				...outcome.warnings.map((w) => `  ⚠ ${w}`),
+			].join("\n"),
+			"error",
+		);
+		return;
+	}
 	const lines = [
 		`✓ Removed ${outcome.id}${info.entry.meta.repoRoot ? " (" + path.basename(info.entry.meta.repoRoot) + "/" + sandboxBranchLabel(info.entry.meta) + ")" : ""}`,
 		`  storage: ${outcome.stateDirRemoved ? "state dir removed" : "state dir already gone"} · ${outcome.sandboxDirRemoved ? "sandbox dir removed" : "sandbox dir already gone"}`,

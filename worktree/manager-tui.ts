@@ -35,6 +35,17 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const CREATE_ROW: ManagerRow = { kind: "create", label: "+ new worktree…", badges: [] };
 const TABS: ReadonlyArray<ManagerSession["tab"]> = ["worktrees", "projects", "baselines"];
 
+/**
+ * Right-pad to a display width. List columns are laid out in terminal cells,
+ * so wide/CJK labels must pad by `visibleWidth` — never by code units — or
+ * the badge/size columns drift from the header (V2-19). Never pads past the
+ * requested width and never trims: the render-time clip owns truncation.
+ */
+function padToWidth(text: string, width: number): string {
+	const missing = width - visibleWidth(text);
+	return missing > 0 ? text + " ".repeat(missing) : text;
+}
+
 /** Cache hits arrive synchronously; misses arrive as a shared promise. */
 function isLoadedRows(
 	value: readonly ManagerItem[] | Promise<readonly ManagerItem[]>,
@@ -56,9 +67,11 @@ export function createWorktreeManagerTuiPresenter(
 				let tab = session.tab;
 				let row = Math.max(0, session.row);
 				let items: readonly ManagerItem[] | undefined;
-				// The create row is present from the first frame: a user who only
-				// wants a new worktree never waits for the library probe to finish.
-				let rows: ManagerRow[] = [CREATE_ROW];
+				// The create row is present from the first frame on the worktrees tab:
+				// a user who only wants a new worktree never waits for the library
+				// probe to finish. Every other tab seeds no row until its items
+				// resolve, so a cold-load Enter can never create off-tab (V2-20).
+				let rows: ManagerRow[] = tab === "worktrees" ? [CREATE_ROW] : [];
 				let loading = true;
 				let failed = false;
 				let progress: { done: number; total: number } | undefined;
@@ -107,6 +120,10 @@ export function createWorktreeManagerTuiPresenter(
 					status = [];
 					session.project = undefined;
 					rebuild();
+					// A cold load has no built rows yet: re-seed the tab's own set so the
+					// create row disappears when switching off worktrees while loading
+					// (covers 1/2/3 and Tab/Shift+Tab) (V2-20).
+					if (!items) rows = tab === "worktrees" ? [CREATE_ROW] : [];
 					tui.requestRender();
 				};
 				const cycleTab = (step: number): void => showTab(TABS[(TABS.indexOf(tab) + step + TABS.length) % TABS.length]!);
@@ -184,8 +201,10 @@ export function createWorktreeManagerTuiPresenter(
 						// header with right-aligned numeric cells (the labelled
 						// `db … · checkout … · total …` one-liner lives in the details).
 						const badgeText = (item: ManagerRow): string => item.kind !== "create" && item.badges.length ? item.badges.join(" ") : "";
-						const labelWidth = rows.reduce((max, item) => Math.max(max, item.label.length), 0);
-						const badgeWidth = rows.reduce((max, item) => Math.max(max, badgeText(item).length), 0);
+						// Columns are justified in terminal cells, not code units: a wide/CJK
+						// label must not shift the badge or size columns (V2-19).
+						const labelWidth = rows.reduce((max, item) => Math.max(max, visibleWidth(item.label)), 0);
+						const badgeWidth = rows.reduce((max, item) => Math.max(max, visibleWidth(badgeText(item))), 0);
 						const sizeColumnKeys = ["db", "checkout", "total"] as const;
 						const sizeHeader: Record<(typeof sizeColumnKeys)[number], string> = { db: "DB", checkout: "CHECKOUT", total: "TOTAL" };
 						// A column exists only when a visible row measured it: baselines carry db
@@ -202,8 +221,7 @@ export function createWorktreeManagerTuiPresenter(
 						};
 						// The header shares the row prefix (marker · padded label · padded
 						// badges) so its labels sit exactly over the numeric columns.
-						// Callers pad; padding happens before any styling so the badge column
-						// still measures in code units and stays aligned.
+						// Callers pad in display cells; padding happens before any styling.
 						const rowPrefix = (marker: string, label: string, badges: string): string => `${marker}${label}${badgeWidth > 0 ? `  ${badges}` : ""}`;
 						const headerSegment = sizeColumns.map((key) => sizeHeader[key].padStart(sizeColumnWidths.get(key) ?? 0)).join("  ");
 						const headerLine = sizeColumns.length > 0 ? paint("dim", `${rowPrefix("  ", " ".repeat(labelWidth), " ".repeat(badgeWidth))}  ${headerSegment}`) : undefined;
@@ -219,8 +237,8 @@ export function createWorktreeManagerTuiPresenter(
 								const label = selected ? theme.bold(item.label) : item.label;
 								return selected ? selectedBand(`${marker}${label}`) : `${marker}${label}`;
 							}
-							const label = item.label.padEnd(labelWidth);
-							let line = rowPrefix(marker, selected ? theme.bold(label) : label, paint("dim", badgeText(item).padEnd(badgeWidth)));
+							const label = padToWidth(item.label, labelWidth);
+							let line = rowPrefix(marker, selected ? theme.bold(label) : label, paint("dim", padToWidth(badgeText(item), badgeWidth)));
 							const segment = sizeSegment(item);
 							if (segment) line += `  ${paint("dim", segment)}`;
 							return selected ? selectedBand(line) : line;
@@ -284,7 +302,12 @@ export function createWorktreeManagerTuiPresenter(
 							finish({ kind: "create", positional }); return;
 						}
 						if (!isEnter(data)) return;
-						if (selected?.kind === "create") { finish({ kind: "create", positional: session.project?.key }); return; }
+						if (selected?.kind === "create") {
+							// Belt and braces for the loading window: rows are seeded per tab,
+							// so Enter only ever creates from the worktrees view (V2-20).
+							if (tab === "worktrees") finish({ kind: "create", positional: session.project?.key });
+							return;
+						}
 						if (selected?.kind === "project") {
 							if (selected.projectKey) session.project = { key: selected.projectKey, label: selected.label };
 							session.filter = "";

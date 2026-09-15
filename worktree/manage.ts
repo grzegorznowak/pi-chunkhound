@@ -1,16 +1,19 @@
 /**
  * /ch-worktree manager surface — LIST of managed sandboxes (grouped by
- * project, searchable/sortable, with space, git-state and liveness columns).
- * REMOVAL lands in a follow-up slice on the same verb dispatch.
+ * project, searchable/sortable, with space, git-state and liveness columns)
+ * and the REMOVAL engine behind `/ch-worktree rm`.
  *
  * Design: worktree/command.ts keeps the creation wizard + one-go flows and
- * dispatches manager VERBS from the parsed argument head (`ls`/`list` —
- * removal verbs are reserved). This module holds:
+ * dispatches manager VERBS from the parsed argument head (`ls`/`list`,
+ * `rm`/`remove`). This module holds:
  *  - the verb + argument-validation predicates (pure, test-imported),
  *  - the collectors (IO: async checkout sizing, per-worktree git probes,
  *    gh PR-state lookups — every probe degrades, never throws),
  *  - the pure grouping / filter / sort stage,
- *  - the pure line renderer (headless-verifiable, like buildStatusLines).
+ *  - the pure line renderer (headless-verifiable, like buildStatusLines),
+ *  - the removal engine (`removeWorktreeEntry`: MCP disconnect/tombstone →
+ *    worktree unregistration → storage → optional non-forced branch delete;
+ *    locked worktrees and the extension source are refused up front).
  *
  * Listing never mutates anything and never touches baselines — it is read-
  * only over the sandbox library, the worktree checkouts, and the host git
@@ -33,7 +36,7 @@ import type { ConnectionRecord } from "../mcp/persist.js";
 
 /** List verbs: /ch-worktree ls [<query>] … (alias: list). */
 export const LS_VERBS: readonly string[] = ["ls", "list"];
-/** Removal verbs (reserved — the remove flow lands in a follow-up slice). */
+/** Removal verbs (alias: remove) — `/ch-worktree rm [<target>] [--force]`. */
 export const RM_VERBS: readonly string[] = ["rm", "remove"];
 export type WorktreeVerb = "list" | "remove";
 
@@ -237,6 +240,21 @@ export async function runGhTimed(args: string[], timeoutMs: number): Promise<{ c
 }
 
 /**
+ * Resolve when `p` settles or after `ms` — whichever comes first. The timer is
+ * cleared on settle so a fast result never keeps the process alive.
+ */
+function waitWithDeadline(p: Promise<unknown>, ms: number): Promise<void> {
+	return new Promise<void>((resolve) => {
+		const done = (): void => {
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(done, ms);
+		void p.then(done, done);
+	});
+}
+
+/**
  * Owner/repo for gh queries from a sandbox's host repoRoot: the mirror cache
  * encodes it in the path (<mirrorRoot>/github.com/<owner>/<repo>); a local
  * checkout contributes its github.com origin URL. Undefined = no gh identity
@@ -293,8 +311,10 @@ export async function ghPrState(
 
 export interface WtListInfo {
 	entry: SandboxEntry;
-	/** Checkout dir bytes (async walk; 0 when gone/unreadable). */
-	checkoutBytes: number;
+	/** Checkout dir bytes (async walk). Undefined = the walk could not read a
+	 * subtree (INCOMPLETE → unmeasured — never a partial sum, D7); 0 = nothing
+	 * there (gone checkout / missing single file). */
+	checkoutBytes?: number;
 	/** The checkout dir (meta.worktree) no longer exists. */
 	gone: boolean;
 	/** Git probe — undefined when the worktree is gone or not a repo. */
@@ -308,6 +328,8 @@ export interface WtListInfo {
 	runsThisExtension: boolean;
 	/** PR outcome (gh) — pull/N sandboxes only. */
 	pr?: WtPrState;
+	/** gh lookup was still running when the collector returned (bounded wait). */
+	prPending?: boolean;
 }
 
 export interface WtListResult {
@@ -316,6 +338,8 @@ export interface WtListResult {
 	ghFailed: number;
 	/** pull/N sandboxes with a gh identity (a lookup was attempted). */
 	ghAttempted: number;
+	/** pull/N sandboxes whose gh lookup was still running at return. */
+	ghPending: number;
 }
 
 /** The checkout the loaded extension code runs from (realpath), if any. */
@@ -349,13 +373,25 @@ export async function collectWorktreeList(opts: {
 	onItem?: (index: number, info: WtListInfo) => void;
 	/** Called when a late field (the gh PR state) lands on an already-reported row. */
 	onUpdate?: (index: number, info: WtListInfo) => void;
+	/** Cap the wait for late gh lookups AFTER every row is displayable: the
+	 * headless `ls` must never stall its output on the gh timeout grid
+	 * (⌈pullRows/4⌉ × 12 s). Omitted = wait for everything (the manager paints
+	 * rows early and lands PR updates live, so a wait costs nothing there). */
+	ghWaitMs?: number;
 }): Promise<WtListResult> {
 	const { entries, settings, records } = opts;
 	const livePrefixFor = opts.livePrefixFor ?? ((id: string) => getMcpConnection(id)?.prefix);
 	const limit = Math.max(1, opts.concurrency ?? 4);
-	const ghState = { failed: 0, attempted: 0 };
+	const ghState = { failed: 0, attempted: 0, pending: 0 };
 	const infos: WtListInfo[] = new Array(entries.length);
+	// Rows whose gh task had not settled when the collector returned.
+	const pendingPr = new Set<number>();
 	let next = 0;
+	let reported = 0;
+	let onAllReported: (() => void) | undefined;
+	const allReported = new Promise<void>((resolve) => {
+		onAllReported = resolve;
+	});
 	const worker = async (): Promise<void> => {
 		for (;;) {
 			const i = next++;
@@ -377,7 +413,7 @@ export async function collectWorktreeList(opts: {
 				})()
 				: undefined;
 			let git: WtGitState | undefined;
-			let checkoutBytes = 0;
+			let checkoutBytes: number | undefined = 0; // gone → measured as nothing
 			if (!gone) {
 				checkoutBytes = await dirSizeAsync(wt);
 				git = await probeWorktreeGit(wt, entry.meta.baseRef);
@@ -401,16 +437,38 @@ export async function collectWorktreeList(opts: {
 					})(),
 			};
 			infos[i] = info;
+			reported++;
 			opts.onItem?.(i, info);
-			const pr = await prTask;
-			if (pr) {
-				info.pr = pr;
-				opts.onUpdate?.(i, info);
+			if (reported === entries.length) onAllReported?.();
+			if (prTask) {
+				// Awaiting here keeps gh concurrency at ≤ `limit` (one lookup per
+				// worker slot) while the caller's budget caps how long IT waits.
+				ghState.pending++;
+				pendingPr.add(i);
+				try {
+					const pr = await prTask;
+					if (pr) {
+						info.pr = pr;
+						opts.onUpdate?.(i, info);
+					}
+				} finally {
+					ghState.pending--;
+					pendingPr.delete(i);
+				}
 			}
 		}
 	};
-	await Promise.all(Array.from({ length: Math.min(limit, entries.length) }, () => worker()));
-	return { infos, ghFailed: ghState.failed, ghAttempted: ghState.attempted };
+	const workers = Promise.all(Array.from({ length: Math.min(limit, entries.length) }, () => worker()));
+	if (opts.ghWaitMs === undefined) {
+		await workers;
+	} else {
+		// Displayable rows first (that is what the caller renders), then a bounded
+		// wait for the late PR states — a hung gh delays the emission, never blocks it.
+		if (entries.length > 0) await allReported;
+		await waitWithDeadline(workers, opts.ghWaitMs);
+	}
+	for (const index of pendingPr) infos[index]!.prPending = true;
+	return { infos, ghFailed: ghState.failed, ghAttempted: ghState.attempted, ghPending: pendingPr.size };
 }
 
 // ── Group / filter / sort (pure) ─────────────────────────────────────────────
@@ -449,7 +507,9 @@ function byIdentityAsc(a: WtListInfo, b: WtListInfo): number {
 function sortColumn(info: WtListInfo, key: ListSortKey): number | undefined {
 	if (key === "db") return info.entry.dbSizeBytes;
 	if (key === "checkout") return info.checkoutBytes;
-	if (key === "total") return info.entry.dbSizeBytes + info.checkoutBytes;
+	// Unmeasured checkout (incomplete walk) sorts as 0 — largest-first puts the
+	// unknown rows last instead of inventing a size for the comparison.
+	if (key === "total") return info.entry.dbSizeBytes + (info.checkoutBytes ?? 0);
 	return undefined;
 }
 
@@ -459,8 +519,8 @@ function sortColumn(info: WtListInfo, key: ListSortKey): number | undefined {
  *  - created: newest first (entry createdAt desc; groups by their newest row)
  *  - name:    A→Z on the row identity (groups by label)
  *  - db / checkout / total: largest first (groups by their column sum)
- * Ties resolve by storage id (ascending) / group label — the order is
- * deterministic for any input.
+ * Ties resolve by storage id (ascending) / group label, then the project key
+ * (ascending) so duplicate basenames never flap — deterministic for any input.
  */
 export function groupListInfos(
 	infos: readonly WtListInfo[],
@@ -484,7 +544,7 @@ export function groupListInfos(
 			if (c !== 0) return c;
 			return idA < idB ? -1 : idA > idB ? 1 : 0;
 		}
-		const col = sortColumn(b, sort)! - sortColumn(a, sort)!; // largest first
+		const col = (sortColumn(b, sort) ?? 0) - (sortColumn(a, sort) ?? 0); // largest first (unmeasured = 0, last)
 		if (col !== 0) return col;
 		return idA < idB ? -1 : idA > idB ? 1 : 0;
 	};
@@ -513,7 +573,10 @@ export function groupListInfos(
 		else if (sort === "name") c = a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 		else c = groupSum(b, sort) - groupSum(a, sort);
 		if (c !== 0) return c;
-		return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+		const byLabel = a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
+		// Duplicate basenames (fork + upstream) are only separated by the label
+		// uniquifier — tie-break on the raw project key so equal labels stay stable.
+		return byLabel !== 0 ? byLabel : a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
 	});
 
 	// Unique-ify labels: two project roots may share a basename (fork +
@@ -589,6 +652,14 @@ export interface ListRenderInput {
 	ghFailed: number;
 	/** pull/N sandboxes with a gh identity (a lookup was attempted). */
 	ghAttempted: number;
+	/** pull/N sandboxes whose gh lookup was still running (state not yet known). */
+	ghPending?: number;
+}
+
+/** fmtSize for a measured count; "—" when the walk could not measure (D7:
+ * unmeasured stays unmeasured, never a partial sum). */
+function fmtSizeMaybe(bytes: number | undefined): string {
+	return bytes === undefined ? "—" : fmtSize(bytes);
 }
 
 /**
@@ -598,7 +669,7 @@ export interface ListRenderInput {
  * first) and the worktree path.
  */
 export function buildWorktreeListLines(opts: ListRenderInput): string[] {
-	const { libraryRoot, groups, total, search, ghFailed, ghAttempted } = opts;
+	const { libraryRoot, groups, total, search, ghFailed, ghAttempted, ghPending } = opts;
 	const count = groups.reduce((s, g) => s + g.infos.length, 0);
 	const lines = [
 		`worktree library — ${count} sandbox${count === 1 ? "" : "es"} in ${groups.length} project${groups.length === 1 ? "" : "s"} · root: ${libraryRoot}`,
@@ -616,19 +687,22 @@ export function buildWorktreeListLines(opts: ListRenderInput): string[] {
 	}
 	for (const g of groups) {
 		const db = g.infos.reduce((s, i) => s + i.entry.dbSizeBytes, 0);
-		const checkout = g.infos.reduce((s, i) => s + i.checkoutBytes, 0);
+		// A rollup with an unmeasured member stays unknown — never a partial sum.
+		const checkout = g.infos.some((i) => i.checkoutBytes === undefined)
+			? undefined
+			: g.infos.reduce((s, i) => s + (i.checkoutBytes ?? 0), 0);
 		lines.push(
-			`${g.label} (${g.infos.length}) — db ${fmtSize(db)} · checkout ${fmtSize(checkout)} · total ${fmtSize(db + checkout)}`,
+			`${g.label} (${g.infos.length}) — db ${fmtSize(db)} · checkout ${fmtSizeMaybe(checkout)} · total ${fmtSizeMaybe(checkout === undefined ? undefined : db + checkout)}`,
 		);
 		for (const info of g.infos) {
 			const meta = info.entry.meta;
 			const badges = entryBadges(info);
 			const identity = sandboxBranchLabel(meta);
 			lines.push(`  ${lifeMarker(info)} ${identity}${badges.length > 0 ? " — " + badges.join(" · ") : ""}`);
-			const totalBytes = info.entry.dbSizeBytes + info.checkoutBytes;
+			const totalBytes = info.checkoutBytes === undefined ? undefined : info.entry.dbSizeBytes + info.checkoutBytes;
 			const wt = displayWorktreePath(libraryRoot, meta.worktree);
 			lines.push(
-				`      db ${fmtSize(info.entry.dbSizeBytes)} · checkout ${fmtSize(info.checkoutBytes)} · total ${fmtSize(totalBytes)} · created ${meta.createdAt.slice(0, 10)}` +
+				`      db ${fmtSize(info.entry.dbSizeBytes)} · checkout ${fmtSizeMaybe(info.checkoutBytes)} · total ${fmtSizeMaybe(totalBytes)} · created ${meta.createdAt.slice(0, 10)}` +
 					(wt.length > 0 ? ` · wt ${wt}` : ""),
 			);
 		}
@@ -636,6 +710,11 @@ export function buildWorktreeListLines(opts: ListRenderInput): string[] {
 	if (ghFailed > 0) {
 		lines.push(
 			`(gh PR lookup failed for ${ghFailed} of ${ghAttempted} pull sandbox${ghAttempted === 1 ? "" : "es"} — PR states hidden; check: gh auth status)`,
+		);
+	}
+	if ((ghPending ?? 0) > 0) {
+		lines.push(
+			`(gh PR lookup still running for ${ghPending} pull sandbox${ghPending === 1 ? "" : "es"} — state not shown yet; re-run ls in a moment)`,
 		);
 	}
 	return lines;
@@ -701,11 +780,21 @@ export function branchDeleteIntent(meta: { branch?: string; baseRef?: string }):
 	return branch !== baseRef;
 }
 
+/**
+ * Test seams for the removal engine: the MCP lifecycle hooks and the storage
+ * remover. `removeStorage` defaults to `fs.rmSync(path, { recursive, force })`
+ * and exists so the storage-failure ORDER can be pinned deterministically on
+ * every platform/node version (a failing sandbox-dir removal must keep the
+ * `.state` half so the row stays discoverable) — patching `fs` internals is
+ * not portable (Node 24 no longer routes `rmSync` through `process.binding`).
+ */
 export interface RemoveSeams {
 	/** Disconnect a LIVE MCP connection by sandbox id. Never throws. */
 	disconnect?: (id: string) => Promise<void>;
 	/** Tombstone a `connected` session record (append-only log). Never throws. */
 	tombstone?: (sandboxId: string) => Promise<void> | void;
+	/** Remove one storage half. Defaults to `fs.rmSync(path, {recursive, force})`. */
+	removeStorage?: (path: string) => void;
 }
 
 export interface RemoveOutcome {
@@ -723,6 +812,9 @@ export interface RemoveOutcome {
 	/** Storage halves removed (may already be gone). */
 	stateDirRemoved: boolean;
 	sandboxDirRemoved: boolean;
+	/** Refused BEFORE any side effect (locked worktree / extension source
+	 * without force). No other field is meaningful when set. */
+	refused?: string;
 	/** git worktree remove ran and the checkout is unregistered. */
 	worktreeRemoved: boolean;
 	/** `git worktree prune` ran as a fallback (cleanup note). */
@@ -736,15 +828,58 @@ export interface RemoveOutcome {
 }
 
 /**
+ * Lock state of one registered worktree, from `git worktree list --porcelain`
+ * (the only place git exposes locks: a `locked [<reason>]` line follows the
+ * `worktree <path>` stanza). An unreadable host repo degrades to unlocked —
+ * the `git worktree remove` step then reports the real error.
+ */
+async function worktreeLockState(hostRoot: string, worktree: string): Promise<{ locked: boolean; reason?: string }> {
+	const r = await runGit(["worktree", "list", "--porcelain"], { cwd: hostRoot });
+	if (r.code !== 0) return { locked: false };
+	const target = path.resolve(worktree);
+	let current: string | undefined;
+	for (const line of r.stdout.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			current = line.slice("worktree ".length);
+			continue;
+		}
+		if (current !== undefined && path.resolve(current) === target && line.startsWith("locked")) {
+			const reason = line.slice("locked".length).trim();
+			return reason.length > 0 ? { locked: true, reason } : { locked: true };
+		}
+	}
+	return { locked: false };
+}
+
+function errText(e: unknown): string {
+	return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Did `git worktree prune -v` actually remove an admin entry? Git reports each
+ * removal as `Removing worktrees/<id>: <reason>` on STDERR (exit code 0 also
+ * when there was nothing to prune), so exit code alone cannot tell — a `prune`
+ * that swept nothing must never be reported as `pruned` (review V2-05).
+ */
+function pruneRemovedSomething(r: { code: number; stderr: string }): boolean {
+	return r.code === 0 && r.stderr.split("\n").some((line) => line.startsWith("Removing "));
+}
+
+/**
  * Remove one sandbox: live-MCP disconnect + record tombstone FIRST (the
  * chunkhound daemon self-exits when its client detaches; the tombstone stops
  * auto-restore), then `git worktree remove --force` in the host repo
  * (meta.repoRoot — bare mirror hosts work the same way as when they added
- * the worktree), then the storage halves (sandbox dir + .state sibling),
- * then a best-effort `git branch -d` when the branch was created FOR this
- * sandbox (branchDeleteIntent; NEVER forced; never for pull/N or
+ * the worktree), then the storage halves (sandbox dir first, then the .state
+ * sibling), then a best-effort `git branch -d` when the branch was created
+ * FOR this sandbox (branchDeleteIntent; NEVER forced; never for pull/N or
  * pre-existing branches). Shared baselines are never touched, and neither
  * is anything else in the host repo beyond the sandbox's own registration.
+ *
+ * REFUSES before any side effect when the worktree is locked (operator
+ * decision: detect and refuse, never `-f -f`; the hint names
+ * `git worktree unlock`) or when the sandbox runs THIS extension without an
+ * explicit `force` — the engine owns that guard, not just the command.
  *
  * Never throws: per-step failures land in `warnings` and the outcome so the
  * caller can report what was and was not done. `mcp` seams keep the flow
@@ -759,6 +894,7 @@ export async function removeWorktreeEntry(opts: {
 	const { row, mcp } = opts;
 	const entry = row.entry;
 	const meta = entry.meta;
+	const removeStorage = mcp?.removeStorage ?? ((p: string): void => fs.rmSync(p, { recursive: true, force: true }));
 	const id = path.basename(entry.dir);
 	const outcome: RemoveOutcome = {
 		id,
@@ -774,6 +910,29 @@ export async function removeWorktreeEntry(opts: {
 		pruned: false,
 		warnings: [],
 	};
+
+	// 0) Preconditions — REFUSE before ANY side effect:
+	//    - a lock is the user's explicit statement (A2: detect + refuse, never
+	//      double-force): unlocking is a deliberate `git worktree unlock`.
+	//    - the sandbox running THIS extension needs an explicit force (the
+	//      engine enforces it so a future removal consumer cannot omit it).
+	const hostRoot = typeof meta.repoRoot === "string" && meta.repoRoot.length > 0 ? meta.repoRoot : undefined;
+	const hostAlive = hostRoot !== undefined && fs.existsSync(hostRoot);
+	if (row.runsThisExtension && opts.force !== true) {
+		outcome.refused = "sandbox runs this extension";
+		outcome.warnings.push("refused: this sandbox runs the loaded extension — re-run with --force to remove it anyway");
+		return outcome;
+	}
+	if (hostAlive && meta.worktree.length > 0) {
+		const lock = await worktreeLockState(hostRoot!, meta.worktree);
+		if (lock.locked) {
+			outcome.refused = `worktree locked${lock.reason ? `: ${lock.reason}` : ""}`;
+			outcome.warnings.push(
+				`refused: the worktree is locked — unlock first: git worktree unlock ${meta.worktree}`,
+			);
+			return outcome;
+		}
+	}
 
 	// 1) Live MCP connection → disconnect (daemon self-exits) + tombstone the
 	//    session record so auto-restore cannot resurrect the sandbox.
@@ -796,33 +955,47 @@ export async function removeWorktreeEntry(opts: {
 
 	// 2) git worktree remove --force in the host repo — while the checkout
 	//    still exists. On any failure the storage halves are still removed
-	//    and a `git worktree prune` sweep cleans the admin metadata.
-	const hostRoot = typeof meta.repoRoot === "string" && meta.repoRoot.length > 0 ? meta.repoRoot : undefined;
-	const hostAlive = hostRoot !== undefined && fs.existsSync(hostRoot);
+	//    and a `git worktree prune -v` sweep cleans the admin metadata (the
+	//    sweep reports `pruned` ONLY when it actually removed something).
 	if (hostAlive && meta.worktree.length > 0 && fs.existsSync(meta.worktree)) {
-		const r = await runGit(["worktree", "remove", "--force", meta.worktree], { cwd: hostRoot });
+		const r = await runGit(["worktree", "remove", "--force", meta.worktree], { cwd: hostRoot! });
 		if (r.code === 0) outcome.worktreeRemoved = true;
 		else {
 			outcome.warnings.push(`git worktree remove failed: ${r.stderr || r.stdout || "unknown error"}`);
-			const p = await runGit(["worktree", "prune"], { cwd: hostRoot });
-			if (p.code === 0) outcome.pruned = true;
+			const p = await runGit(["worktree", "prune", "-v"], { cwd: hostRoot! });
+			if (pruneRemovedSomething(p)) outcome.pruned = true;
 		}
 	} else if (hostAlive && meta.worktree.length > 0) {
 		// Checkout already gone — sweep the stale admin registration so the
 		// branch (if deletable) is not seen as "still checked out".
-		const p = await runGit(["worktree", "prune"], { cwd: hostRoot });
-		if (p.code === 0) outcome.pruned = true;
+		const p = await runGit(["worktree", "prune", "-v"], { cwd: hostRoot! });
+		if (pruneRemovedSomething(p)) outcome.pruned = true;
 	}
 
-	// 3) Storage halves: sandbox dir (checkout + config + engine dir) and the
-	//    hidden .state sibling (db + meta) — never the baselines.
-	if (fs.existsSync(entry.stateDir)) {
-		fs.rmSync(entry.stateDir, { recursive: true, force: true });
-		outcome.stateDirRemoved = true;
-	}
+	// 3) Storage halves: the sandbox dir (checkout + config + engine dir)
+	//    FIRST, and the hidden .state sibling (db + meta) ONLY after the
+	//    sandbox dir is really gone — deleting the state half first would make
+	//    a sandbox whose checkout deletion failed undiscoverable (no meta → no
+	//    row, no prune); this order keeps it visible as a `gone` row instead.
+	//    Each half is independently try/caught: the "never throws" contract
+	//    holds and both outcomes are reported.
 	if (fs.existsSync(entry.dir)) {
-		fs.rmSync(entry.dir, { recursive: true, force: true });
-		outcome.sandboxDirRemoved = true;
+		try {
+			removeStorage(entry.dir);
+			outcome.sandboxDirRemoved = true;
+		} catch (e) {
+			outcome.warnings.push(
+				`sandbox dir removal failed: ${errText(e)} — the .state half is kept so the sandbox stays discoverable (/ch-status --prune retries it)`,
+			);
+		}
+	}
+	if (!fs.existsSync(entry.dir) && fs.existsSync(entry.stateDir)) {
+		try {
+			removeStorage(entry.stateDir);
+			outcome.stateDirRemoved = true;
+		} catch (e) {
+			outcome.warnings.push(`state dir removal failed: ${errText(e)}`);
+		}
 	}
 
 	// 4) Optional branch delete — candidates only (branchDeleteIntent), never
@@ -858,7 +1031,7 @@ export function removePreviewLines(row: WtListInfo, opts: { branchDelete: boolea
 		`${repo}/${sandboxBranchLabel(meta)}`,
 		`worktree: ${meta.worktree}`,
 		`storage id: ${path.basename(row.entry.dir)}`,
-		`db ${fmtSize(row.entry.dbSizeBytes)} · checkout ${fmtSize(row.checkoutBytes)} · total ${fmtSize(row.entry.dbSizeBytes + row.checkoutBytes)}`,
+		`db ${fmtSize(row.entry.dbSizeBytes)} · checkout ${fmtSizeMaybe(row.checkoutBytes)} · total ${fmtSizeMaybe(row.checkoutBytes === undefined ? undefined : row.entry.dbSizeBytes + row.checkoutBytes)}`,
 		`base: ${meta.baseRef} @ ${meta.baseCommit.slice(0, 8)} · created ${meta.createdAt.slice(0, 10)}`,
 	];
 	if (row.liveMcpPrefix !== undefined) {

@@ -94,6 +94,39 @@ describe("sandbox catalog", () => {
 			await check(t, "trailing-slash mismatch tolerated", claimedRootMatches(`${sandboxDir}/`, sandboxDir));
 			fs.rmSync(claimPath, { force: true });
 			await check(t, "missing sidecar → unclaimed", listSandboxes(settings)[0]!.claimedRoot === undefined);
+			// V2-26: a state entry removed between readdirSync and statSync (a
+			// concurrent rm/prune) must be skipped, never abort the listing.
+			const vanishedName = "vanished-00000000";
+			const realReaddirSync = fs.readdirSync;
+			try {
+				fs.readdirSync = ((p: fs.PathLike, o?: unknown) => {
+					const names = (realReaddirSync as unknown as (p: fs.PathLike, o?: unknown) => unknown)(p, o);
+					if (path.resolve(String(p)) === path.resolve(path.dirname(stateDir)) && Array.isArray(names)) names.push(vanishedName);
+					return names;
+				}) as unknown as typeof fs.readdirSync;
+				const afterRace = listSandboxes(settings);
+				await check(
+					t,
+					"listing skips an entry vanishing between readdir and stat",
+					afterRace.length === 1 && afterRace[0]!.meta.worktree === wt && afterRace[0]!.dirExists === true,
+					JSON.stringify(afterRace.map((s) => ({ name: path.basename(s.stateDir), dirExists: s.dirExists }))),
+				);
+			} finally {
+				fs.readdirSync = realReaddirSync;
+			}
+			// V2-22 signal: a surviving .state half whose sandbox dir was deleted
+			// exposes dirExists=false instead of pretending the entry is healthy.
+			const orphanStateDir = path.join(path.dirname(stateDir), "orphan-00000001");
+			fs.mkdirSync(orphanStateDir, { recursive: true });
+			writeSandboxMeta(orphanStateDir, { ...meta, worktree: path.join(root, "gone-wt"), dbPath: path.join(orphanStateDir, ".chhound.db") });
+			const withOrphan = listSandboxes(settings);
+			await check(
+				t,
+				"entry carries dirExists=false when the sandbox dir half is gone",
+				withOrphan.length === 2 && withOrphan.some((s) => s.dirExists === false),
+				JSON.stringify(withOrphan.map((s) => ({ name: path.basename(s.stateDir), dirExists: s.dirExists }))),
+			);
+			fs.rmSync(orphanStateDir, { recursive: true, force: true });
 			const baselines = listBaselines(settings);
 			await check(t, "baseline listed", baselines.length === 1 && !!baselines[0]!.meta);
 			await git(["worktree", "remove", "--force", wt], { cwd: repo });

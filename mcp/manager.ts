@@ -18,6 +18,7 @@
  *   same id re-registers fresh closures over the new connection.
  */
 import path from "node:path";
+import * as fs from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -134,6 +135,15 @@ export function getMcpConnection(id: string): McpConnection | undefined {
 	return connections.get(id);
 }
 
+/**
+ * Both storage halves still exist? A `/ch-worktree rm` deletes the sandbox dir
+ * first, then the .state sibling — either missing means the sandbox is gone,
+ * so a connect that raced the removal must not register (review V2-06).
+ */
+function sandboxStoragePresent(entry: SandboxEntry): boolean {
+	return fs.existsSync(entry.dir) && fs.existsSync(entry.stateDir);
+}
+
 export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: ConnectMcpOptions = {}): Promise<McpConnection> {
 	const id = path.basename(entry.dir);
 	if (connections.has(id)) throw new Error(`already connected (${id}) — run /ch-mcp ${id} --disconnect first`);
@@ -199,6 +209,15 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 		// entry, no orphaned daemon.
 		await client.close().catch(() => undefined);
 		throw new Error(`could not list tools from 'chunkhound mcp' for ${id}: ${(e as Error).message}`);
+	}
+	// A `/ch-worktree rm` that started while this connect was in flight has
+	// already tombstoned the record and deleted the storage halves — the removal
+	// saw no live connection, so it could not have disconnected this one.
+	// Re-check right before registering: a live MCP for a removed sandbox would
+	// otherwise resurrect it (review V2-06).
+	if (!sandboxStoragePresent(entry)) {
+		await client.close().catch(() => undefined);
+		throw new Error(`sandbox '${id}' was removed while connecting — not registering it`);
 	}
 	// Connect race (session-start restore vs a manual /ch-mcp for the same
 	// id): both spawned; the loser closes its own daemon. Registered only

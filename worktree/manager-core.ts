@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import path from "node:path";
 import { fmtSize, readClaimedRoot, sandboxDbDir } from "../chhound/sandbox.js";
 import type { SandboxEntry } from "../chhound/sandbox.js";
+import type { BaselineMeta } from "../chhound/types.js";
 
 export interface ManagerItemBase {
 	/** Stable identity of the source repo (sandbox repo root / baseline repoRoot). */
@@ -228,6 +229,57 @@ export function sandboxMetaItem(
 
 export function createManagerSession(initial: Partial<ManagerSession> = {}): ManagerSession {
 	return { tab: "worktrees", row: 0, filter: "", ...initial };
+}
+
+/**
+ * Baseline row identity from its metadata ALONE (the db size arrives later) —
+ * the baseline twin of `sandboxMetaItem`, shared by the fingerprint and the
+ * full collector so the cached-key fields can never drift from the row fields.
+ */
+export function baselineMetaItem(dir: string, meta: BaselineMeta | undefined): ManagerBaselineItem {
+	const repoRoot = meta?.repoRoot && meta.repoRoot.length > 0 ? meta.repoRoot : dir;
+	const ref = meta?.baseRef ?? path.basename(dir);
+	return {
+		kind: "baseline",
+		baselineDir: dir,
+		projectKey: repoRoot,
+		projectLabel: path.basename(repoRoot),
+		ref,
+		path: repoRoot,
+		...(meta?.baseCommit ? { baseCommit: meta.baseCommit } : {}),
+		...(meta?.chhoundVersion ? { chhoundVersion: meta.chhoundVersion } : {}),
+		...(meta?.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+		searchText: [repoRoot, path.basename(repoRoot), ref, dir].join(" "),
+	};
+}
+
+/**
+ * Cache-key projection of one manager item: the fields whose change must drop
+ * the session cache — row identity/grouping (`projectKey`/`projectLabel`/
+ * `branch`/`path`), liveness, the index-claim badge, and the search/details
+ * text. Probe results (checkout size, git state, PR state) are deliberately
+ * absent: those refresh via `r` or on a library change, not on reopen (D10).
+ *
+ * Membership derives from the SAME builders the rows use
+ * (`sandboxMetaItem`/`baselineMetaItem`) plus these explicit fields, so a new
+ * identity field enters the cache key by construction instead of through a
+ * hand-kept parallel list (review V3-04); the companion unit test composes an
+ * item and asserts every listed field moves the key.
+ */
+export function managerItemCacheKey(item: ManagerItem): string {
+	const base = [item.kind, item.projectKey, item.projectLabel, item.path, item.searchText];
+	if (item.kind === "sandbox") {
+		return [
+			...base,
+			item.sandboxId,
+			item.branch,
+			item.createdAt ?? "",
+			item.indexed ? "indexed" : "unclaimed",
+			item.gone ? "gone" : "present",
+			item.live ? "live" : "idle",
+		].join("\u0001");
+	}
+	return [...base, item.baselineDir, item.ref, item.updatedAt ?? "", item.baseCommit ?? "", item.chhoundVersion ?? ""].join("\u0001");
 }
 
 /**

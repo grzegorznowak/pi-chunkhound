@@ -1,6 +1,6 @@
 import { decodeKittyPrintable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
-import { BorderLine, type ThemeLike } from "./path-input.js";
+import { BorderLine, promptViaCustom, type CustomPromptUI, type ThemeLike } from "./path-input.js";
 
 /**
  * Plugin-owned select dialog. pi's built-in ctx.ui.select highlights the
@@ -28,32 +28,22 @@ export interface PickOptions {
 }
 
 /** Structural slice of ctx.ui used by promptPick (real ui satisfies it). */
-export interface PickPromptUI {
-	custom?<T>(
-		factory: (
-			tui: TUI,
-			theme: PickTheme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => Component & { dispose?(): void },
-	): Promise<T>;
+export interface PickPromptUI extends CustomPromptUI {
 	select?(title: string, options: string[]): Promise<string | undefined>;
 }
 
 /**
  * Ask the user to pick one option (TUI). Falls back to ctx.ui.select where
- * ctx.ui.custom is unavailable (RPC/print modes).
+ * ctx.ui.custom is unavailable — including hosts whose `custom()` resolves
+ * without rendering (RPC/print), which the shared seam detects.
  */
 export async function promptPick(ui: PickPromptUI, opts: PickOptions): Promise<string | undefined> {
-	if (typeof ui.custom === "function") {
-		try {
-			return await ui.custom<string | undefined>(
-				(tui, theme, keybindings, done) => new PickPanelComponent(tui, theme, keybindings, opts, done),
-			);
-		} catch {
-			// custom failed (non-TUI) — fall through to the native select
-		}
-	}
+	// An empty list has nothing to pick: never render a zero-row dialog whose
+	// Enter would resolve `options[0] === undefined` (indistinguishable from a
+	// cancel) — the caller treats undefined as "cancelled/nothing to pick".
+	if (opts.options.length === 0) return undefined;
+	const viaCustom = await promptViaCustom<string | undefined>(ui, (tui, theme, keybindings, done) => new PickPanelComponent(tui, theme, keybindings, opts, done));
+	if (viaCustom.kind === "custom") return viaCustom.value;
 	return ui.select?.(opts.title, [...opts.options]);
 }
 

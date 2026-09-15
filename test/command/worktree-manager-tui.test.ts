@@ -1,7 +1,9 @@
 import { describe, test } from "node:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
+import type { SandboxMeta } from "../../chhound/types.js";
 import type { ManagerBaselineItem, ManagerLoadProgress, ManagerSandboxItem, ManagerSession } from "../../worktree/manager-core.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
@@ -252,6 +254,57 @@ describe("worktree manager TUI presenter", () => {
 		}
 	});
 
+	test("cold-load tab switches never expose the create row outside worktrees", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text };
+			// The loader never resolves: the whole test runs in the loading window
+			// where the old seed forced a create row onto every tab.
+			const mount = async (session: ManagerSession) => {
+				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+				let action: { kind?: string } | undefined;
+				const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+					component = factory({ requestRender() {} }, theme, getKeybindings(), (value) => { action = value as { kind?: string }; resolve(value); });
+				}) } };
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => new Promise<never>(() => {})).next(session);
+				return { component: component!, pending, session, action: () => action };
+			};
+
+			const coldProjects = await mount({ tab: "projects", row: 0, filter: "" });
+			let frame = coldProjects.component.render(100).join("\n");
+			await check(t, "a cold projects mount never seeds the create row", frame.includes("[projects]") && !frame.includes("+ new worktree"), frame);
+			coldProjects.component.handleInput("\x1b[13u");
+			await check(t, "Enter on a cold projects mount emits no create action", coldProjects.action() === undefined, JSON.stringify(coldProjects.action()));
+			coldProjects.component.handleInput("q");
+			await coldProjects.pending;
+
+			const coldWorktrees = await mount({ tab: "worktrees", row: 0, filter: "" });
+			frame = coldWorktrees.component.render(100).join("\n");
+			await check(t, "the worktrees cold load still offers creation", frame.includes("+ new worktree…") && /creates without waiting/i.test(frame), frame);
+			coldWorktrees.component.handleInput("2");
+			frame = coldWorktrees.component.render(100).join("\n");
+			await check(t, "cold-load digit 2 drops the create row", frame.includes("[projects]") && !frame.includes("+ new worktree"), frame);
+			coldWorktrees.component.handleInput("\x1b[13u");
+			await check(t, "Enter after a cold-load digit switch emits no create action", coldWorktrees.action() === undefined, JSON.stringify(coldWorktrees.action()));
+			coldWorktrees.component.handleInput("\t");
+			frame = coldWorktrees.component.render(100).join("\n");
+			await check(t, "cold-load Tab drops the create row too", frame.includes("[baselines]") && !frame.includes("+ new worktree"), frame);
+			coldWorktrees.component.handleInput("\n");
+			await check(t, "Enter on cold-load baselines emits no create action", coldWorktrees.action() === undefined, JSON.stringify(coldWorktrees.action()));
+			coldWorktrees.component.handleInput("\x1b[Z");
+			frame = coldWorktrees.component.render(100).join("\n");
+			await check(t, "Shift+Tab back to projects keeps the create row away", frame.includes("[projects]") && !frame.includes("+ new worktree"), frame);
+			coldWorktrees.component.handleInput("1");
+			frame = coldWorktrees.component.render(100).join("\n");
+			await check(t, "returning to worktrees restores the create row", frame.includes("[worktrees]") && frame.includes("+ new worktree…"), frame);
+			coldWorktrees.component.handleInput("\x1b[13u");
+			await coldWorktrees.pending;
+			await check(t, "Enter on the loading worktrees create row still requests creation", coldWorktrees.action()?.kind === "create", JSON.stringify(coldWorktrees.action()));
+		} finally { setKeybindings(original); }
+	});
+
 	test("streams completed sandboxes with real done/total progress", async (t) => {
 		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
 		const original = getKeybindings();
@@ -405,6 +458,38 @@ describe("worktree manager TUI presenter", () => {
 		} finally { setKeybindings(original); }
 	});
 
+	test("wide-character labels keep badges, cells, and the header on one grid", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			// A CJK label is 7 code units but 14 display cells: padding by code
+			// units leaves the badge/size columns 7 cells off between rows.
+			const wide = [
+				{ ...items[0]!, sizeBytes: 3 * 1024 * 1024, dbBytes: 1024 * 1024 },
+				{ ...items[0]!, sandboxId: "wide", projectKey: "/repo", projectLabel: "repo", branch: "日本語ブランチ", path: "/worktrees/wide", searchText: "repo 日本語ブランチ", sizeBytes: 4 * 1024 * 1024, dbBytes: 2 * 1024 * 1024 },
+			];
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => wide).next({ tab: "worktrees", row: 0, filter: "" });
+			const width = 120;
+			const lines = component!.render(width);
+			const asciiRow = lines.find((line) => line.includes("repo · feature"))!;
+			const wideRow = lines.find((line) => line.includes("日本語ブランチ"))!;
+			const header = lines.find((line) => line.includes("CHECKOUT"))!;
+			const end = (line: string, value: string): number => visibleWidth(line.slice(0, line.indexOf(value) + value.length));
+			await check(t, "the widest label sets one shared label column in display cells", visibleWidth(asciiRow.slice(0, asciiRow.indexOf("indexed"))) === visibleWidth(wideRow.slice(0, wideRow.indexOf("indexed"))), `${asciiRow}\n${wideRow}`);
+			await check(t, "badges and numeric cells end on the same display columns", end(asciiRow, "1.0 MB") === end(wideRow, "2.0 MB") && end(asciiRow, "3.0 MB") === end(wideRow, "4.0 MB") && end(asciiRow, "4.0 MB") === end(wideRow, "6.0 MB"), `${asciiRow}\n${wideRow}`);
+			await check(t, "the header sits exactly over the wide row's cells", end(header, "DB") === end(wideRow, "2.0 MB") && end(header, "CHECKOUT") === end(wideRow, "4.0 MB") && end(header, "TOTAL") === end(wideRow, "6.0 MB"), `${header}\n${wideRow}`);
+			await check(t, "no rendered line exceeds the render width", lines.every((line) => visibleWidth(line) <= width), `${width}: ${lines.map((line) => visibleWidth(line)).join(",")}`);
+			await check(t, "narrow renders clip wide labels instead of overflowing", component!.render(40).every((line) => visibleWidth(line) <= 40), JSON.stringify(component!.render(40)));
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
+
 	test("the selected row is highlighted with a full-width band", async (t) => {
 		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
 		const original = getKeybindings();
@@ -509,6 +594,186 @@ describe("worktree manager TUI presenter", () => {
 		} finally { setKeybindings(original); }
 	});
 
+	test("the footer pins the exact key legend and the scoped Esc hint", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const mount = async (session: ManagerSession) => {
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [items[0]!]).next(session);
+				await new Promise((resolve) => setImmediate(resolve));
+				return { lines: component!.render(100), pending };
+			};
+			const footer = (lines: string[]): string | undefined => lines.find((line) => line.includes("Tab·1/2/3 views"));
+
+			const plain = await mount({ tab: "worktrees", row: 0, filter: "" });
+			await check(t, "the worktrees footer is the exact legend ending in Esc close", footer(plain.lines) === "Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc close", JSON.stringify(footer(plain.lines)));
+			component!.handleInput("q");
+			await plain.pending;
+
+			const scoped = await mount({ tab: "worktrees", row: 0, filter: "", project: { key: "/repo", label: "repo" } });
+			await check(t, "an active project scope swaps only the Esc hint to back", footer(scoped.lines) === "Tab·1/2/3 views · ↑/↓ navigate · Enter select · / filter · n new · r refresh · Esc back", JSON.stringify(footer(scoped.lines)));
+			component!.handleInput("q");
+			await scoped.pending;
+		} finally { setKeybindings(original); }
+	});
+
+	test("a failing loader paints the exact failure line without a spinner", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const failure = "Unable to load the worktree library — Esc closes, reopen the manager to retry.";
+			const mount = (getRows: () => Promise<readonly ManagerSandboxItem[]>): Promise<unknown> =>
+				createWorktreeManagerTuiPresenter(ctx as never, getRows).next({ tab: "worktrees", row: 0, filter: "" });
+
+			const rejected = mount(() => Promise.reject(new Error("collector failed")));
+			await new Promise((resolve) => setImmediate(resolve));
+			let lines = component!.render(100);
+			await check(t, "an async rejection renders the exact failure line and no spinner", lines.find((line) => line.includes("Unable to load")) === failure && !lines.some((line) => line.includes("Loading ")), JSON.stringify(lines));
+			component!.handleInput("q");
+			await rejected;
+
+			const thrown = mount(() => { throw new Error("collector threw"); });
+			await new Promise((resolve) => setImmediate(resolve));
+			lines = component!.render(100);
+			await check(t, "a synchronous throw renders the same failure line and no spinner", lines.find((line) => line.includes("Unable to load")) === failure && !lines.some((line) => line.includes("Loading ")), JSON.stringify(lines));
+			component!.handleInput("q");
+			await thrown;
+		} finally { setKeybindings(original); }
+	});
+
+	test("an empty library pins each tab's exact empty state", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const mount = async (tab: ManagerSession["tab"]) => {
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => []).next({ tab, row: 0, filter: "" });
+				await new Promise((resolve) => setImmediate(resolve));
+				return { lines: component!.render(100).map((line) => line.trimEnd()), pending };
+			};
+
+			const worktrees = await mount("worktrees");
+			// The worktrees list is never empty: the create row is its empty state.
+			await check(t, "empty worktrees shows the create row and no empty-state line", worktrees.lines.includes("→ + new worktree…") && !worktrees.lines.some((line) => line.includes("(no ")), JSON.stringify(worktrees.lines));
+			component!.handleInput("q");
+			await worktrees.pending;
+
+			const projects = await mount("projects");
+			await check(t, "empty projects shows the exact no-projects line", projects.lines.includes("(no projects yet — n starts a worktree in a repo)") && !projects.lines.some((line) => line.includes("+ new worktree")), JSON.stringify(projects.lines));
+			component!.handleInput("q");
+			await projects.pending;
+
+			const baselines = await mount("baselines");
+			await check(t, "empty baselines shows the exact no-baselines line", baselines.lines.includes("(no cached baselines — the create wizard primes them)") && !baselines.lines.some((line) => line.includes("+ new worktree")), JSON.stringify(baselines.lines));
+			component!.handleInput("q");
+			await baselines.pending;
+		} finally { setKeybindings(original); }
+	});
+
+	test("the loading line pins the tab, done/total progress, and elapsed seconds", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			// The loader emits metadata progress and never resolves: the spinner must
+			// stay pinned to the live collect with a real elapsed clock.
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, (_session, onProgress) => {
+				onProgress?.({ done: 1, total: 3, items: [items[0]!] });
+				return new Promise<never>(() => {});
+			}).next({ tab: "worktrees", row: 0, filter: "" });
+			t.mock.timers.tick(1200);
+			const line = component!.render(100).find((value) => value.includes("Loading worktrees…"));
+			await check(t, "the loading line carries 1/3 and 1.2s", line !== undefined && /Loading worktrees… 1\/3 1\.2s/.test(line) && /\d+\.\ds/.test(line), JSON.stringify(line));
+			component!.handleInput("q");
+			await pending;
+		} finally {
+			t.mock.timers.reset();
+			setKeybindings(original);
+		}
+	});
+
+	test("the create row is never padded into the label column", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const sized = [
+				{ ...items[0]!, sizeBytes: 2048, dbBytes: 1024 },
+				{ ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta-tools", branch: "bugfix/longer", path: "/worktrees/two", searchText: "beta bugfix", sizeBytes: 3 * 1024, dbBytes: 2 * 1024 },
+			];
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const mount = async (row: number) => {
+				const pending = createWorktreeManagerTuiPresenter(ctx as never, () => sized).next({ tab: "worktrees", row, filter: "" });
+				await new Promise((resolve) => setImmediate(resolve));
+				return { lines: component!.render(100), pending };
+			};
+
+			const selected = await mount(0);
+			const labelWidth = "beta-tools · bugfix/longer".length;
+			const createSelected = selected.lines.find((line) => line.includes("+ new worktree"));
+			const shortRow = selected.lines.find((line) => line.includes("repo · feature"))!;
+			await check(t, "the selected create row is exactly the arrow plus label", createSelected?.trimEnd() === "→ + new worktree…", JSON.stringify(createSelected));
+			await check(t, "sandbox rows still pad the short label to the shared label column", shortRow.startsWith("  " + "repo · feature".padEnd(labelWidth) + "  indexed"), JSON.stringify(shortRow));
+			component!.handleInput("q");
+			await selected.pending;
+
+			// With the band on a sandbox row the create line has no trailing padding to
+			// strip, so the exact comparison covers the raw pre-band layout too.
+			const unselected = await mount(1);
+			const createPlain = unselected.lines.find((line) => line.includes("+ new worktree"));
+			await check(t, "the unselected create row is exactly the marker plus label", createPlain === "  + new worktree…", JSON.stringify(createPlain));
+			component!.handleInput("q");
+			await unselected.pending;
+		} finally { setKeybindings(original); }
+	});
+
+	test("a measured missing db renders 0 B while an unmeasured row carries no size cell", async (t) => {
+		const { createWorktreeManagerTuiPresenter } = await import("../../worktree/manager-tui.js");
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const measured = { ...items[0]!, sandboxId: "measured", dbBytes: 0 };
+			const unmeasured = { ...items[0]!, sandboxId: "two", projectKey: "/beta", projectLabel: "beta", branch: "bugfix", path: "/worktrees/two", searchText: "beta bugfix", indexed: false };
+			let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+			const ctx = { ui: { custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: unknown) => void) => { render(width: number): string[]; handleInput(data: string): void }) => await new Promise<unknown>((resolve) => {
+				component = factory({ requestRender() {} }, { fg: (_color: string, text: string) => text, bold: (text: string) => text, bg: (_color: string, text: string) => text }, getKeybindings(), resolve);
+			}) } };
+			const pending = createWorktreeManagerTuiPresenter(ctx as never, () => [measured, unmeasured]).next({ tab: "worktrees", row: 0, filter: "" });
+			await new Promise((resolve) => setImmediate(resolve));
+			const lines = component!.render(100);
+			const measuredLine = lines.find((line) => line.includes("repo · feature"))!;
+			const unmeasuredLine = lines.find((line) => line.includes("beta · bugfix"))!;
+			const header = lines.find((line) => line.includes("DB"))!;
+			await check(t, "a measured-but-missing db renders the real 0 B cell", measuredLine.includes("0 B") && measuredLine.trimEnd().endsWith("0 B"), JSON.stringify(measuredLine));
+			await check(t, "an unmeasured row carries no size cell at all", unmeasuredLine.trimEnd() === "  beta · bugfix" && !unmeasuredLine.includes("0 B"), JSON.stringify(unmeasuredLine));
+			await check(t, "only the measured column earns a header", header.includes("DB") && !header.includes("CHECKOUT") && !header.includes("TOTAL"), JSON.stringify(header));
+			component!.handleInput("q");
+			await pending;
+		} finally { setKeybindings(original); }
+	});
+
 	test("a session keeps one manager store across command invocations", async (t) => {
 		const env = snapshotEnv();
 		const root = await makeFixtureRoot("pi-chhound-cmd-manager-store-");
@@ -533,10 +798,10 @@ describe("worktree manager TUI presenter", () => {
 					});
 				},
 			});
-			const openManager = async (): Promise<void> => {
+			const openManager = async (cwd = root): Promise<void> => {
 				let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
 				const ctx = {
-					cwd: root,
+					cwd,
 					mode: "tui",
 					hasUI: true,
 					ui: {
@@ -559,13 +824,47 @@ describe("worktree manager TUI presenter", () => {
 			const { settings } = loadSettings(root);
 			const sandboxId = "sb-new-00000001";
 			const sandboxState = path.join(sandboxRoot(settings), ".state", sandboxId);
-			writeSandboxMeta(sandboxState, {
+			const sandboxMeta: SandboxMeta = {
 				version: 1, worktree: path.join(root, "not-checked-out"), repoRoot: path.join(root, "repo"), branch: "feat",
 				baseRef: "main", baseCommit: "0000000000000000000000000000000000000000", chhoundVersion: "test",
 				createdAt: "2026-09-14T00:00:00.000Z", copiedFrom: "", dbPath: path.join(sandboxState, "db"),
-			});
+			};
+			writeSandboxMeta(sandboxState, sandboxMeta);
 			await openManager();
 			await check(t, "a library change recollects into the same session store", stores === 1 && collects === 2, `stores=${stores} collects=${collects}`);
+
+			// A3 (V2-09): the index-claim sidecar drives the `indexed` badge, so a
+			// reopened panel must drop the cached rows when it appears.
+			await fs.writeFile(`${sandboxMeta.dbPath}.root.json`, JSON.stringify({ version: 1, indexed_root_path: path.join(sandboxRoot(settings), sandboxId) }));
+			await openManager();
+			await check(t, "writing the claim sidecar recollects on the next open", stores === 1 && collects === 3, `stores=${stores} collects=${collects}`);
+
+			// A3 (V2-10): meta identity (branch) is part of the fingerprint too.
+			writeSandboxMeta(sandboxState, { ...sandboxMeta, branch: "feat-renamed" });
+			await openManager();
+			await check(t, "rewriting the meta branch recollects on the next open", stores === 1 && collects === 4, `stores=${stores} collects=${collects}`);
+
+			await openManager();
+			await check(t, "an unchanged library still reuses the cached collect", stores === 1 && collects === 4, `stores=${stores} collects=${collects}`);
+
+			// V2-08: from a repo subdir the fingerprint must resolve settings at the git
+			// root (project settings are exact-root only), exactly like the collector —
+			// otherwise a subdir reopen serves the wrong (stale) library.
+			const repo = path.join(root, "repo");
+			const sub = path.join(repo, "sub");
+			const projectLibrary = path.join(root, "project-library");
+			await fs.mkdir(sub, { recursive: true });
+			await fs.mkdir(path.join(repo, ".pi", "pi-chhound"), { recursive: true });
+			await fs.writeFile(path.join(repo, ".pi", "pi-chhound", "settings.json"), JSON.stringify({ version: 1, sandboxRoot: projectLibrary }));
+			const gitInit = spawnSync("git", ["init", "-q", repo], { encoding: "utf8" });
+			await check(t, "the subdir fixture is a git repo", gitInit.status === 0, JSON.stringify(gitInit));
+			await openManager(sub);
+			await check(t, "a subdir open resolves and collects the project library", stores === 1 && collects === 5, `stores=${stores} collects=${collects}`);
+
+			const projectState = path.join(projectLibrary, ".state", "sb-subdir-00000001");
+			writeSandboxMeta(projectState, { ...sandboxMeta, repoRoot: repo, branch: "subdir", dbPath: path.join(projectState, "db") });
+			await openManager(sub);
+			await check(t, "a project-library change recollects from the subdir too", stores === 1 && collects === 6, `stores=${stores} collects=${collects}`);
 		} finally {
 			applyEnv(env);
 			await fs.rm(root, { recursive: true, force: true });

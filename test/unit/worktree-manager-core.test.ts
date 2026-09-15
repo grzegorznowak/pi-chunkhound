@@ -44,6 +44,41 @@ const baselines: ManagerBaselineItem[] = [
 	{ kind: "baseline", baselineDir: "/cache/bases/alpha/main", projectKey: "/repos/alpha", projectLabel: "alpha", ref: "main", path: "/repos/alpha", searchText: "alpha main baseline", dbBytes: 7 * 1024 * 1024, baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560", chhoundVersion: "chhound 5.2.2", updatedAt: "2026-09-06T11:50:50.222Z" },
 ];
 
+// Full SandboxEntry for the builder/cache-key pins: dir basename = sandboxId,
+// claimedRoot marks it indexed without a filesystem sidecar read.
+const sandboxEntry = {
+	dir: "/sandboxes/alpha-123",
+	stateDir: "/sandboxes/.state/alpha-123",
+	meta: {
+		version: 1 as const,
+		worktree: "/worktrees/alpha-123/feature-one",
+		repoRoot: "/repos/alpha",
+		branch: "feature/one",
+		baseRef: "main",
+		baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560",
+		chhoundVersion: "chhound 5.2.2",
+		createdAt: "2026-09-14T12:00:00.000Z",
+		copiedFrom: "/cache/bases/alpha/main",
+		dbPath: "/sandboxes/.state/alpha-123/.chhound.db",
+	},
+	dbSizeBytes: 1024,
+	claimedRoot: "/worktrees/alpha-123/feature-one",
+};
+
+const baselineMeta = {
+	version: 1 as const,
+	repoRoot: "/repos/alpha",
+	baseRef: "main",
+	baseCommit: "c9698c47bb164ed50cae0ce3578a65887dd88560",
+	chhoundVersion: "chhound 5.2.2",
+	updatedAt: "2026-09-06T11:50:50.222Z",
+};
+
+const fullSandboxItem = async () => {
+	const { sandboxMetaItem } = await import("../../worktree/manager-core.js");
+	return sandboxMetaItem(sandboxEntry, { live: true, pr: { number: 7, state: "OPEN" } });
+};
+
 describe("worktree manager core", () => {
 	test("create row is first and normalized sandbox facts survive in rows", async (t) => {
 		const { buildManagerRows, createManagerSession } = await import("../../worktree/manager-core.js");
@@ -286,5 +321,97 @@ describe("worktree manager core", () => {
 		const retry = store.load();
 		await check(t, "the retry starts a new collect rather than reusing the rejection", !Array.isArray(retry) && calls === 2, `calls=${calls}`);
 		await check(t, "a successful retry is cached", (await retry) === items && Array.isArray(store.load()) && calls === 2, `calls=${calls}`);
+	});
+
+	test("sandbox cache keys are deterministic and every identity field moves them", async (t) => {
+		const { sandboxMetaItem, managerItemCacheKey } = await import("../../worktree/manager-core.js");
+		const item = await fullSandboxItem();
+		const key = managerItemCacheKey(item);
+		await check(t, "the builder composes identity from the entry and options",
+			item.kind === "sandbox" && item.sandboxId === "alpha-123" && item.projectKey === "/repos/alpha" && item.projectLabel === "alpha" && item.branch === "feature/one" && item.path === "/worktrees/alpha-123/feature-one" && item.createdAt === "2026-09-14T12:00:00.000Z" && item.indexed && typeof item.gone === "boolean" && item.live && item.pr?.number === 7 && item.dbBytes === 1024,
+			JSON.stringify(item));
+		await check(t, "the same input yields the same cache key", managerItemCacheKey(sandboxMetaItem(sandboxEntry, { live: true, pr: { number: 7, state: "OPEN" } })) === key, key);
+		const variants: Array<[string, typeof item]> = [
+			["sandboxId", { ...item, sandboxId: "alpha-999" }],
+			["projectKey", { ...item, projectKey: "/repos/other" }],
+			["projectLabel", { ...item, projectLabel: "alpha-renamed" }],
+			["branch", { ...item, branch: "feature/two" }],
+			["path", { ...item, path: "/worktrees/alpha-999/feature-nine" }],
+			["createdAt", { ...item, createdAt: "2026-01-01T00:00:00.000Z" }],
+			["indexed", { ...item, indexed: !item.indexed }],
+			["gone", { ...item, gone: !item.gone }],
+			["live", { ...item, live: !item.live }],
+			["searchText", { ...item, searchText: "unrelated search text" }],
+		];
+		for (const [field, variant] of variants) {
+			await check(t, `${field} participates in the cache key`, managerItemCacheKey(variant) !== key, `${field}: ${managerItemCacheKey(variant)}`);
+		}
+	});
+
+	test("probe results are deliberately excluded from the cache key (D10)", async (t) => {
+		const { managerItemCacheKey } = await import("../../worktree/manager-core.js");
+		const item = await fullSandboxItem();
+		const key = managerItemCacheKey(item);
+		// D10: checkout size, db size, and PR state are probe results. They refresh
+		// via `r` or on a library change, not on reopen, so they MUST NOT enter the
+		// session cache key. Changing one below is deliberate — do not "fix" this
+		// by adding probe fields to managerItemCacheKey.
+		await check(t, "D10: checkout size is not part of the key", managerItemCacheKey({ ...item, sizeBytes: 4096 }) === key, "");
+		await check(t, "D10: a changed checkout size is still the same key", managerItemCacheKey({ ...item, sizeBytes: 8192 }) === managerItemCacheKey({ ...item, sizeBytes: 4096 }), "");
+		await check(t, "D10: db size is not part of the key", managerItemCacheKey({ ...item, dbBytes: 1048576 }) === key, "");
+		await check(t, "D10: a changed PR result is still the same key", managerItemCacheKey({ ...item, pr: { number: 99, state: "CLOSED" } }) === key, "");
+		const { pr: _pr, ...withoutPr } = item;
+		await check(t, "D10: gaining or losing a PR result is still the same key", managerItemCacheKey(withoutPr) === key, "");
+	});
+
+	test("baseline cache keys are deterministic and every metadata field moves them", async (t) => {
+		const { baselineMetaItem, managerItemCacheKey } = await import("../../worktree/manager-core.js");
+		const dir = "/cache/bases/alpha/main";
+		const item = baselineMetaItem(dir, baselineMeta);
+		const key = managerItemCacheKey(item);
+		await check(t, "the builder composes baseline identity from dir and metadata",
+			item.kind === "baseline" && item.baselineDir === dir && item.projectKey === "/repos/alpha" && item.projectLabel === "alpha" && item.ref === "main" && item.path === "/repos/alpha" && item.baseCommit === baselineMeta.baseCommit && item.chhoundVersion === baselineMeta.chhoundVersion && item.updatedAt === baselineMeta.updatedAt && item.searchText.includes("/repos/alpha") && item.searchText.includes("main") && item.searchText.includes(dir),
+			JSON.stringify(item));
+		await check(t, "the same input yields the same cache key", managerItemCacheKey(baselineMetaItem(dir, baselineMeta)) === key, key);
+		const variants: Array<[string, typeof item]> = [
+			["baselineDir", { ...item, baselineDir: "/cache/bases/alpha/develop" }],
+			["ref", { ...item, ref: "develop" }],
+			["updatedAt", { ...item, updatedAt: "2026-01-01T00:00:00.000Z" }],
+			["baseCommit", { ...item, baseCommit: "0000000000000000000000000000000000000000" }],
+			["chhoundVersion", { ...item, chhoundVersion: "chhound 9.9.9" }],
+			["projectKey", { ...item, projectKey: "/repos/other" }],
+			["projectLabel", { ...item, projectLabel: "other" }],
+			["path", { ...item, path: "/repos/other" }],
+			["searchText", { ...item, searchText: "unrelated search text" }],
+		];
+		for (const [field, variant] of variants) {
+			await check(t, `${field} participates in the baseline cache key`, managerItemCacheKey(variant) !== key, `${field}: ${managerItemCacheKey(variant)}`);
+		}
+	});
+
+	test("baseline identity falls back to the directory when repoRoot is absent or empty", async (t) => {
+		const { baselineMetaItem } = await import("../../worktree/manager-core.js");
+		const dir = "/cache/bases/alpha/main";
+		const { repoRoot: _repoRoot, ...withoutRepoRoot } = baselineMeta;
+		const cases: Array<[string, Parameters<typeof baselineMetaItem>[1]]> = [
+			["absent meta", undefined],
+			["empty repoRoot", { ...baselineMeta, repoRoot: "" }],
+			["omitted repoRoot", withoutRepoRoot],
+		];
+		for (const [label, meta] of cases) {
+			const item = baselineMetaItem(dir, meta);
+			await check(t, `${label}: projectKey/projectLabel/path/searchText come from the dir`,
+				item.projectKey === dir && item.projectLabel === "main" && item.path === dir && item.searchText.includes(dir),
+				JSON.stringify(item));
+		}
+	});
+
+	test("sandbox and baseline items with identical base fields have distinct cache keys", async (t) => {
+		const { baselineMetaItem, managerItemCacheKey } = await import("../../worktree/manager-core.js");
+		const sandbox = await fullSandboxItem();
+		const baseline = baselineMetaItem("/cache/bases/alpha/main", baselineMeta);
+		const twin = { ...sandbox, projectKey: baseline.projectKey, projectLabel: baseline.projectLabel, path: baseline.path, searchText: baseline.searchText };
+		await check(t, "base identity fields now match exactly", twin.projectKey === baseline.projectKey && twin.projectLabel === baseline.projectLabel && twin.path === baseline.path && twin.searchText === baseline.searchText, JSON.stringify({ twin, baseline }));
+		await check(t, "kind alone keeps the sandbox and baseline keys distinct", managerItemCacheKey(twin) !== managerItemCacheKey(baseline), `${managerItemCacheKey(twin)} vs ${managerItemCacheKey(baseline)}`);
 	});
 });

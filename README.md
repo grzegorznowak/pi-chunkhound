@@ -130,7 +130,9 @@ Guards: pre-existing branches are never deleted (a sandbox that checked out
 an existing branch anchors its baseline on that branch — `meta.baseRef ==
 branch` — and is left alone); pull/`N` and `<remote>/<branch>` slots never
 are (no local branch). The sandbox running this extension needs `--force`
-on the one-go path. The impact preview states what will be disconnected,
+on the one-go path. A **locked** worktree is refused outright (never
+overridden with a double force) — `git worktree unlock <path>` first; the
+refusal happens before anything is touched. The impact preview states what will be disconnected,
 lost (uncommitted checkout changes) and deleted — and what is **NOT**
 touched: shared baselines, other sandboxes, anything else in the host repo.
 

@@ -130,6 +130,29 @@ describe("worktree wizard outcomes", () => {
 		}
 	});
 
+	test("ok create result without a non-empty sandboxId is failed (V2-14)", async (t) => {
+		// The real createIndexedWorktree only resolves ok:true together with the
+		// sandbox dir's basename, so the wizard's success predicate is
+		// `created.ok && created.sandboxId` — not merely `created.ok`.
+		const { runBranchWizard } = await import("../../worktree/command.js");
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("ch-worktree-wizard-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home }));
+			const repoRoot = path.join(root, "repo");
+			const library = path.join(root, "library");
+			await fs.mkdir(repoRoot);
+			for (const result of [{ ok: true }, { ok: true, sandboxId: "" }] as const) {
+				const outcome = await runBranchWizard(fakeCtx(repoRoot, ["", library]).ctx as never, {} as never, repoRoot, { create: async () => result });
+				await check(t, `ok:true with sandboxId ${JSON.stringify(result.sandboxId)} stays failed, not created`, outcome.kind === "failed", JSON.stringify(outcome));
+			}
+		} finally {
+			restoreEnv(env);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("injected create result becomes created or failed", async (t) => {
 		const { runBranchWizard } = await import("../../worktree/command.js");
 		const env = snapshotEnv();

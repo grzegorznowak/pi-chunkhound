@@ -33,7 +33,9 @@ export function createWorktreeManagerRpcPresenter(
 				options.push(label);
 			};
 
-			addOption("+ new worktree…", () => ({ kind: "create" }), true);
+			// Scope parity with the TUI: a create from a project-scoped menu creates
+			// in that project (the key rides `positional`, like the scoped create row).
+			addOption("+ new worktree…", () => ({ kind: "create", positional: session.project?.key }), true);
 			if (session.project) addOption("back to all projects", () => {
 				session.project = undefined; session.filter = ""; session.row = 0;
 				return { kind: "back" };
@@ -58,8 +60,7 @@ export function createWorktreeManagerRpcPresenter(
 					const title = row.kind === "sandbox" ? "Worktree details" : "Baseline details";
 					const detail = await ctx.ui.select([title, ...describeManagerItem(item)].join("\n"), ["back", "close"]);
 					return detail === "close" ? { kind: "close" } : { kind: "back" };
-				});
-			}
+				});			}
 			addOption(viewLabel, () => {
 				session.tab = nextView; session.row = 0; session.project = undefined;
 				return { kind: "back" };

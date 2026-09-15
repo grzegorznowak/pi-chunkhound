@@ -221,11 +221,19 @@ check("X: MCP --prefix value slot has no sandbox items", !x || !x.items.some((i:
 const y = await s("/ch-mcp chosen ", false);
 check("Y: no sandbox items after the target", !y || !y.items.some((i: any) => String(i.value).includes(fakeWt)), JSON.stringify(y?.items?.map((i: any) => i.value)));
 
-// ── Deterministic ordering: dirs first, then name (dialog TAB picks items[0]) ──
+// ── Deterministic ordering: manager verbs lead, then dir entries (dirs first,
+// then alpha). test/fs/completions.test.ts pins the same contract — the two
+// layers disagreed while this check still expected the pre-verb order ──
 
 const z = await s("/ch-worktree ", false);
 const zItems = z?.items.map((i: any) => i.value) ?? [];
-check("Z: dir entries sorted (dirs first, alpha)", zItems[0] === "-target/" && zItems.indexOf("docs/") < zItems.indexOf('"my project/') && zItems.indexOf('"my project/') < zItems.indexOf("src/"), JSON.stringify(zItems));
+const dirStart = zItems.findIndex((v: string) => v === "-target/");
+check(
+	"Z: manager verbs lead, then dir entries sorted (dirs first, alpha)",
+	zItems[0] === "ls" && zItems[1] === "list" && zItems[2] === "rm" && zItems[3] === "remove" && dirStart === 4 &&
+		zItems.indexOf("docs/") < zItems.indexOf('"my project/') && zItems.indexOf('"my project/') < zItems.indexOf("src/"),
+	JSON.stringify(zItems),
+);
 
 console.log(`\n${checks - failures}/${checks} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

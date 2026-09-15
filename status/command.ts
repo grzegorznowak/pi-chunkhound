@@ -61,7 +61,17 @@ export function buildStatusLines(opts: {
 		for (const s of sandboxes) {
 			const repoName = s.meta.repoRoot ? path.basename(s.meta.repoRoot) : path.basename(s.dir);
 			const label = `${repoName}/${sandboxBranchLabel(s.meta)}`;
-			if (!s.claimedRoot) {
+			if (s.dirExists === false) {
+				// The .state half (db + claim sidecar) survived but the sandbox dir
+				// — the index root itself — is gone. Never report this as healthy:
+				// a claim pointing at a deleted root can be neither used nor matched.
+				problems++;
+				lines.push(
+					`  ⚠ ${label} — storage missing`,
+					`      expected: ${s.dir}`,
+					"      fix: /ch-status --prune",
+				);
+			} else if (!s.claimedRoot) {
 				problems++;
 				lines.push(`  ⚠ ${label} — unclaimed — run chunkhound index/mcp from ${s.dir}`);
 			} else if (!claimedRootMatches(s.claimedRoot, s.dir)) {

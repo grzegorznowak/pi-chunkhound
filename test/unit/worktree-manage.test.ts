@@ -13,11 +13,13 @@ import {
 	parseListInvocation,
 	parseRemoveInvocation,
 	removePreviewLines,
+	removeWorktreeEntry,
 	searchTextOf,
 	worktreeVerb,
 } from "../../worktree/manage.js";
 import type { WtListInfo, WtGitState } from "../../worktree/manage.js";
 import type { SandboxEntry } from "../../chhound/sandbox.js";
+import type { ChhoundSettings } from "../../chhound/types.js";
 import { check } from "../lib/checks.js";
 
 // Inventory: manager list-model checks — verb dispatch predicates, ls
@@ -316,6 +318,25 @@ describe("grouping / filter / sort", () => {
 		);
 	});
 
+	test("group ties: duplicate basenames sort by raw project key, input-order independent (V2-24)", async (t) => {
+		// Same label ("chunkhound"), same sort keys (createdAt, db size): only
+		// the raw project key can decide, and it must not depend on input order.
+		const a = mk({ repoRoot: "/a/chunkhound", branch: "a", dir: "/x/sandboxes/sb-a-11111111", createdAt: "2026-01-01T00:00:00.000Z", db: 1000 });
+		const b = mk({ repoRoot: "/b/chunkhound", branch: "b", dir: "/x/sandboxes/sb-b-22222222", createdAt: "2026-01-01T00:00:00.000Z", db: 1000 });
+		const order = (infos: WtListInfo[]): string => groupListInfos(infos, {}).groups.map((g) => g.key).join(",");
+		const forward = order([a, b]);
+		const reverse = order([b, a]);
+		await check(t, "equal labels tie-break on raw project key asc", forward === "/a/chunkhound,/b/chunkhound", forward);
+		await check(t, "group order is input-order independent", reverse === forward, `${forward} vs ${reverse}`);
+		const { groups } = groupListInfos([b, a], {});
+		await check(
+			t,
+			"duplicate basenames get distinct label tokens",
+			groups.length === 2 && groups[0]!.label.startsWith("chunkhound") && groups[1]!.label.startsWith("chunkhound") && groups[0]!.label !== groups[1]!.label,
+			groups.map((g) => g.label).join("|"),
+		);
+	});
+
 	test("deterministic ties (same createdAt → storage id asc)", async (t) => {
 		const rows = [
 			mk({ branch: "b2", createdAt: "2026-01-01T00:00:00.000Z", dir: "/x/sandboxes/sb-b2-00000002" }),
@@ -382,6 +403,18 @@ describe("renderer", () => {
 		await check(t, "showing N of M", partial.includes("showing 1 of 3 matching"), partial);
 	});
 
+	test("unmeasured checkout renders as — (never a partial sum)", async (t) => {
+		// Drop the measured value rather than passing `undefined` (the mkInfo
+		// default would fill it back in): omit the property entirely.
+		const { checkoutBytes: _measured, ...row } = mkInfo({ entry: mkSandbox({ dir: "/x/sandboxes/sb-u-44444444", branch: "unknown" }) });
+		const lines = buildWorktreeListLines({ libraryRoot: ROOT, groups: groupListInfos([row], {}).groups, total: 1, ghFailed: 0, ghAttempted: 0 }).join("\n");
+		await check(t, "row line renders checkout — · total —", lines.includes("checkout — · total —"), lines);
+		await check(t, "group rollup renders checkout — · total —", lines.includes("(1) — db 1.0 KB · checkout — · total —"), lines);
+		await check(t, "no partial number or NaN anywhere", !lines.includes("NaN") && !lines.includes("checkout 2.0 KB"), lines);
+		const preview = removePreviewLines(row, { branchDelete: false }).join("\n");
+		await check(t, "rm preview renders checkout — · total —", preview.includes("checkout — · total —"), preview);
+	});
+
 	test("worktree path display: relative under the library root, absolute outside", async (t) => {
 		await check(t, "inside root → relative", displayWorktreePath("/x/sandboxes", "/x/sandboxes/sb-a/fix") === "sb-a/fix");
 		await check(t, "outside root → absolute", displayWorktreePath("/x/sandboxes", "/elsewhere/wt") === "/elsewhere/wt");
@@ -427,7 +460,30 @@ describe("removal (rm): arg validation + guards (pure)", () => {
 		// pull/N slots are never local branches — excluded up front (the
 		// runtime show-ref check would also refuse).
 		await check(t, "pull/N slot", branchDeleteIntent({ branch: "pull/9", baseRef: "main" }) === false);
+		// A <remote>/<branch> identity is a remote-tracking ref, not a local
+		// branch: anchored on itself it is never a delete candidate (V2-18).
+		await check(t, "remote-ref slot anchored on itself", branchDeleteIntent({ branch: "origin/main", baseRef: "origin/main" }) === false);
+		// A differing ref yields only the shallow intent — the engine still has
+		// to verify refs/heads/origin/main, which a remote-tracking identity can
+		// never satisfy (the fs suite pins the remote ref surviving removal).
+		await check(t, "remote-ref slot with a differing ref is only a shallow intent", branchDeleteIntent({ branch: "origin/fix", baseRef: "main" }) === true);
 		await check(t, "no branch", branchDeleteIntent({ branch: "", baseRef: "main" }) === false);
+	});
+
+	test("engine force guard refuses an extension-source row before any side effect (V3-12)", async (t) => {
+		const settings = {} as ChhoundSettings;
+		const row = mkInfo({ runsThisExtension: true });
+		const refused = await removeWorktreeEntry({ row, settings });
+		await check(t, "refused names the extension source", (refused.refused ?? "").includes("extension"), JSON.stringify(refused));
+		await check(t, "warning tells the operator about --force", refused.warnings.some((w) => w.includes("--force")), JSON.stringify(refused.warnings));
+		await check(
+			t,
+			"refusal short-circuits every side effect",
+			refused.worktreeRemoved === false && refused.sandboxDirRemoved === false && refused.stateDirRemoved === false && refused.pruned === false && refused.mcpDisconnected === false && refused.tombstoned === false,
+			JSON.stringify(refused),
+		);
+		const forced = await removeWorktreeEntry({ row, settings, force: true });
+		await check(t, "force proceeds past the guard", forced.refused === undefined && forced.warnings.length === 0, JSON.stringify(forced));
 	});
 });
 
