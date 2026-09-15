@@ -181,14 +181,23 @@ export async function ensureMirror(settings: ChhoundSettings, owner: string, rep
 	if (f.code !== 0) {
 		throw new Error(`could not refresh mirror ${dir}: ${f.stderr || f.stdout || "git fetch failed"}`);
 	}
-	// Expose the bare clone's HEAD branch as refs/remotes/origin/HEAD — the
-	// record defaultRemoteBranch() reads for the default-ref baseline anchor.
-	// A bare repo has no remote-tracking refs at all; without this, PR sandbox
-	// baselines (and any other default-ref resolution on the mirror) would fall
-	// back to "main" regardless of the repo's actual default branch.
-	const head = await runGit(["--git-dir", dir, "symbolic-ref", "--quiet", "HEAD"], { cwd: dir });
-	if (head.code === 0 && head.stdout.startsWith("refs/heads/")) {
-		await runGit(["--git-dir", dir, "symbolic-ref", "refs/remotes/origin/HEAD", head.stdout], { cwd: dir });
+	// Expose the remote's ADVERTISED default branch as refs/remotes/origin/HEAD
+	// — the record defaultRemoteBranch() reads for the default-ref baseline
+	// anchor. The bare clone's own HEAD is frozen at clone time: `git fetch`
+	// never moves it (fetch.followRemoteHEAD defaults to "create", which does
+	// not touch an existing symref), so a REUSED mirror would otherwise keep
+	// serving a renamed/deleted default forever (review F2-02). Ask the remote
+	// directly; fall back to the cached bare HEAD when it advertises none.
+	let defaultRef = (
+		await runGit(["--git-dir", dir, "ls-remote", "--symref", "origin", "HEAD"], { cwd: dir })
+	).stdout.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m)?.[1];
+	if (defaultRef) defaultRef = `refs/heads/${defaultRef}`;
+	else {
+		const head = await runGit(["--git-dir", dir, "symbolic-ref", "--quiet", "HEAD"], { cwd: dir });
+		if (head.code === 0 && head.stdout.startsWith("refs/heads/")) defaultRef = head.stdout;
+	}
+	if (defaultRef) {
+		await runGit(["--git-dir", dir, "symbolic-ref", "refs/remotes/origin/HEAD", defaultRef], { cwd: dir });
 	}
 	return dir;
 }

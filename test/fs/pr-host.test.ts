@@ -107,6 +107,15 @@ describe("pr host", () => {
 			const mirrorDefault = await defaultRemoteBranch(mirror);
 			await check(t, "ensureMirror exposes the default branch as origin/HEAD", mirrorDefault === mirrorHead, `${mirrorDefault} vs ${mirrorHead}`);
 
+			// Review F2-02: a REUSED mirror must follow an upstream default-branch
+			// rename. `git fetch` never moves the bare clone's HEAD, so origin/HEAD
+			// has to come from the remote advertisement, not the cached HEAD.
+			await git(["--git-dir", prBare, "symbolic-ref", "HEAD", "refs/heads/main"], { cwd: root });
+			await ensureMirror(settings, "ghuser", "add");
+			const renamedDefault = await defaultRemoteBranch(mirror);
+			const staleHead = (await runGit(["--git-dir", mirror, "symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: root })).stdout;
+			await check(t, "reused mirror follows the upstream default rename", renamedDefault === "main", `${renamedDefault} (mirror HEAD still ${staleHead})`);
+
 			// Full host resolution (fake gh, offline): repo-less PR → mirror host;
 			// head fetch lands exactly on refs/pull/1/head. ctx is a non-repo dir
 			// so the cwd rung of the ladder stays empty.
