@@ -449,24 +449,29 @@ describe("removal (rm): arg validation + guards (pure)", () => {
 	});
 
 	test("branch-delete intent protects pre-existing branches", async (t) => {
-		// -b created / wizard / derived branches anchor the baseline on the
-		// source repo's head branch — baseRef !== branch → deletable.
-		await check(t, "created branch (baseRef=main)", branchDeleteIntent({ branch: "fix", baseRef: "main" }) === true);
-		await check(t, "derived branch (baseRef=main)", branchDeleteIntent({ branch: "repo-wt", baseRef: "main" }) === true);
-		await check(t, "slashed created branch", branchDeleteIntent({ branch: "feat/x", baseRef: "main" }) === true);
-		// An EXISTING branch checked out into the sandbox anchors on ITSELF —
-		// it predates the sandbox and must never be deleted.
-		await check(t, "existing branch (baseRef===branch)", branchDeleteIntent({ branch: "fix", baseRef: "fix" }) === false);
-		// pull/N slots are never local branches — excluded up front (the
-		// runtime show-ref check would also refuse).
-		await check(t, "pull/N slot", branchDeleteIntent({ branch: "pull/9", baseRef: "main" }) === false);
-		// A <remote>/<branch> identity is a remote-tracking ref, not a local
-		// branch: anchored on itself it is never a delete candidate (V2-18).
-		await check(t, "remote-ref slot anchored on itself", branchDeleteIntent({ branch: "origin/main", baseRef: "origin/main" }) === false);
-		// A differing ref yields only the shallow intent — the engine still has
-		// to verify refs/heads/origin/main, which a remote-tracking identity can
-		// never satisfy (the fs suite pins the remote ref surviving removal).
-		await check(t, "remote-ref slot with a differing ref is only a shallow intent", branchDeleteIntent({ branch: "origin/fix", baseRef: "main" }) === true);
+		// Explicit create-time fact (Option A): when present it decides alone.
+		await check(t, "created branch is deletable", branchDeleteIntent({ branch: "fix", baseRef: "main", createdBranch: true }) === true);
+		await check(t, "pre-existing branch is never deletable", branchDeleteIntent({ branch: "fix", baseRef: "main", createdBranch: false }) === false);
+		await check(t, "remote-ref slot is never deletable", branchDeleteIntent({ branch: "origin/release", baseRef: "main", createdBranch: false }) === false);
+		// pull/N slots are never local branches — excluded up front even if the
+		// flag were ever wrong (the runtime show-ref check would also refuse).
+		await check(t, "pull/N slot", branchDeleteIntent({ branch: "pull/9", baseRef: "main", createdBranch: true }) === false);
+		// Legacy metas (field absent): the old baseRef heuristic, exact under
+		// the old anchoring rules — -b/wizard/derived branches anchored on the
+		// source repo's head branch (baseRef !== branch → deletable).
+		await check(t, "legacy created branch (baseRef=main)", branchDeleteIntent({ branch: "fix", baseRef: "main" }) === true);
+		await check(t, "legacy derived branch (baseRef=main)", branchDeleteIntent({ branch: "repo-wt", baseRef: "main" }) === true);
+		await check(t, "legacy slashed created branch", branchDeleteIntent({ branch: "feat/x", baseRef: "main" }) === true);
+		// A legacy EXISTING branch checked out into the sandbox anchored on
+		// ITSELF — it predates the sandbox and must never be deleted.
+		await check(t, "legacy existing branch (baseRef===branch)", branchDeleteIntent({ branch: "fix", baseRef: "fix" }) === false);
+		// Legacy <remote>/<branch> identity: anchored on itself → never a
+		// candidate (V2-18).
+		await check(t, "legacy remote-ref slot anchored on itself", branchDeleteIntent({ branch: "origin/main", baseRef: "origin/main" }) === false);
+		// A legacy differing ref yields only the shallow intent — the engine still
+		// has to verify refs/heads/origin/main, which a remote-tracking identity
+		// can never satisfy (the fs suite pins the remote ref surviving removal).
+		await check(t, "legacy remote-ref slot with a differing ref is only a shallow intent", branchDeleteIntent({ branch: "origin/fix", baseRef: "main" }) === true);
 		await check(t, "no branch", branchDeleteIntent({ branch: "", baseRef: "main" }) === false);
 	});
 
