@@ -806,9 +806,11 @@ export function parseRemoveInvocation(
  * - `createdBranch` (recorded at create) decides when present — true for a
  *   branch made for the sandbox (-b, wizard-typed, path-derived), false for a
  *   pre-existing branch checkout, remote-ref slot or detached create;
- * - legacy metas (field absent) fall back to the old baseRef heuristic, which
- *   was exact under the old anchoring rules (existing-branch checkouts anchored
- *   baseRef at that branch; created branches anchored at the source HEAD);
+ * - legacy metas (field absent) fall back to the old baseRef heuristic
+ *   (`branch !== baseRef`) — best-effort only: a pre-change
+ *   `--from <existing-branch>` create anchored baseRef at the DEFAULT ref, so
+ *   that shape can still name a branch this plugin never created (deletion is
+ *   `git branch -d` on a merged branch; never forced);
  * - pull/N and <remote>/<branch> slots never pass (their identity is not a
  *   local branch; runtime ref existence is verified separately).
  */

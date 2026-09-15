@@ -87,7 +87,7 @@ Don't use both install paths at once — the commands would register twice. Conf
 - identity: the branch slot (`pull/N · head <branch> @ <sha>` for PR sandboxes)
 - git state: on-branch vs detached, `dirty`, `+N/-M vs <ref>` ahead/behind
   (compared against the branch's upstream when it has one, else the recorded
-  base ref — for pull/`N` sandboxes that is the PR's base branch), `last commit`
+  base ref — the repo's default ref, or `settings.baseline.ref`), `last commit`
 - liveness: `●` = live MCP connection now, `↻` = recorded for auto-reconnect
   (connected at the last session, not live yet), `✗ gone` = the checkout dir
   no longer exists, `runs this extension` = the code you are running, claim
@@ -129,10 +129,12 @@ session record is tombstoned so auto-restore cannot resurrect the sandbox.
                               #   extension (the interactive dialog warns too)
 ```
 
-Guards: pre-existing branches are never deleted (the sandbox meta records
-`createdBranch` at create time — only branches this plugin created are ever
-`git branch -d` candidates, and never forced); pull/`N` and `<remote>/<branch>`
-slots never are (no local branch). The sandbox running this extension needs
+Guards: the sandbox meta records `createdBranch` at create time, so
+`git branch -d` candidates are only branches this plugin created (never
+forced); metas from older versions (no `createdBranch`) fall back to a
+best-effort `branch !== baseRef` heuristic — an old `--from <existing-branch>`
+checkout is indistinguishable from a created branch there. pull/`N` and
+`<remote>/<branch>` slots are never candidates (no local branch). The sandbox running this extension needs
 `--force` on the one-go path. A **locked** worktree is refused outright (never
 overridden with a double force) — `git worktree unlock <path>` first; the
 refusal happens before anything is touched. The impact preview states what will be disconnected,

@@ -405,6 +405,7 @@ describe("baseline anchor policy", () => {
 			await check(t, "meta keeps the PR slot as the branch label", meta?.branch === "pull/7", JSON.stringify(meta));
 			await check(t, "meta anchors the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
 			await check(t, "meta keeps the PR head fields", meta?.headRef === "feature/x" && meta?.headOid === headSha, JSON.stringify(meta));
+			await check(t, "meta records createdBranch:false (a PR slot creates no branch)", meta?.createdBranch === false, JSON.stringify(meta));
 			await check(t, "a PR slot is never marked for deletion", meta !== undefined && branchDeleteIntent(meta) === false, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
