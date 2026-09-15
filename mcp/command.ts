@@ -24,7 +24,7 @@ export function mcpTargetLines(
 	const sandboxes = listSandboxes(settings);
 	const lines = ["chhound MCP — available targets:"];
 	if (sandboxes.length === 0) {
-		lines.push("  (no worktrees — run /chworktree <path> first)");
+		lines.push("  (no worktrees — run /ch-worktree <path> first)");
 	} else {
 		for (const s of sandboxes) {
 			const id = path.basename(s.dir);
@@ -74,7 +74,7 @@ type McpCmdCtx = {
 /**
  * Connect one sandbox entry over MCP and report the outcome — the single
  * shared connect path for /ch-mcp (picker + argument forms) and the
- * post-/chworktree "connect now?" prompt. Idempotent: an already-connected
+ * post-/ch-worktree "connect now?" prompt. Idempotent: an already-connected
  * sandbox is reported and skipped. Daemon-mode connections are recorded in
  * the session log (session-start auto-restore); API keys never enter the
  * log. Never throws — failures surface through ui.notify, so a failed
@@ -137,7 +137,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			if (positionals.length === 0) {
 				const sandboxes = listSandboxes(settings);
 				if (sandboxes.length === 0) {
-					ctx.ui.notify("chhound MCP — no worktrees yet (run /chworktree <path> first).", "warning");
+					ctx.ui.notify("chhound MCP — no worktrees yet (run /ch-worktree <path> first).", "warning");
 					return;
 				}
 				if (typeof ctx.ui.select === "function") {
@@ -162,7 +162,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			const matches = resolveSandboxMatches(positionals[0]!, settings, ctx.cwd);
 			if (matches.length === 0) {
 				ctx.ui.notify(
-					`No worktree or storage ID matches '${positionals[0]}' — run /ch-status to list worktrees.`,
+					`No worktree or storage ID matches '${positionals[0]}' — run /ch-worktree ls to list worktrees.`,
 					"error",
 				);
 				return;

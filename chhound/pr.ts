@@ -1,5 +1,5 @@
 /**
- * GitHub PR resolution for /chworktree (PR sandboxes).
+ * GitHub PR resolution for /ch-worktree (PR sandboxes).
  *
  * A PR is identified by its browser URL — https://github.com/<owner>/<repo>/
  * pull/<n> — which carries the full identity (repo + number). Resolution:

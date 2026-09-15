@@ -4,7 +4,7 @@ import { mcpStatusLines, buildStatusLines } from "../../status/command.js";
 import { check } from "../lib/checks.js";
 import type { SandboxEntry } from "../../chhound/sandbox.js";
 
-// Inventory: 23 checks — 7 legacy checks moved from smoke.ts section 5b (mcp
+// Inventory: 28 checks — 7 legacy checks moved from smoke.ts section 5b (mcp
 // bridge integration) — the pure text helpers over supplied values: tool-prefix
 // derivation and the /ch-status mcp section + footer text (no fs, no
 // registry: the connection lists are arguments, not global state) — plus 16
@@ -12,12 +12,16 @@ import type { SandboxEntry } from "../../chhound/sandbox.js";
 // (repo/branch identity, tool list suffixes, listed-tools-only usage examples,
 // buildStatusLines sandbox-meta join by id with recreated-sandbox guard and
 // bare-format fallback, same-name repo disambiguation tokens, indexLabelFor
-// PR-head / repoRoot-absent / collision behavior). The fs-backed
+// PR-head / repoRoot-absent / collision behavior) and 7 index-root health /
+// listing-removal checks (clean one-liner, unclaimed fix, claimed/expected
+// mismatch fix, missing storage dir flagged instead of a false clean,
+// unreadable library warned instead of a false-empty hint, true-empty hint
+// intact, worktree+baseline listing sections gone). The fs-backed
 // target/picker lists moved to fs/sandbox-catalog.test.ts; the live
 // protocol/replay to engine/mcp-bridge.test.ts.
 
 /** Sandbox entry builder for the pure join/identity checks below. */
-function mkSandbox(over: { dir?: string; worktree?: string; repoRoot?: string; branch?: string; createdAt?: string } = {}): SandboxEntry {
+function mkSandbox(over: { dir?: string; worktree?: string; repoRoot?: string; branch?: string; createdAt?: string; claimedRoot?: string; dirExists?: boolean } = {}): SandboxEntry {
 	const dir = over.dir ?? "/x/sandboxes/conn-a";
 	return {
 		dir,
@@ -35,6 +39,8 @@ function mkSandbox(over: { dir?: string; worktree?: string; repoRoot?: string; b
 			dbPath: `${dir}.state/db`,
 		},
 		dbSizeBytes: 10,
+		...(over.claimedRoot === undefined ? {} : { claimedRoot: over.claimedRoot }),
+		...(over.dirExists === undefined ? {} : { dirExists: over.dirExists }),
 	};
 }
 
@@ -150,7 +156,6 @@ describe("mcp view", () => {
 					dbSizeBytes: 10,
 				},
 			],
-			baselines: [],
 			conns: [
 				{ worktree: "/wt/conn-a", prefix: "chh_a", toolNames: ["chh_a_search", "chh_a_code_research"] },
 				{ worktree: "/wt/gone", prefix: "chh_g", toolNames: ["chh_g_search"] },
@@ -170,7 +175,6 @@ describe("mcp view", () => {
 			version: "test",
 			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
 			sandboxes: [mkSandbox()],
-			baselines: [],
 			conns: [{ id: "conn-a", worktree: "/wt/conn-a", prefix: "chh_a", toolNames: ["chh_a_search"] }],
 		}).join("\n");
 		await check(t, "status: connection joins on the sandbox id", idJoined.includes("chunkhound @ main · 1 tools"), idJoined);
@@ -178,7 +182,6 @@ describe("mcp view", () => {
 			version: "test",
 			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
 			sandboxes: [mkSandbox({ createdAt: "2026-01-03T00:00:00.000Z" })],
-			baselines: [],
 			conns: [
 				{
 					id: "conn-a",
@@ -203,7 +206,6 @@ describe("mcp view", () => {
 			version: "test",
 			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
 			sandboxes: [mkSandbox(), mkSandbox({ dir: "/x/sandboxes/conn-b", worktree: "/wt/conn-b", repoRoot: "/work/fork/chunkhound" })],
-			baselines: [],
 			conns: [
 				{ id: "conn-a", worktree: "/wt/conn-a", prefix: "chh_a", toolNames: ["chh_a_search"] },
 				{ id: "conn-b", worktree: "/wt/conn-b", prefix: "chh_b", toolNames: ["chh_b_search"] },
@@ -255,6 +257,103 @@ describe("mcp view", () => {
 			t,
 			"footer: multiple connections",
 			mcpFooterStatusText([{ id: "sb-1" }, { id: "sb-2" }]) === "🔌 ch-mcp: 2 connected",
+		);
+
+		// Index-root claim health — unique to /ch-status (the manager's indexed
+		// badge only says a claim exists; it never flags a wrong or missing one).
+		const healthClean = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [mkSandbox({ claimedRoot: "/x/sandboxes/conn-a" })],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: clean health is one line",
+			healthClean.includes("index roots (1):") && healthClean.includes("✓ all claimed correctly"),
+			healthClean,
+		);
+		const healthUnclaimed = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [mkSandbox()],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: unclaimed root warns with the fix",
+			healthUnclaimed.includes("⚠ chunkhound/main — unclaimed — run chunkhound index/mcp from /x/sandboxes/conn-a"),
+			healthUnclaimed,
+		);
+		const healthMismatch = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [mkSandbox({ claimedRoot: "/x/sandboxes/old-place" })],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: mismatched root shows claimed/expected and the fix",
+			healthMismatch.includes("⚠ chunkhound/main — mismatched claim") &&
+				healthMismatch.includes("claimed:  /x/sandboxes/old-place") &&
+				healthMismatch.includes("expected: /x/sandboxes/conn-a") &&
+				healthMismatch.includes("fix: run chunkhound index/mcp from the expected root"),
+			healthMismatch,
+		);
+		// V2-22: the .state half (db + claim sidecar) can survive after the
+		// sandbox dir itself was deleted — a matching claim must NOT render as a
+		// clean library; the missing storage is a problem with a prune hint.
+		const healthMissingDir = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [mkSandbox({ claimedRoot: "/x/sandboxes/conn-a", dirExists: false })],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: deleted sandbox dir is flagged, never a false clean",
+			healthMissingDir.includes("⚠ chunkhound/main — storage missing") &&
+				healthMissingDir.includes("expected: /x/sandboxes/conn-a") &&
+				healthMissingDir.includes("fix: /ch-status --prune") &&
+				!healthMissingDir.includes("✓ all claimed correctly"),
+			healthMissingDir,
+		);
+		// The worktree/baseline listings now live in the /ch-worktree manager and
+		// `/ch-worktree ls`; /ch-status must not print them again.
+		await check(
+			t,
+			"status: worktree/baseline listings are gone",
+			!joined.includes("worktrees (") && !joined.includes("baselines ("),
+			joined,
+		);
+		// N-05: a library scan that could not read the state root must warn about
+		// the read failure — `(no sandboxes …)` would claim an empty library.
+		const unreadableLibrary = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [],
+			conns: [],
+			libraryIssue: "cannot read the worktree library /x/sandboxes: EACCES: permission denied, scandir '/x/sandboxes/.state'",
+		}).join("\n");
+		await check(
+			t,
+			"status: unreadable library warns instead of claiming an empty one",
+			unreadableLibrary.includes("⚠ cannot read the worktree library /x/sandboxes: EACCES") &&
+				unreadableLibrary.includes("fix: check the library root's permissions") &&
+				!unreadableLibrary.includes("(no sandboxes"),
+			unreadableLibrary,
+		);
+		const emptyLibrary = buildStatusLines({
+			version: "test",
+			settings: { version: 1, sandboxRoot: "/x/sandboxes", baseRoot: "/x/bases" },
+			sandboxes: [],
+			conns: [],
+		}).join("\n");
+		await check(
+			t,
+			"status: a genuinely empty library keeps the create hint",
+			emptyLibrary.includes("index roots (0):") && emptyLibrary.includes("(no sandboxes — run /ch-worktree <path>)") && !emptyLibrary.includes("⚠"),
+			emptyLibrary,
 		);
 	});
 });

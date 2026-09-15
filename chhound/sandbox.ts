@@ -77,6 +77,11 @@ export interface SandboxEntry {
 	dbSizeBytes: number;
 	/** chunkhound's claimed indexed root from the `<db>.root.json` sidecar (absent = not yet claimed). */
 	claimedRoot?: string;
+	/** The sandbox dir (index root) exists on disk. `listSandboxes` always
+	 * sets it; absent on hand-built entries (tests) = assumed present. False
+	 * means only the `.state` half survived (deleted sandbox dir) — /ch-status
+	 * must flag that instead of reporting a clean claim. */
+	dirExists?: boolean;
 }
 
 /**
@@ -113,27 +118,140 @@ export function dirSize(p: string): number {
 	}
 }
 
-/** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
-export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
+/**
+ * Total bytes under a path (files only; symlinks to FILES counted via stat,
+ * symlinks to DIRECTORIES skipped — following them could loop/duplicate on
+ * npm-style link trees). Fully SEQUENTIAL async walk: never blocks the event
+ * loop (unlike the synchronous dirSize), yet issues one syscall at a time —
+ * parallel stat/readdir streams return wrong metadata on flaky container
+ * filesystems (observed: overlayfs under concurrent load reports stale
+ * sizes), while sequential walks are deterministic everywhere.
+ * Measurement honesty (D7): a missing ROOT path returns 0 — nothing is there,
+ * the walk measured that (gone rows rely on it). An unreadable subtree
+ * DIRECTORY returns `undefined`: the walk is incomplete, so the partial sum
+ * is not a measurement and callers must render it as unknown rather than
+ * inventing a number. A file that races away mid-walk still counts as 0 (it
+ * was absent when measured) — only unreadable directories make the walk
+ * incomplete.
+ */
+export async function dirSizeAsync(p: string): Promise<number | undefined> {
+	const fsp = fs.promises;
+	try {
+		const st = await fsp.stat(p);
+		if (st.isFile()) return st.size;
+	} catch {
+		return 0; // missing root — measured as "nothing here"
+	}
+	const walk = async (dir: string): Promise<number | undefined> => {
+		let entries: fs.Dirent[];
+		try {
+			entries = await fsp.readdir(dir, { withFileTypes: true });
+		} catch {
+			return undefined; // unreadable subtree — the walk is incomplete
+		}
+		let total = 0;
+		for (const e of entries) {
+			const full = path.join(dir, e.name);
+			if (e.isDirectory()) {
+				const sub = await walk(full);
+				if (sub === undefined) return undefined; // propagate incompleteness
+				total += sub;
+			} else if (e.isSymbolicLink()) {
+				// One-level follow: count file symlinks, skip dir symlinks (npm
+				// link trees would otherwise be counted repeatedly / loop).
+				try {
+					const st = await fsp.stat(full);
+					total += st.isFile() ? st.size : 0;
+				} catch {
+					// dangling link — counts 0
+				}
+			} else if (e.isFile()) {
+				try {
+					total += (await fsp.stat(full)).size;
+				} catch {
+					// raced away — counts 0 (a file race is not incompleteness)
+				}
+			}
+		}
+		return total;
+	};
+	return walk(p);
+}
+/** Test seams for the library scan. Only `readdirSync` needs widening (the
+ * race / unreadable-root pins); everything else hits the real filesystem, so a
+ * seam never fakes the behavior under test wholesale. ESM namespace properties
+ * (`import * as fs`) are read-only — patching the default `fs` object from a
+ * test cannot reach this module, which is exactly why the seam is injected. */
+export interface SandboxScanSeams {
+	/** List the state root's entry names. Defaults to `fs.readdirSync`. */
+	readdirSync?: (stateRoot: string) => string[];
+}
+
+/** A library listing plus the read failure that must be surfaced instead of
+ * rendering as an empty library. */
+export interface SandboxLibrary {
+	entries: SandboxEntry[];
+	/** Set when the state root exists but could not be read (EACCES/EPERM/…):
+	 * `entries` is the part that survived, not the library. A missing state root
+	 * (ENOENT) is NOT an issue — an absent library is an empty one. */
+	issue?: string;
+}
+
+/** Library listing that keeps its failure distinguishable from an empty
+ * library. Callers that render a count must render `issue` when set; the
+ * convenience `listSandboxes` drops it (N-05). */
+export function listSandboxLibrary(settings: ChhoundSettings, seams: SandboxScanSeams = {}): SandboxLibrary {
 	const root = sandboxRoot(settings);
 	const stateRoot = path.join(root, STATE_DIR_NAME);
-	if (!fs.existsSync(stateRoot)) return [];
+	const readdir = seams.readdirSync ?? ((dir: string): string[] => fs.readdirSync(dir));
+	let names: string[];
+	try {
+		names = readdir(stateRoot);
+	} catch (err) {
+		// No library yet is a real empty library; anything else (EACCES, EPERM,
+		// ENOTDIR, …) is a read failure — returning [] for those would print
+		// "(no sandboxes …)" for a library that is merely unreadable.
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return { entries: [] };
+		return {
+			entries: [],
+			issue: `cannot read the worktree library ${root}: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
 	const out: SandboxEntry[] = [];
-	for (const name of fs.readdirSync(stateRoot)) {
+	for (const name of names) {
 		const stateDir = path.join(stateRoot, name);
-		if (!fs.statSync(stateDir).isDirectory()) continue;
-		const meta = readSandboxMeta(stateDir);
-		if (meta) {
+		try {
+			// A concurrent rm/prune can delete the entry between readdir and
+			// stat — skip it instead of aborting the whole listing.
+			if (!fs.statSync(stateDir).isDirectory()) continue;
+			const meta = readSandboxMeta(stateDir);
+			if (!meta) continue;
+			const dir = path.join(root, name);
+			let dirExists = false;
+			try {
+				dirExists = fs.statSync(dir).isDirectory();
+			} catch {
+				dirExists = false; // storage dir half deleted — /ch-status must flag it
+			}
 			out.push({
-				dir: path.join(root, name),
+				dir,
 				stateDir,
 				meta,
 				dbSizeBytes: dirSize(meta.dbPath),
 				claimedRoot: readClaimedRoot(meta.dbPath),
+				dirExists,
 			});
+		} catch {
+			// raced away / unreadable entry — skip it, never abort the listing
+			continue;
 		}
 	}
-	return out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt));
+	return { entries: out.sort((a, b) => b.meta.createdAt.localeCompare(a.meta.createdAt)) };
+}
+
+/** Sandbox identity lives with meta.json in the hidden state dir (`.state/<name>`). */
+export function listSandboxes(settings: ChhoundSettings): SandboxEntry[] {
+	return listSandboxLibrary(settings).entries;
 }
 
 /** Remove sandboxes whose worktree no longer exists. Returns removed dirs. */
@@ -161,9 +279,19 @@ export function pruneSandboxes(settings: ChhoundSettings): string[] {
 	const removed: string[] = [];
 	for (const entry of listSandboxes(settings)) {
 		if (!fs.existsSync(entry.meta.worktree)) {
-			fs.rmSync(entry.stateDir, { recursive: true, force: true });
-			removed.push(entry.stateDir);
-			fs.rmSync(entry.dir, { recursive: true, force: true });
+			// Sandbox dir FIRST: the .state half is what makes the sandbox
+			// discoverable, so it must survive a failed checkout removal.
+			try {
+				fs.rmSync(entry.dir, { recursive: true, force: true });
+			} catch {
+				continue; // still visible as a row — the next --prune retries
+			}
+			try {
+				fs.rmSync(entry.stateDir, { recursive: true, force: true });
+				removed.push(entry.stateDir);
+			} catch {
+				// first half is gone; the surviving state half keeps the row prunable
+			}
 		}
 	}
 	return removed;

@@ -123,7 +123,12 @@ export async function restoreConnections(
 						// segment and /ch-status.
 					} catch (e) {
 						// Failures stay logged: a silent restore failure would mean
-						// missing chh_* tools with no trace.
+						// missing chh_* tools with no trace. A sandbox that vanished while
+						// this connect was in flight (rm raced the restore) gets its
+						// record dropped too, so it cannot resurrect next session.
+						if (sandboxById(settings, record.sandboxId) === undefined) {
+							recordConnection(pi, { sandboxId: record.sandboxId, state: "disconnected" });
+						}
 						console.error(`[chhound-mcp] auto-restore failed for '${record.sandboxId}': ${(e as Error).message}`);
 					}
 				})(),

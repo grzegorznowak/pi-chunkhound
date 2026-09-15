@@ -10,7 +10,12 @@ export interface TestClassification {
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
+	"command/pick-panel.test.ts": { tier: "command", subject: "pick-panel" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
+	"command/worktree-manage-rm.test.ts": { tier: "command", subject: "worktree-manage" },
+	"command/worktree-manager-rpc.test.ts": { tier: "command", subject: "worktree-manager-rpc" },
+	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },
+	"command/worktree-wizard-outcome.test.ts": { tier: "command", subject: "worktree-wizard-outcome" },
 	"engine/baseline.test.ts": { tier: "engine", subject: "baseline" },
 	"engine/mcp-bridge.test.ts": { tier: "engine", subject: "mcp-bridge" },
 	"engine/mcp-restore.test.ts": { tier: "engine", subject: "mcp-restore" },
@@ -25,6 +30,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"fs/sandbox-catalog.test.ts": { tier: "fs", subject: "sandbox-catalog" },
 	"fs/sandbox-location.test.ts": { tier: "fs", subject: "sandbox-location" },
 	"fs/settings.test.ts": { tier: "fs", subject: "settings" },
+	"fs/worktree-manage.test.ts": { tier: "fs", subject: "worktree-manage" },
 	"robustness/engine/mcp-death.test.ts": { tier: "robustness/engine", subject: "mcp-death" },
 	"unit/args.test.ts": { tier: "unit", subject: "args" },
 	"unit/connection-records.test.ts": { tier: "unit", subject: "connection-records" },
@@ -32,6 +38,8 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"unit/pr-identity.test.ts": { tier: "unit", subject: "pr-identity" },
 	"unit/progress.test.ts": { tier: "unit", subject: "progress" },
 	"unit/worktree-intent.test.ts": { tier: "unit", subject: "worktree-intent" },
+	"unit/worktree-manager-core.test.ts": { tier: "unit", subject: "worktree-manager-core" },
+	"unit/worktree-manage.test.ts": { tier: "unit", subject: "worktree-manage" },
 };
 
 export const tierOrder: readonly Tier[] = [

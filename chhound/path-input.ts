@@ -50,11 +50,16 @@ export interface PathInputOptions {
 	paramLabel?: string;
 }
 
-/** Structural theme slice (pi's Theme satisfies it). */
-export type ThemeLike = { fg(color: string, text: string): string };
+/** Structural theme slice for plugin dialogs (pi's Theme satisfies it). */
+export type ThemeLike = { fg(color: string, text: string): string; bg(color: string, text: string): string; bold(text: string): string };
 
 /** Structural slice of ctx.ui used by promptPath (real ui satisfies it). */
-export interface PathPromptUI {
+export interface PathPromptUI extends CustomPromptUI {
+	input?(title: string, placeholder?: string): Promise<string | undefined>;
+}
+
+/** Host slice `ctx.ui.custom` needs (real ctx.ui satisfies it). */
+export interface CustomPromptUI {
 	custom?<T>(
 		factory: (
 			tui: TUI,
@@ -63,7 +68,42 @@ export interface PathPromptUI {
 			done: (result: T) => void,
 		) => Component & { dispose?(): void },
 	): Promise<T>;
-	input?(title: string, placeholder?: string): Promise<string | undefined>;
+}
+
+/** `custom` outcome: the host rendered the component, or the seam is a no-op. */
+export type CustomPromptOutcome<T> = { kind: "custom"; value: T } | { kind: "unavailable" };
+
+/**
+ * Show a plugin-owned component through `ctx.ui.custom`, distinguishing
+ * "the host rendered it" from "the host accepted custom() but never invoked
+ * the factory". RPC/print hosts provide a `custom()` that resolves
+ * `undefined` WITHOUT rendering anything (and without throwing), so the old
+ * `typeof ui.custom === "function"` + `catch` seam mistook every such host
+ * for a user cancel and silently skipped the native fallback (review
+ * V1-03/V2-01, D9's "no host loses functionality"). A value of `undefined`
+ * with the factory INVOKED is a real cancel (Esc) and must not re-prompt.
+ */
+export async function promptViaCustom<T>(
+	ui: CustomPromptUI,
+	factory: (
+		tui: TUI,
+		theme: ThemeLike,
+		keybindings: KeybindingsManager,
+		done: (value: T) => void,
+	) => Component & { dispose?(): void },
+): Promise<CustomPromptOutcome<T>> {
+	if (typeof ui.custom !== "function") return { kind: "unavailable" };
+	let invoked = false;
+	try {
+		const value = await ui.custom<T>((tui, theme, keybindings, done) => {
+			invoked = true;
+			return factory(tui, theme, keybindings, done);
+		});
+		return invoked ? { kind: "custom", value } : { kind: "unavailable" };
+	} catch {
+		// custom failed (non-TUI host, disposed panel) — the native widget is the fallback
+		return { kind: "unavailable" };
+	}
 }
 
 /**
@@ -71,15 +111,8 @@ export interface PathPromptUI {
  * where ctx.ui.custom is unavailable (RPC/print modes).
  */
 export async function promptPath(ui: PathPromptUI, opts: PathInputOptions): Promise<string | undefined> {
-	if (typeof ui.custom === "function") {
-		try {
-			return await ui.custom<string | undefined>(
-				(tui, theme, keybindings, done) => new PathInputComponent(tui, theme, keybindings, opts, done),
-			);
-		} catch {
-			// custom failed (non-TUI) — fall through to plain input
-		}
-	}
+	const viaCustom = await promptViaCustom<string | undefined>(ui, (tui, theme, keybindings, done) => new PathInputComponent(tui, theme, keybindings, opts, done));
+	if (viaCustom.kind === "custom") return viaCustom.value;
 	return ui.input?.(opts.title, opts.startValue);
 }
 
@@ -97,16 +130,18 @@ export interface TextPromptOptions {
  * Falls back to ctx.ui.input (placeholder) where custom is unavailable.
  */
 export async function promptText(ui: PathPromptUI, opts: TextPromptOptions): Promise<string | undefined> {
-	if (typeof ui.custom === "function") {
-		try {
-			return await ui.custom<string | undefined>(
-				(_tui, theme, keybindings, done) => new TextPromptComponent(theme, keybindings, opts, done),
-			);
-		} catch {
-			// custom failed (non-TUI) — fall through to plain input
-		}
-	}
-	return ui.input?.(opts.title, opts.startValue);
+	const viaCustom = await promptViaCustom<string | undefined>(ui, (_tui, theme, keybindings, done) => new TextPromptComponent(theme, keybindings, opts, done));
+	if (viaCustom.kind === "custom") return viaCustom.value;
+	const value = await ui.input?.(opts.title, opts.startValue);
+	if (value === undefined) return undefined;
+	// pi's ui.input has NO prefill — its second argument is only a dim
+	// placeholder, so a plain Enter (the only way to submit a default in a
+	// fallback host) returns "". The TUI component prefills the field and
+	// returns startValue on an untouched Enter, so map the empty submit onto
+	// the prefill here too: otherwise every fallback host silently drops the
+	// default (N-01: the wizard's <repo>-wt branch was skipped, losing the
+	// collision handling). Empty stays empty when there is no startValue.
+	return value === "" ? opts.startValue ?? "" : value;
 }
 
 export class TextPromptComponent extends Container {
@@ -233,7 +268,7 @@ export class TextPromptComponent extends Container {
 }
 
 /** Full-width border line (dialog chrome, like the built-in input dialog). */
-class BorderLine implements Component {
+export class BorderLine implements Component {
 	constructor(private readonly theme: ThemeLike) {}
 	render(width: number): string[] {
 		return [this.theme.fg("border", "─".repeat(Math.max(1, width)))];

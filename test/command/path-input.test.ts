@@ -2,7 +2,7 @@ import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
-import { PathInputComponent, TextPromptComponent } from "../../chhound/path-input.js";
+import { PathInputComponent, promptPath, promptText, TextPromptComponent } from "../../chhound/path-input.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
@@ -30,7 +30,7 @@ describe("path input", () => {
 			fs.mkdirSync(path.join(pathProj, "src", "nested"), { recursive: true });
 			fs.mkdirSync(path.join(pathProj, "docs"), { recursive: true });
 			const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
-			const themeStub = { fg: (_c: string, t: string) => t };
+			const themeStub = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t };
 			const makeComp = (startValue?: string, includeFiles?: boolean) => {
 				let out: string | undefined = "unset";
 				const c = new PathInputComponent(tuiStub, themeStub, getKeybindings(), { title: "p", cwd: pathProj, ...(startValue ? { startValue } : {}), ...(includeFiles ? { includeFiles } : {}) }, (v) => {
@@ -234,5 +234,88 @@ describe("path input", () => {
 			applyEnv(env);
 			await fs.promises.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	test("promptText/promptPath fall back to ui.input only when custom is unavailable", async (t) => {
+		const original = getKeybindings();
+		try {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+			const tuiStub = { requestRender: () => {} } as unknown as ConstructorParameters<typeof PathInputComponent>[0];
+			const themeStub = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t };
+
+			// promptText: RPC/print host — custom() resolves undefined without
+			// rendering the component; the native input runs with the same title and
+			// prefill and its value is returned.
+			const textCalls: Array<[string, string | undefined]> = [];
+			const text = await promptText({
+				custom: async () => undefined,
+				input: async (title: string, placeholder?: string) => { textCalls.push([title, placeholder]); return "typed value"; },
+			} as never, { title: "Text title", startValue: "prefill" });
+			await check(t, "promptText: no-op custom → ui.input fallback returns its value", text === "typed value" && textCalls.length === 1, JSON.stringify({ text, textCalls }));
+			await check(t, "promptText: ui.input gets the title and prefill unchanged", textCalls[0]?.[0] === "Text title" && textCalls[0]?.[1] === "prefill", JSON.stringify(textCalls));
+
+			let textInputCalls = 0;
+			let textPanel: TextPromptComponent | undefined;
+			const textCancelUi = {
+				custom: (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: string | undefined) => void) => TextPromptComponent) =>
+					new Promise<unknown>((resolve) => { textPanel = factory(tuiStub, themeStub, getKeybindings(), (value) => resolve(value)); }),
+				input: async () => { textInputCalls += 1; return "not-used"; },
+			};
+			const textPending = promptText(textCancelUi as never, { title: "Text title" });
+			textPanel!.handleInput("\x1b");
+			const textCancelled = await textPending;
+			await check(t, "promptText: Esc in the rendered prompt returns undefined without ui.input", textCancelled === undefined && textInputCalls === 0, JSON.stringify({ textCancelled, textInputCalls }));
+
+			const textThrowCalls: string[] = [];
+			const textThrown = await promptText({
+				custom: async () => { throw new Error("no TUI host"); },
+				input: async (title: string) => { textThrowCalls.push(title); return "fallback"; },
+			} as never, { title: "Text title" });
+			await check(t, "promptText: a throwing custom falls back to ui.input", textThrown === "fallback" && textThrowCalls.length === 1, JSON.stringify({ textThrown, textThrowCalls }));
+
+			// N-01: pi's ui.input has NO prefill (its second argument is a dim
+			// placeholder), so a plain Enter — the only way a fallback host can
+			// submit a default — returns "". The TUI component returns the untouched
+			// startValue, so the fallback maps the empty submit onto the prefill too;
+			// without a prefill an empty submit stays empty.
+			const emptySubmit = await promptText({
+				custom: async () => undefined,
+				input: async () => "",
+			} as never, { title: "Branch name", startValue: "repo-wt" });
+			await check(t, "promptText: empty fallback submit accepts the prefill (N-01)", emptySubmit === "repo-wt", String(emptySubmit));
+			const emptyNoPrefill = await promptText({
+				custom: async () => undefined,
+				input: async () => "",
+			} as never, { title: "PR URL" });
+			await check(t, "promptText: empty stays empty without a prefill", emptyNoPrefill === "", String(emptyNoPrefill));
+
+			// promptPath: the same seam for the TAB-completion dialog.
+			const pathCalls: Array<[string, string | undefined]> = [];
+			const path = await promptPath({
+				custom: async () => undefined,
+				input: async (title: string, placeholder?: string) => { pathCalls.push([title, placeholder]); return "some/path"; },
+			} as never, { title: "Path title", cwd: process.cwd(), startValue: "src/" });
+			await check(t, "promptPath: no-op custom → ui.input fallback returns its value", path === "some/path" && pathCalls.length === 1, JSON.stringify({ path, pathCalls }));
+			await check(t, "promptPath: ui.input gets the title and prefill unchanged", pathCalls[0]?.[0] === "Path title" && pathCalls[0]?.[1] === "src/", JSON.stringify(pathCalls));
+
+			let pathInputCalls = 0;
+			let pathPanel: PathInputComponent | undefined;
+			const pathCancelUi = {
+				custom: (factory: (tui: unknown, theme: unknown, kb: unknown, done: (value: string | undefined) => void) => PathInputComponent) =>
+					new Promise<unknown>((resolve) => { pathPanel = factory(tuiStub, themeStub, getKeybindings(), (value) => resolve(value)); }),
+				input: async () => { pathInputCalls += 1; return "not-used"; },
+			};
+			const pathPending = promptPath(pathCancelUi as never, { title: "Path title", cwd: process.cwd() });
+			pathPanel!.handleInput("\x1b");
+			const pathCancelled = await pathPending;
+			await check(t, "promptPath: Esc in the rendered dialog returns undefined without ui.input", pathCancelled === undefined && pathInputCalls === 0, JSON.stringify({ pathCancelled, pathInputCalls }));
+
+			const pathThrowCalls: string[] = [];
+			const pathThrown = await promptPath({
+				custom: async () => { throw new Error("no TUI host"); },
+				input: async (title: string) => { pathThrowCalls.push(title); return "fallback/path"; },
+			} as never, { title: "Path title", cwd: process.cwd() });
+			await check(t, "promptPath: a throwing custom falls back to ui.input", pathThrown === "fallback/path" && pathThrowCalls.length === 1, JSON.stringify({ pathThrown, pathThrowCalls }));
+		} finally { setKeybindings(original); }
 	});
 });

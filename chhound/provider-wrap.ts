@@ -3,9 +3,9 @@ import { mcpArgumentCompletions, worktreeArgumentCompletions } from "./completio
 
 /**
  * Commands whose argument position is owned by the plugin's completions.
- * (/chworktree and /ch-mcp register argument completions today.)
+ * (/ch-worktree and /ch-mcp register argument completions today.)
  */
-const COMMAND_RE = /^\/(chworktree|ch-mcp) /u;
+const COMMAND_RE = /^\/(ch-worktree|ch-mcp) /u;
 
 /**
  * Wraps pi's built-in autocomplete provider so that requests in the argument

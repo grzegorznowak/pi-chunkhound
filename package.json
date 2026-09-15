@@ -27,7 +27,7 @@
     "test:robustness": "tsx test/run.ts --tier robustness",
     "test:acceptance": "tsx test/run.ts --tier acceptance",
     "verify:completions": "tsx scripts/verify-completions.mts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test && npm run verify:completions"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",

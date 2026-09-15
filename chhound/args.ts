@@ -44,7 +44,7 @@ function unquote(t: string): string {
  * Value-taking flag schemas per command (parser configuration): a flag NOT in
  * its command's set is boolean and never consumes the token after it.
  */
-export const WORKTREE_VALUE_FLAGS: ReadonlySet<string> = new Set(["config", "dest", "from", "b"]);
+export const WORKTREE_VALUE_FLAGS: ReadonlySet<string> = new Set(["config", "dest", "from", "b", "search", "sort"]);
 export const MCP_VALUE_FLAGS: ReadonlySet<string> = new Set(["prefix"]);
 
 /**

@@ -45,9 +45,14 @@ export function baselineDirFor(repoRoot: string, ref: string, settings: ChhoundS
 	return path.join(baseRoot(settings), repoSlug, slugify(ref));
 }
 
+/** Duckdb file inside a baseline dir (the path `baselineDbDirFor` derives). */
+export function baselineDbPathIn(dir: string): string {
+	return path.join(dir, "db", ".chhound.db");
+}
+
 /** Duckdb dir of a baseline — matches what ensureBaseline computes internally. */
 export function baselineDbDirFor(repoRoot: string, ref: string, settings: ChhoundSettings): string {
-	return path.join(baselineDirFor(repoRoot, ref, settings), "db", ".chhound.db");
+	return baselineDbPathIn(baselineDirFor(repoRoot, ref, settings));
 }
 
 function baselineMetaPath(dir: string): string {
@@ -299,7 +304,7 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 	return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: true, reason: reason ?? "primed" };
 }
 
-/** List baseline dirs (for /ch-status). One level deep: <root>/<repo>/<ref>. */
+/** List baseline dirs (for the /ch-worktree manager). One level deep: <root>/<repo>/<ref>. */
 export function listBaselines(settings: ChhoundSettings): Array<{ dir: string; meta?: BaselineMeta }> {
 	const root = baseRoot(settings);
 	const out: Array<{ dir: string; meta?: BaselineMeta }> = [];

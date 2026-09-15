@@ -4,6 +4,7 @@ import path from "node:path";
 import { tokenizeArgs, WORKTREE_VALUE_FLAGS, MCP_VALUE_FLAGS } from "./args.js";
 import { findRepoRoot, gitRootOrNull, runGit } from "./git.js";
 import { listSandboxes, sandboxBranchLabel } from "./sandbox.js";
+import { LIST_SORT_KEYS, worktreeVerb } from "../worktree/manage.js";
 import { loadSettings } from "./settings.js";
 
 /** Structural match for pi-tui's AutocompleteItem (avoids a pi-tui type import). */
@@ -131,7 +132,7 @@ export async function branchCompletions(cwd: string, includeTags = false): Promi
 		}));
 }
 
-/** Known /chworktree flags for flag-position completion. */
+/** Known /ch-worktree flags for flag-position completion. */
 export const WORKTREE_FLAGS = [
 	"--no-index",
 	"--force-reindex",
@@ -142,7 +143,7 @@ export const WORKTREE_FLAGS = [
 	"-b",
 ] as const;
 
-/** /chworktree flags that take a value (space form AND `--flag=value` form). */
+/** /ch-worktree flags that take a value (space form AND `--flag=value` form). */
 // (Set lives in args.ts as WORKTREE_VALUE_FLAGS — parser configuration.)
 
 /**
@@ -230,8 +231,32 @@ export async function mcpArgumentCompletions(argumentPrefix: string, cwd: string
 	return withBase(items.slice(0, 50));
 }
 
+/** Manager-verb items offered while typing the FIRST token — verbs are
+ * positionals to the runtime parser, so they complete exactly where repo
+ * paths do (a verb in positionals[0] switches the whole grammar). */
+function managerVerbItems(rawPrefix: string): CompletionItem[] {
+	const trimmed = rawPrefix.trim();
+	const prefix = trimmed.startsWith("-") ? "" : trimmed.toLowerCase();
+	const items: CompletionItem[] = [];
+	// Only ever suggest a verb the typed prefix is a prefix of.
+	if (!"ls".startsWith(prefix) && !"list".startsWith(prefix) && !"rm".startsWith(prefix) && !"remove".startsWith(prefix)) return items;
+	if ("ls".startsWith(prefix) || "list".startsWith(prefix)) {
+		items.push(
+			{ value: "ls", label: "ls", description: "list worktree sandboxes (grouped, searchable/sortable)" },
+			{ value: "list", label: "list", description: "alias of ls" },
+		);
+	}
+	if ("rm".startsWith(prefix) || "remove".startsWith(prefix)) {
+		items.push(
+			{ value: "rm", label: "rm", description: "remove a worktree sandbox" },
+			{ value: "remove", label: "remove", description: "alias of rm" },
+		);
+	}
+	return items;
+}
+
 /**
- * /chworktree argument completions (natural typing AND TAB — the plugin's
+ * /ch-worktree argument completions (natural typing AND TAB — the plugin's
  * ChhoundArgumentProvider wrapper routes every request in this command's
  * argument position here, so pristine pi's file picker never shows there;
  * TAB-without-space stays command-name completion — a pi-tui behavior).
@@ -255,6 +280,53 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 	const done = current ? tokens.slice(0, -1) : tokens;
 	const positionals = done.filter((t) => t.kind === "positional").map((t) => t.unquoted);
 	const flags = done.filter((t) => t.kind === "flag");
+
+	// Manager verbs (ls/list/rm/remove) switch the grammar entirely: after
+	// the verb nothing completes but its own flags (the ls <query> is free
+	// text; the repo/branch pickers belong to creation). Value flags use the
+	// SAME parser schema as creation (WORKTREE_VALUE_FLAGS), so space and
+	// equals forms work identically.
+	const verb = worktreeVerb(positionals[0]);
+	if (verb) {
+		const mgrFlags = verb === "list" ? ["--search", "--sort"] : ["--force"];
+		if (positionals.length > 1) return [];
+		if (current) {
+			if (current.kind === "separator") {
+				return withBase(mgrFlags.map((f) => ({ value: f, label: f })));
+			}
+			if (current.kind === "flag") {
+				const eq = current.text.indexOf("=");
+				if (eq !== -1) {
+					if (verb === "list" && current.flagName === "sort") {
+						return withBase(LIST_SORT_KEYS.map((k) => ({ value: current.text.slice(0, eq + 1) + k, label: k })));
+					}
+					return [];
+				}
+				const matches = mgrFlags.filter((f) => f.startsWith(current.text));
+				return withBase(matches.map((f) => ({ value: f, label: f })));
+			}
+			if (current.kind === "value") {
+				if (verb === "list" && current.flagFor === "sort") {
+					return withBase(LIST_SORT_KEYS.map((k) => ({ value: k, label: k })));
+				}
+				return [];
+			}
+		}
+		// Trailing space: offer the sort keys after a bare "--sort ", else
+		// nothing (query/flag values are free text).
+		if (
+			trailingSpace &&
+			verb === "list" &&
+			done.length > 0 &&
+			done[done.length - 1]!.kind === "flag" &&
+			done[done.length - 1]!.value === undefined &&
+			done[done.length - 1]!.flagName === "sort"
+		) {
+			return withBase(LIST_SORT_KEYS.map((k) => ({ value: k, label: k })));
+		}
+		return [];
+	}
+
 	const repo = await resolveRepoForCompletions(cwd, positionals);
 	// The last completed flag without a value (space form) expects it next —
 	// but only when it is a KNOWN value flag; a trailing boolean flag
@@ -308,13 +380,16 @@ export async function worktreeArgumentCompletions(argumentPrefix: string, cwd: s
 		}
 	};
 
-	// Positional slots: 0 = repo/path, 1 = branch, ≥2 = nothing more to type.
+	// Positional slots: 0 = repo/path (manager verbs lead), 1 = branch,
+	// ≥2 = nothing more to type.
 	const positionalCompletions = async (n: number): Promise<CompletionItem[]> => {
 		if (n === 0) {
 			const label = flags.some((f) => f.flagName === "dest")
 				? "repo directory (optional — cwd's repo is used)"
 				: "worktree path (required)";
-			return withBase(dirCompletions(current ? current.unquoted : "", cwd, { quote: true, paramLabel: label }));
+			const verbItems = managerVerbItems(current ? current.unquoted : "");
+			const dirs = await dirCompletions(current ? current.unquoted : "", cwd, { quote: true, paramLabel: label });
+			return withBase([...verbItems, ...dirs]);
 		}
 		if (n === 1) {
 			// No repo anywhere near cwd or the typed path → the command cannot

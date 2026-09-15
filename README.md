@@ -47,14 +47,16 @@ Don't use both install paths at once — the commands would register twice. Conf
 
 | Command | Purpose |
 |---|---|
-| `/chworktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. A PR URL (`https://github.com/<owner>/<repo>/pull/<n>`) in the repo slot creates a pull-request sandbox (wizard: pick "a pull request" and paste the URL). |
+| `/ch-worktree [repo] [branch] [-b <name>] [--from <ref>] [--dest <dir>] [--config <file>] [--no-index] [--force-reindex] [--refresh-baseline]` | Create a git worktree with its own chunkhound index. A PR URL (`https://github.com/<owner>/<repo>/pull/<n>`) in the repo slot creates a pull-request sandbox (wizard: pick "a pull request" and paste the URL). |
+| `/ch-worktree ls [<query>] [--search <text>] [--sort <key>]` | Manage: list every worktree sandbox in the library, grouped by project, with space (db/checkout/total), git-state and liveness columns. |
+| `/ch-worktree rm [<target>] [--force]` | Manage: remove a worktree sandbox — storage, worktree registration, and (for -b-created branches) the branch; disconnects live MCP first. |
 | `/ch-mcp [<worktree\|storage-id> [--disconnect] [--no-daemon] [--read-only] [--prefix <pfx>]]` | Connect pi to a worktree's index over MCP. |
-| `/ch-status [--prune]` | List worktrees, baselines, and live MCP connections. |
+| `/ch-status [--prune]` | Show chunkhound config, index-root claim health, and live MCP connections; `--prune` removes storage for gone worktrees and garbage baselines. |
 | `/ch-setup [flags]` | Configure embedding/LLM/baseline settings. |
 
-### /chworktree — three ways to invoke
+### /ch-worktree — three ways to invoke
 
-- **Wizard** — `/chworktree` with no other arguments: lets you pick the repo
+- **Wizard** — `/ch-worktree` with no other arguments: lets you pick the repo
   (current repo, repos from the index library, **a pull request**, or a typed
   path), then asks for the branch name (Enter = new branch `<repo>-wt`) and the
   worktree library root (Enter = the configured root). Picking the PR option
@@ -64,14 +66,77 @@ Don't use both install paths at once — the commands would register twice. Conf
   With no argument at all it also lets you pick the repo. Path prompts support
   TAB completion with ↑/↓ navigation (TAB accepts, Enter confirms, Esc cancels).
 - **One-go (agents)** — everything on one line, fully non-interactive:
-  `/chworktree [repo] -b <branch> [--dest <dir>]`. The first argument is always
-  the repo. A **PR URL in the repo slot** (`/chworktree https://github.com/<owner>/<repo>/pull/<n>`)
+  `/ch-worktree [repo] -b <branch> [--dest <dir>]`. Except for the reserved
+  manager verbs (`ls`/`list`/`rm`/`remove`, which dispatch before the repo slot),
+  the first argument is the repo — a repo literally named `ls` needs `./ls`. A
+  **PR URL in the repo slot** (`/ch-worktree https://github.com/<owner>/<repo>/pull/<n>`)
   creates a pull-request sandbox the same way the wizard's PR option does.
 - **Remote branches** — the branch slot also accepts `<remote>/<branch>`
   (e.g. `origin/feature`): the remote branch is checked out **detached at its
   tip** (a remote-tracking ref can't be checked out as a branch; a missing
   tracking ref is best-effort fetched first). The baseline anchors at the
   remote ref itself.
+
+### /ch-worktree ls — manage the worktree library
+
+`ls` lists every worktree sandbox in the library **grouped by project**
+(meta `repoRoot`), one row per sandbox with the space columns
+(**db first**, then checkout, then total), its git state and its liveness:
+
+- identity: the branch slot (`pull/N · head <branch> @ <sha>` for PR sandboxes)
+- git state: on-branch vs detached, `dirty`, `+N/-M vs <ref>` ahead/behind
+  (compared against the branch's upstream when it has one, else the recorded
+  base ref — for pull/`N` sandboxes that is the PR's base branch), `last commit`
+- liveness: `●` = live MCP connection now, `↻` = recorded for auto-reconnect
+  (connected at the last session, not live yet), `✗ gone` = the checkout dir
+  no longer exists, `runs this extension` = the code you are running, claim
+  warnings when the index root sidecar is missing or mismatched
+- PR sandboxes additionally show their gh state: `PR #12 OPEN` / `DRAFT` /
+  `MERGED` / `CLOSED` (hidden when gh is unavailable — the list says so)
+
+Each project group carries a rollup of its db/checkout/total bytes; each row
+ends with its worktree path relative to the library root. Nothing is mutated:
+`ls` only reads (async checkout sizing, git probes, gh lookups).
+
+```
+/ch-worktree ls                     # everything, newest first, grouped by repo
+/ch-worktree ls fix                 # shorthand filter (--search)
+/ch-worktree ls --search mcp --sort db      # biggest indexes first
+/ch-worktree ls --sort name         # A→Z by branch identity
+```
+
+`<query>`/`--search` filters case-insensitively over repo, branch, head ref,
+storage id and paths. `--sort` keys: `created` (default, newest first),
+`name`, `db`, `checkout`, `total` (numeric keys: largest first).
+
+### /ch-worktree rm — remove a worktree sandbox
+
+Removes one sandbox completely: its storage (sandbox dir + the hidden
+`.state` sibling with the index db and meta), its worktree registration in
+the host repo (`git worktree remove --force`, with a `prune` sweep for stale
+registrations), and — for branches **created for the sandbox** only — the
+branch itself via `git branch -d` (never forced: a branch with commits not
+merged elsewhere is kept and reported). Live MCP connections are
+disconnected **first** (the chunkhound daemon exits on its own) and the
+session record is tombstoned so auto-restore cannot resurrect the sandbox.
+
+```
+/ch-worktree rm                # interactive: pick a sandbox, review the impact
+                              #   preview, confirm (headless: usage + hint)
+/ch-worktree rm <id-or-path>   # one-go removal (no confirm — assumed default)
+/ch-worktree rm <id> --force   # one-go removal of the sandbox that runs THIS
+                              #   extension (the interactive dialog warns too)
+```
+
+Guards: pre-existing branches are never deleted (a sandbox that checked out
+an existing branch anchors its baseline on that branch — `meta.baseRef ==
+branch` — and is left alone); pull/`N` and `<remote>/<branch>` slots never
+are (no local branch). The sandbox running this extension needs `--force`
+on the one-go path. A **locked** worktree is refused outright (never
+overridden with a double force) — `git worktree unlock <path>` first; the
+refusal happens before anything is touched. The impact preview states what will be disconnected,
+lost (uncommitted checkout changes) and deleted — and what is **NOT**
+touched: shared baselines, other sandboxes, anything else in the host repo.
 
 In all modes the location must not overlap another chunkhound worktree or index —
 the wizard re-prompts, one-go aborts. **Storage-anchored layout**: the checkout
@@ -152,21 +217,14 @@ explicit `--disconnect` does not.
 ### /ch-status
 
 Shows chunkhound's version, worktree/baseline library roots, embedding and LLM
-config, API-key status, every worktree (alive?, repo/branch, base commit, index
-size, claimed index root), every baseline (shown as `<repo>/<ref> @ <commit>`), and
-live MCP connections. PR sandboxes show as `add/pull/29 · head recovery/pr27-pr-b @ 0c645ce`.
-`--prune` removes storage for gone worktrees and
+config, API-key status, index-root claim health, and live MCP connections. The
+health section checks that every sandbox's index is claimed by its own sandbox
+directory — an unclaimed or mismatched root is called out with the fix. The
+worktree and baseline listings live in the `/ch-worktree` manager and
+`/ch-worktree ls` (see above). `--prune` removes storage for gone worktrees and
 garbage baselines (incomplete from a crashed prime, source repo deleted, or a
 superseded duplicate). The same baseline GC also runs automatically after each
 baseline prime — the cache is self-healing, no manual cleanup needed.
-
-<p align="center">
-  <img src="docs/assets/ch-status-overview.png"
-       alt="pi terminal showing ch-status output: ChunkHound version, worktree and baseline library roots, embedding and LLM config, one indexed worktree with its commit and index size, a baseline, and one connected ch-mcp exposing five tools"
-       width="1000">
-</p>
-
-<p align="center"><em><code>/ch-status</code> — roots, worktrees, baselines and live MCP connections at a glance.</em></p>
 
 ### /ch-setup
 
@@ -176,7 +234,7 @@ answered questions) or fully flag-driven: `--provider --model --rerank-model
 --baseline-max-age --sandbox-root --api-key --auto-reconnect --verify --project
 --reset`.
 `--config <file>` adopts an existing `chunkhound.json`; `--sandbox-root` sets the
-worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
+worktree library root for `/ch-worktree` (`--worktree-base` is a legacy alias).
 
 ## Where things live
 
@@ -209,7 +267,7 @@ worktree library root for `/chworktree` (`--worktree-base` is a legacy alias).
 All completion UX is plugin-side and works on a **pristine pi install** — nothing
 under the global pi installation is ever modified:
 
-- Natural typing after `/chworktree ` shows the directory picker (dirs only,
+- Natural typing after `/ch-worktree ` shows the directory picker (dirs only,
   trailing `/`, drill-down), then the branch picker (leading with a
   **new-branch** item), flags, `--config` files, `--from`/`-b` refs.
 - `TAB` accepts a completion and re-opens the picker for the next slot;
