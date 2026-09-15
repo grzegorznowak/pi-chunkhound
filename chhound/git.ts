@@ -67,15 +67,35 @@ export interface WorktreeAddOptions {
 	detach?: boolean;
 }
 
-export async function gitWorktreeAdd(opts: WorktreeAddOptions): Promise<void> {
+/** What the add ACTUALLY did with the branch — deletion safety (rm) reads
+ * this fact, never the request shape: a path-derived add checks out an
+ * existing `<basename>` branch instead of creating one. */
+export interface WorktreeAddResult {
+	/** True only when this add created `refs/heads/<branch>`: an explicit `-b`,
+	 * or git's path-derived branch when no branch of that name existed yet. */
+	createdBranch: boolean;
+}
+
+export async function gitWorktreeAdd(opts: WorktreeAddOptions): Promise<WorktreeAddResult> {
 	const args = ["worktree", "add"];
 	if (opts.createBranch) args.push("-b", opts.createBranch);
 	else if (opts.detach) args.push("--detach");
 	args.push(opts.path);
 	if (opts.commitIsh) args.push(opts.commitIsh);
 	else if (opts.branch) args.push(opts.branch);
+	// With no -b and no explicit commit-ish, git names the branch after the
+	// path's final component: an existing branch is checked out (NOT created),
+	// a missing one is created from HEAD. Probe first so the recorded fact is
+	// the outcome rather than the intent.
+	let derivedExisted = false;
+	const pathDerived = !opts.createBranch && !opts.detach && !opts.commitIsh && !opts.branch;
+	if (pathDerived) {
+		const derived = path.basename(opts.path);
+		derivedExisted = (await runGit(["show-ref", "--verify", "--quiet", `refs/heads/${derived}`], { cwd: opts.cwd })).code === 0;
+	}
 	const r = await runGit(args, { cwd: opts.cwd });
 	if (r.code !== 0) throw new Error(`git worktree add failed: ${r.stderr || r.stdout}`);
+	return { createdBranch: Boolean(opts.createBranch) || (pathDerived && !derivedExisted) };
 }
 
 export async function gitWorktreeRemove(wtPath: string, cwd?: string): Promise<void> {

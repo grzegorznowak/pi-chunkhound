@@ -505,8 +505,9 @@ export async function createIndexedWorktree(
 		// the indexed root) exist before `git worktree add`.
 		fs.mkdirSync(sandboxDir, { recursive: true });
 		fs.mkdirSync(sandboxStateDir(sandboxDir), { recursive: true });
+		let createdBranchHere = false;
 		try {
-			await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
+			({ createdBranch: createdBranchHere } = await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh }));
 		} catch (err) {
 			notify(err instanceof Error ? err.message : String(err), "error");
 			return { ok: false };
@@ -615,10 +616,12 @@ export async function createIndexedWorktree(
 			baseCommit: baseline.meta.baseCommit,
 			chhoundVersion: baseline.meta.chhoundVersion,
 			createdAt: new Date().toISOString(),
-			// True only when THIS create made the branch (-b / wizard-typed /
-			// path-derived); a pre-existing checkout, remote-ref slot or detached
-			// create must never read as deletable on rm.
-			createdBranch: Boolean(createBranch) || (!branch && !commitIsh),
+			// Derived at the git layer from what the add ACTUALLY did: a
+			// path-derived add checks out an existing `<folder>` branch instead
+			// of creating one, so request shape alone cannot tell them apart
+			// (review F2-01). A pre-existing checkout, remote-ref slot or
+			// detached create never reads as deletable on rm.
+			createdBranch: createdBranchHere,
 			copiedFrom: baseline.dbDir,
 			dbPath: dbDir,
 			...(opts.headRef ? { headRef: opts.headRef } : {}),

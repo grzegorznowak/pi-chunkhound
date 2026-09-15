@@ -114,6 +114,8 @@ interface CreateOpts {
 	branchLabel?: string;
 	headRef?: string;
 	headOid?: string;
+	/** Worktree folder name — the path-derived branch name git uses. Default "checkout". */
+	wtName?: string;
 	flags?: Record<string, string | true>;
 }
 
@@ -131,7 +133,7 @@ async function runCreate(
 	const result = await createIndexedWorktree(ctx as never, {} as never, {
 		repoRoot: repo,
 		sandboxDir,
-		wtPath: path.join(sandboxDir, "checkout"),
+		wtPath: path.join(sandboxDir, opts.wtName ?? "checkout"),
 		settings,
 		...(opts.createBranch ? { createBranch: opts.createBranch } : {}),
 		...(opts.branch ? { branch: opts.branch } : {}),
@@ -204,6 +206,58 @@ describe("baseline anchor policy", () => {
 			await check(t, "sandbox meta records the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
 			await check(t, "sandbox meta records the flag that this branch pre-existed", meta?.createdBranch === false, JSON.stringify(meta));
 			await check(t, "a checked-out pre-existing branch is never marked for deletion", meta !== undefined && branchDeleteIntent(meta) === false, JSON.stringify(meta));
+		} finally {
+			restoreEnv(env);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a path-derived create reusing an existing <folder> branch records createdBranch:false (F2-01)", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-anchor-reused-derived-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_BINARY: writeFakeEngine(root) } }));
+			const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
+			const repo = await makeRepo(root); // HEAD = feature/x, default = main
+			const mainSha = await git(["rev-parse", "main"], repo);
+			// The branch git path-derives from the worktree folder already exists
+			// (created elsewhere, checked out nowhere): git checks it out instead
+			// of creating one, so rm must not own it.
+			await git(["branch", "checkout", "main"], repo);
+
+			const { ok, sandboxDir, notifications } = await runCreate(root, repo, settings, { wtName: "checkout" });
+
+			await check(t, "create succeeds", ok, notifications.join(" | "));
+			const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
+			await check(t, "meta records the re-used branch as its identity", meta?.branch === "checkout", JSON.stringify(meta));
+			await check(t, "meta anchors the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
+			await check(t, "meta records createdBranch:false (the branch pre-existed the create)", meta?.createdBranch === false, JSON.stringify(meta));
+			await check(t, "rm never considers the pre-existing branch a candidate", meta !== undefined && branchDeleteIntent(meta) === false, JSON.stringify(meta));
+		} finally {
+			restoreEnv(env);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a path-derived create of a fresh <folder> branch records createdBranch:true", async (t) => {
+		const env = snapshotEnv();
+		const root = await makeFixtureRoot("pi-chhound-anchor-fresh-derived-");
+		try {
+			const home = await makeFakeHome(root);
+			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_BINARY: writeFakeEngine(root) } }));
+			const settings: ChhoundSettings = { version: 1, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases") };
+			const repo = await makeRepo(root);
+			const mainSha = await git(["rev-parse", "main"], repo);
+
+			const { ok, sandboxDir, notifications } = await runCreate(root, repo, settings, { wtName: "fresh-wt" });
+
+			await check(t, "create succeeds", ok, notifications.join(" | "));
+			const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
+			await check(t, "meta records the path-derived branch as its identity", meta?.branch === "fresh-wt", JSON.stringify(meta));
+			await check(t, "meta anchors the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
+			await check(t, "meta records createdBranch:true (this create made the branch)", meta?.createdBranch === true, JSON.stringify(meta));
+			await check(t, "the created branch stays deletable on rm", meta !== undefined && branchDeleteIntent(meta) === true, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
 			fs.rmSync(root, { recursive: true, force: true });
