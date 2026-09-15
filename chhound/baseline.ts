@@ -190,13 +190,17 @@ async function withPrimeLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 	}
 }
 
+/**
+ * Baseline freshness. Deliberately NOT keyed on the chunkhound version: an
+ * engine upgrade reuses the baseline db and lets the engine migrate/top-up in
+ * place — wiping and re-priming per version bump is pure cost.
+ */
 function staleReason(
 	meta: BaselineMeta | undefined,
-	opts: { version: string; baseCommit?: string; force?: boolean; settings: ChhoundSettings },
+	opts: { baseCommit?: string; force?: boolean; settings: ChhoundSettings },
 ): string | null {
 	if (!meta) return "missing";
 	if (opts.force) return "forced";
-	if (meta.chhoundVersion !== opts.version) return `chunkhound version changed (${meta.chhoundVersion} → ${opts.version})`;
 	if (opts.baseCommit && meta.baseCommit !== opts.baseCommit) return "base ref moved";
 	const maxAgeDays = opts.settings.baseline?.maxAgeDays ?? 1;
 	const ageMs = Date.now() - new Date(meta.updatedAt).getTime();
@@ -218,7 +222,7 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
  *
  * Priming = temporary detached worktree at the resolved source ref, indexed
  * with the same hot-start machinery used for sandboxes (copy + top-up on
- * refresh, full index when missing/version-moved).
+ * refresh, full index only when no reusable baseline db exists).
  */
 export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<BaselineInfo> {
 	const emitNote = opts.onNote ?? opts.onLine;
@@ -244,8 +248,8 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 	}
 
 	let meta = readBaselineMeta(dir);
-	let reason = staleReason(meta, { version, baseCommit, force: opts.force, settings: opts.settings });
-	if (meta && !reason) {
+	let reason = staleReason(meta, { baseCommit, force: opts.force, settings: opts.settings });
+	if (meta && !reason && fs.existsSync(dbDir)) {
 		emitNote?.(`baseline fresh (${ref} @ ${meta.baseCommit.slice(0, 12)})`);
 		sweepBaselineGarbage(opts.settings); // cheap GC — piggyback on every prime
 		return { dir, dbDir, configPath: path.join(dir, CONFIG_FILE_NAME), meta, ref, fresh: false, reason: "fresh" };
@@ -254,8 +258,8 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 	await withPrimeLock(dir, async () => {
 		// Re-check under the lock — another process may have primed meanwhile.
 		const meta2 = readBaselineMeta(dir);
-		const reason2 = staleReason(meta2, { version, baseCommit, force: opts.force, settings: opts.settings });
-		if (meta2 && !reason2) return;
+		const reason2 = staleReason(meta2, { baseCommit, force: opts.force, settings: opts.settings });
+		if (meta2 && !reason2 && fs.existsSync(dbDir)) return;
 
 		emitNote?.(`priming ${ref} @ ${baseCommit?.slice(0, 12) ?? "unknown"}`);
 		const tmp = path.join(os.tmpdir(), `pi-chhound-prime-${process.pid}-${Date.now()}`);
@@ -263,8 +267,10 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 		try {
 			await gitWorktreeAdd({ cwd: opts.repoRoot, path: tmp, detach: true, commitIsh: sourceRef });
 			const configPath = materializeConfig(dir, { settings: opts.settings, dbDir });
-			// Baseline db path is stable: refresh = in-place top-up; version move = fresh.
-			const reuse = !!meta2 && meta2.chhoundVersion === version && fs.existsSync(dbDir);
+			// Baseline db path is stable: any refresh (including after a chunkhound
+			// upgrade) tops up in place — the engine migrates/tops up the db itself.
+			// Only a missing/removed db is primed from scratch.
+			const reuse = !!meta2 && fs.existsSync(dbDir);
 			if (!reuse) fs.rmSync(dbDir, { recursive: true, force: true });
 			const r = await hotStartIndex({
 				sourceDbDir: null,
