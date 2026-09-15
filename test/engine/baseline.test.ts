@@ -167,6 +167,20 @@ describe("baseline prime", () => {
 			const b2 = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
 			await check(tc, "baseline fresh on re-run", b2.fresh === false);
 
+			// Engine version change must NOT trigger a re-prime: the baseline db is
+			// reused and topped up in place (the engine migrates its own schema).
+			const metaFile = path.join(b1.dir, "meta.json");
+			const tampered = JSON.parse(fs.readFileSync(metaFile, "utf8")) as { chhoundVersion: string };
+			tampered.chhoundVersion = "chhound 0.0.0-old";
+			fs.writeFileSync(metaFile, JSON.stringify(tampered, null, 2) + "\n");
+			const b2v = await ensureBaseline({ repoRoot: repo, settings, onLine, extraArgs });
+			await check(
+				tc,
+				"engine version change reuses baseline in place",
+				b2v.fresh === false && b2v.reason === "fresh" && fs.existsSync(b1.dbDir),
+				`fresh=${b2v.fresh} reason=${b2v.reason}`,
+			);
+
 			// Base moved → refresh must re-prime via in-place top-up.
 			fs.writeFileSync(path.join(repo, "b2.md"), "# more\n");
 			await git(["add", "-A"], { cwd: repo });
