@@ -5,8 +5,9 @@
  * pull/<n> — which carries the full identity (repo + number). Resolution:
  *
  *   1. gh CLI: `gh pr view` → base branch, head branch, head commit (the
- *      baseline anchors at the PR's BASE branch so the top-up only indexes
- *      the PR delta; the head commit is checked out detached).
+ *      head commit is checked out detached; the base branch is informational
+ *      — every baseline anchors the repo default ref, operator decision
+ *      2026-09-15).
  *   2. Host repo for the worktree: a LOCAL checkout of <owner>/<repo> when
  *      one exists (cwd repo or a repo known to the library — its cached
  *      baseline is reused), else a BARE MIRROR clone under the mirror cache
@@ -91,7 +92,7 @@ export function runGh(args: string[]): Promise<GhResult> {
 
 export interface PrInfo {
 	number: number;
-	/** Branch the PR merges into (baseline anchor). */
+	/** Branch the PR merges into (PR identity; no longer a baseline anchor). */
 	baseRefName: string;
 	/** Branch the PR is from (display). */
 	headRefName: string;
@@ -179,6 +180,15 @@ export async function ensureMirror(settings: ChhoundSettings, owner: string, rep
 	const f = await runGit(["fetch", "--quiet", "origin"], { cwd: dir });
 	if (f.code !== 0) {
 		throw new Error(`could not refresh mirror ${dir}: ${f.stderr || f.stdout || "git fetch failed"}`);
+	}
+	// Expose the bare clone's HEAD branch as refs/remotes/origin/HEAD — the
+	// record defaultRemoteBranch() reads for the default-ref baseline anchor.
+	// A bare repo has no remote-tracking refs at all; without this, PR sandbox
+	// baselines (and any other default-ref resolution on the mirror) would fall
+	// back to "main" regardless of the repo's actual default branch.
+	const head = await runGit(["--git-dir", dir, "symbolic-ref", "--quiet", "HEAD"], { cwd: dir });
+	if (head.code === 0 && head.stdout.startsWith("refs/heads/")) {
+		await runGit(["--git-dir", dir, "symbolic-ref", "refs/remotes/origin/HEAD", head.stdout], { cwd: dir });
 	}
 	return dir;
 }

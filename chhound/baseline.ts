@@ -25,9 +25,9 @@ export interface EnsureBaselineOptions {
 	onLine?: (line: string) => void;
 	/** Plugin-originated stage notes ("baseline fresh…", "priming…") — surfaced as progress stages. Falls back to onLine. */
 	onNote?: (note: string) => void;
-	/** Anchor ref override — the LOCAL branch the worktree's tree comes from. Overrides
-	 * settings.baseline.ref. Default resolution: settings.baseline.ref → default
-	 * remote branch → "main". */
+	/** Explicit ref override (wins over settings.baseline.ref; used by tests and
+	 * the few callers that need a specific ref). Default resolution:
+	 * settings.baseline.ref → default remote branch → "main". */
 	ref?: string;
 	/** Force full re-prime even when fresh. */
 	force?: boolean;
@@ -213,12 +213,24 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
 }
 
 /**
- * Ensure a fresh baseline index for the repo's base ref.
+ * The ref every baseline is keyed by: explicit `settings.baseline.ref` → the
+ * repo default branch (origin/HEAD) → "main". This is the ONLY anchor a
+ * worktree create may use (operator decision 2026-09-15) — the branch a
+ * checkout comes from must never mint or refresh its own baseline.
+ */
+export async function resolveBaselineRef(repoRoot: string, settings: ChhoundSettings): Promise<string> {
+	return settings.baseline?.ref || (await defaultRemoteBranch(repoRoot)) || "main";
+}
+
+/**
+ * Ensure a fresh baseline index for the resolved ref: default is the repo's
+ * default branch (origin/HEAD), overridable by settings.baseline.ref, with a
+ * direct `ref` option for callers that need a specific ref.
  *
- * The baseline anchors to the LOCAL branch tip — worktrees are cut from local
- * state, so origin/<ref> would mismatch local whenever the two drift.
- * origin/<ref> is only a fallback (best-effort fetch) when no local branch of
- * that name exists.
+ * LOCAL-first: prefer the LOCAL branch tip of that ref — worktrees and local
+ * work in general happen on local refs, so origin/<ref> would mismatch local
+ * whenever the two drift. origin/<ref> is only a fallback (best-effort fetch)
+ * when no local branch of that name exists.
  *
  * Priming = temporary detached worktree at the resolved source ref, indexed
  * with the same hot-start machinery used for sandboxes (copy + top-up on
@@ -226,15 +238,15 @@ function apiKeyEnv(apiKey?: string): Record<string, string> | undefined {
  */
 export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<BaselineInfo> {
 	const emitNote = opts.onNote ?? opts.onLine;
-	const ref = opts.ref ?? (opts.settings.baseline?.ref || (await defaultRemoteBranch(opts.repoRoot)) || "main");
+	const ref = opts.ref ?? (await resolveBaselineRef(opts.repoRoot, opts.settings));
 	const version = await chhoundVersion();
 	const dir = baselineDirFor(opts.repoRoot, ref, opts.settings);
 	const dbDir = baselineDbDirFor(opts.repoRoot, ref, opts.settings);
 	fs.mkdirSync(dir, { recursive: true });
 
-	// LOCAL-first: the local branch is the anchor (worktrees branch from local
-	// state). Only when no local branch of that name exists do we best-effort
-	// fetch origin and fall back to origin/<ref> — no-remote repos never fetch.
+	// LOCAL-first: prefer the local branch of the resolved ref; only when no
+	// local branch of that name exists do we best-effort fetch origin and fall
+	// back to origin/<ref> — no-remote repos never fetch.
 	let sourceRef = ref;
 	let baseCommit = await revParse(opts.repoRoot, ref);
 	if (!baseCommit) {

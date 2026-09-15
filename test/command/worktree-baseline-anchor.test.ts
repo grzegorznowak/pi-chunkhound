@@ -1,12 +1,12 @@
 import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { baselineDbDirFor, baselineDirFor, listBaselines } from "../../chhound/baseline.js";
+import { baselineDbDirFor, baselineDirFor, listBaselines, resolveBaselineRef } from "../../chhound/baseline.js";
 import { runGit } from "../../chhound/git.js";
 import { readSandboxMeta, sandboxDbDir, sandboxStateDir } from "../../chhound/sandbox.js";
 import { createIndexedWorktree } from "../../worktree/command.js";
 import { branchDeleteIntent } from "../../worktree/manage.js";
-import type { ChhoundSettings, SandboxMeta } from "../../chhound/types.js";
+import type { ChhoundSettings } from "../../chhound/types.js";
 import { check } from "../lib/checks.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, restoreEnv, snapshotEnv } from "../lib/isolation.js";
 
@@ -148,14 +148,6 @@ function baselineFacts(settings: ChhoundSettings): Array<{ dir: string; ref?: st
 	return listBaselines(settings).filter((b) => b.meta !== undefined).map((b) => ({ dir: b.dir, ref: b.meta?.baseRef, updatedAt: b.meta?.updatedAt }));
 }
 
-/**
- * The create-time branch fact Option A adds to `SandboxMeta` (pending — read
- * through a cast so this red suite compiles before the field's type lands).
- */
-function createdBranch(meta: SandboxMeta | undefined): boolean | undefined {
-	return (meta as { createdBranch?: boolean } | undefined)?.createdBranch;
-}
-
 describe("baseline anchor policy", () => {
 	test("a derived create on a non-default source branch anchors the default ref", async (t) => {
 		const env = snapshotEnv();
@@ -181,7 +173,7 @@ describe("baseline anchor policy", () => {
 			await check(t, "sandbox meta records the default ref", meta?.baseRef === "main", JSON.stringify(meta));
 			await check(t, "sandbox meta records the default ref's commit", meta?.baseCommit === mainSha, JSON.stringify(meta));
 			await check(t, "sandbox meta records the default baseline as its copy source", meta?.copiedFrom === mainDb, JSON.stringify(meta));
-			await check(t, "sandbox meta records the flag that this branch was created here", createdBranch(meta) === true, JSON.stringify(meta));
+			await check(t, "sandbox meta records the flag that this branch was created here", meta?.createdBranch === true, JSON.stringify(meta));
 			await check(t, "the created branch stays deletable on rm", meta !== undefined && branchDeleteIntent(meta) === true, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
@@ -210,7 +202,7 @@ describe("baseline anchor policy", () => {
 			await check(t, "the default baseline was primed exactly once", invocationCount(root, mainDb) === 1, JSON.stringify(engineInvocations(root)));
 			const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
 			await check(t, "sandbox meta records the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
-			await check(t, "sandbox meta records the flag that this branch pre-existed", createdBranch(meta) === false, JSON.stringify(meta));
+			await check(t, "sandbox meta records the flag that this branch pre-existed", meta?.createdBranch === false, JSON.stringify(meta));
 			await check(t, "a checked-out pre-existing branch is never marked for deletion", meta !== undefined && branchDeleteIntent(meta) === false, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
@@ -323,7 +315,7 @@ describe("baseline anchor policy", () => {
 			const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
 			await check(t, "meta keeps the remote identity as the branch label", meta?.branch === "origin/release", JSON.stringify(meta));
 			await check(t, "meta still anchors the default ref and commit", meta?.baseRef === "main" && meta?.baseCommit === mainSha, JSON.stringify(meta));
-			await check(t, "a remote-ref checkout is not marked as a branch created here", createdBranch(meta) === false, JSON.stringify(meta));
+			await check(t, "a remote-ref checkout is not marked as a branch created here", meta?.createdBranch === false, JSON.stringify(meta));
 			await check(t, "a remote-ref checkout is never marked for deletion", meta !== undefined && branchDeleteIntent(meta) === false, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
@@ -382,7 +374,7 @@ describe("baseline anchor policy", () => {
 			const baselines = baselineFacts(settings);
 			await check(t, "baseline ref is the default branch", baselines.length === 1 && baselines[0]?.ref === "main", JSON.stringify(baselines));
 			const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
-			await check(t, "a detached checkout is not marked as a branch created here", createdBranch(meta) === false, JSON.stringify(meta));
+			await check(t, "a detached checkout is not marked as a branch created here", meta?.createdBranch === false, JSON.stringify(meta));
 		} finally {
 			restoreEnv(env);
 			fs.rmSync(root, { recursive: true, force: true });
@@ -454,6 +446,28 @@ describe("baseline anchor policy", () => {
 			await check(t, "no feature/x or feature/y baseline dir", !fs.existsSync(baselineDirFor(repo, "feature/x", settings)) && !fs.existsSync(baselineDirFor(repo, "feature/y", settings)));
 		} finally {
 			restoreEnv(env);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("resolveBaselineRef: settings override, origin/HEAD, then main", async (t) => {
+		const root = await makeFixtureRoot("pi-chhound-resolve-ref-");
+		try {
+			const settings: ChhoundSettings = { version: 1 };
+			const repo = await makeRepo(root);
+			await check(t, "settings.baseline.ref wins", (await resolveBaselineRef(repo, { ...settings, baseline: { ref: "release" } })) === "release");
+			await check(t, "no origin falls back to main", (await resolveBaselineRef(repo, settings)) === "main");
+
+			const origin = path.join(root, "origin.git");
+			await git(["init", "--bare", "-q", origin], root);
+			await git(["remote", "add", "origin", origin], repo);
+			await git(["push", "-q", "origin", "main"], repo);
+			await git(["checkout", "-qb", "develop"], repo);
+			await git(["push", "-q", "origin", "develop"], repo);
+			await git(["fetch", "-q", "origin"], repo);
+			await git(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"], repo);
+			await check(t, "origin/HEAD decides when settings are silent", (await resolveBaselineRef(repo, settings)) === "develop");
+		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});

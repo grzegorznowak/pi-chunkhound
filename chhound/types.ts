@@ -77,6 +77,14 @@ export interface SandboxMeta {
 	baseCommit: string;
 	chhoundVersion: string;
 	createdAt: string;
+	/**
+	 * True when this create made the branch (-b / wizard-typed / path-derived);
+	 * false for a pre-existing branch checkout, a remote-ref slot or a detached
+	 * create. Absent on metas written before the default-ref-only baseline
+	 * change — rm's deletion intent then falls back to the legacy baseRef
+	 * heuristic (which was exact under the old anchoring rules).
+	 */
+	createdBranch?: boolean;
 	/** Baseline db dir this sandbox was copied from. */
 	copiedFrom: string;
 	/** Absolute duckdb dir path (database.path in the sandbox config). */

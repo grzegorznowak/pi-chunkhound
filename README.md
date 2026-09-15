@@ -9,13 +9,14 @@ git worktrees with their **own chunkhound index**, an MCP bridge into those inde
 plus setup and status tooling.
 
 Wraps the `chunkhound` CLI/datastore. Every worktree gets its own index, built from a
-shared per-repo **baseline** (the mainline branch, regularly refreshed) plus an
+shared per-repo **baseline** (the repo's default branch, regularly refreshed) plus an
 incremental **top-up** at the worktree's branch point — the same mechanics the CURe
-engine uses for PR sandboxes. PR sandboxes anchor the baseline at the PR's **base
-branch**, so the top-up only indexes the PR's own diff. Baselines anchor to the
-**local** branch the worktree branches from (`origin/<ref>` is only a fallback,
-best-effort fetched, when no local branch of that name exists) — so top-ups stay
-small even when local and remote drift.
+engine uses for PR sandboxes. Baselines are keyed by the **repo default ref**
+(`origin/HEAD`, falling back to `main`) or the explicit `settings.baseline.ref`
+override — never by the branch a worktree checks out. Within a ref, the **local**
+branch tip wins (`origin/<ref>` is only a fallback, best-effort fetched, when no
+local branch of that name exists) — so top-ups stay small even when local and
+remote drift.
 
 ## Requirements
 
@@ -74,8 +75,8 @@ Don't use both install paths at once — the commands would register twice. Conf
 - **Remote branches** — the branch slot also accepts `<remote>/<branch>`
   (e.g. `origin/feature`): the remote branch is checked out **detached at its
   tip** (a remote-tracking ref can't be checked out as a branch; a missing
-  tracking ref is best-effort fetched first). The baseline anchors at the
-  remote ref itself.
+  tracking ref is best-effort fetched first). The baseline still anchors the
+  repo default ref.
 
 ### /ch-worktree ls — manage the worktree library
 
@@ -128,11 +129,11 @@ session record is tombstoned so auto-restore cannot resurrect the sandbox.
                               #   extension (the interactive dialog warns too)
 ```
 
-Guards: pre-existing branches are never deleted (a sandbox that checked out
-an existing branch anchors its baseline on that branch — `meta.baseRef ==
-branch` — and is left alone); pull/`N` and `<remote>/<branch>` slots never
-are (no local branch). The sandbox running this extension needs `--force`
-on the one-go path. A **locked** worktree is refused outright (never
+Guards: pre-existing branches are never deleted (the sandbox meta records
+`createdBranch` at create time — only branches this plugin created are ever
+`git branch -d` candidates, and never forced); pull/`N` and `<remote>/<branch>`
+slots never are (no local branch). The sandbox running this extension needs
+`--force` on the one-go path. A **locked** worktree is refused outright (never
 overridden with a double force) — `git worktree unlock <path>` first; the
 refusal happens before anything is touched. The impact preview states what will be disconnected,
 lost (uncommitted checkout changes) and deleted — and what is **NOT**

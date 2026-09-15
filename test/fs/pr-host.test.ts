@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
-import { currentBranch, gitWorktreeAdd, runGit } from "../../chhound/git.js";
+import { currentBranch, defaultRemoteBranch, gitWorktreeAdd, runGit } from "../../chhound/git.js";
 import { ensureMirror, findLocalRepo, ghPrView, mirrorDir } from "../../chhound/pr.js";
 import { sandboxBranchLabel, sandboxDirFor, sandboxStateDir } from "../../chhound/sandbox.js";
 import type { ChhoundSettings } from "../../chhound/types.js";
@@ -13,8 +13,9 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // hermetic) — the local git host ladder (fake gh shim on PATH, fixture bare
 // origin with refs/pull/1/head, pre-seeded mirror, full host resolution) and
 // the detached PR-sandbox layout. The pure URL parsing moved to
-// unit/pr-identity.test.ts; the real mirror anchor/refresh (ensureBaseline)
-// moved to engine/pr-baseline.test.ts. SELF-OWNED fixture: no network, no
+// unit/pr-identity.test.ts; the engine's explicit-ref mirror behavior moved
+// to engine/pr-baseline.test.ts (the mirror's own default branch, which the
+// default-ref anchor reads, is pinned here). SELF-OWNED fixture: no network, no
 // real gh — only local bare clones and a canned `gh` answering `pr view`.
 
 describe("pr host", () => {
@@ -99,6 +100,12 @@ describe("pr host", () => {
 			await check(t, "ensureMirror pins the heads refspec", fetchCfg.includes("+refs/heads/*:refs/heads/*"), fetchCfg);
 			const lateRef = await runGit(["--git-dir", mirror, "show-ref", "--verify", "--quiet", "refs/heads/late-branch"], { cwd: root });
 			await check(t, "ensureMirror refresh fetched the new branch", lateRef.code === 0, lateRef.stderr);
+			// The mirror must answer defaultRemoteBranch() with the REAL repo
+			// default (its bare HEAD) — the default-ref baseline anchor depends on
+			// it, and a bare clone has no refs/remotes refs of its own.
+			const mirrorHead = (await runGit(["--git-dir", mirror, "symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: root })).stdout;
+			const mirrorDefault = await defaultRemoteBranch(mirror);
+			await check(t, "ensureMirror exposes the default branch as origin/HEAD", mirrorDefault === mirrorHead, `${mirrorDefault} vs ${mirrorHead}`);
 
 			// Full host resolution (fake gh, offline): repo-less PR → mirror host;
 			// head fetch lands exactly on refs/pull/1/head. ctx is a non-repo dir

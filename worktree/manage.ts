@@ -802,20 +802,23 @@ export function parseRemoveInvocation(
 
 /**
  * Whether removing this sandbox should ALSO try `git branch -d <branch>`.
- * Pure intent rule — the recorded base ref is the anchor: when the sandbox
- * checked out an EXISTING branch (positional branch), the baseline anchored
- * at that branch itself (baseRef === branch), so the branch predates the
- * sandbox and must never be deleted. Branches CREATED for the sandbox (-b,
- * wizard-typed, derived) anchor on the source repo's head branch instead
- * (baseRef !== branch) — those are candidates. pull/N and <remote>/<branch>
- * slots never pass (their identity is not a local branch; runtime ref
- * existence is verified separately).
+ * The plugin only removes what IT created (operator decision 2026-09-15):
+ * - `createdBranch` (recorded at create) decides when present — true for a
+ *   branch made for the sandbox (-b, wizard-typed, path-derived), false for a
+ *   pre-existing branch checkout, remote-ref slot or detached create;
+ * - legacy metas (field absent) fall back to the old baseRef heuristic, which
+ *   was exact under the old anchoring rules (existing-branch checkouts anchored
+ *   baseRef at that branch; created branches anchored at the source HEAD);
+ * - pull/N and <remote>/<branch> slots never pass (their identity is not a
+ *   local branch; runtime ref existence is verified separately).
  */
-export function branchDeleteIntent(meta: { branch?: string; baseRef?: string }): boolean {
-	const { branch, baseRef } = meta;
-	if (!branch || branch.length === 0 || !baseRef) return false;
+export function branchDeleteIntent(meta: { branch?: string; baseRef?: string; createdBranch?: boolean }): boolean {
+	const { branch, baseRef, createdBranch } = meta;
+	if (!branch || branch.length === 0) return false;
 	if (/^pull\/\d+$/.test(branch)) return false; // PR slots are never local branches
-	return branch !== baseRef;
+	if (createdBranch !== undefined) return createdBranch; // explicit create-time fact
+	if (!baseRef) return false;
+	return branch !== baseRef; // legacy metas only
 }
 
 /**
