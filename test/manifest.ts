@@ -9,6 +9,9 @@ export interface TestClassification {
 /** Every discovered test must have exactly one entry here. */
 export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/extension-entry.test.ts": { tier: "command", subject: "extension-entry" },
+	"command/model-tools.test.ts": { tier: "command", subject: "model-tools" },
+	"command/model-tools-settings.test.ts": { tier: "command", subject: "model-tools-settings" },
+	"command/reporter-seam.test.ts": { tier: "command", subject: "reporter-seam" },
 	"command/path-input.test.ts": { tier: "command", subject: "path-input" },
 	"command/pick-panel.test.ts": { tier: "command", subject: "pick-panel" },
 	"command/setup-settings.test.ts": { tier: "command", subject: "setup-settings" },
