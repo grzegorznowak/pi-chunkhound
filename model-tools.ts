@@ -51,6 +51,15 @@ const parameters = Type.Object({
 	modelTools: Type.Optional(StringEnum(["off", "read-only", "on"] as const)),
 });
 
+/** Settings safe to hand to the model: persisted API keys must never leave the host. */
+function redact(settings: ChhoundSettings): ChhoundSettings {
+	return {
+		...settings,
+		embedding: settings.embedding ? { ...settings.embedding, apiKey: settings.embedding.apiKey ? "[redacted]" : undefined } : settings.embedding,
+		llm: settings.llm ? { ...settings.llm, apiKey: settings.llm.apiKey ? "[redacted]" : undefined } : settings.llm,
+	};
+}
+
 function text(action: string, value: string, extra: Record<string, unknown> = {}): ToolResult {
 	return { content: [{ type: "text", text: value || `${action}: complete` }], details: { action, ...extra } };
 }
@@ -119,8 +128,10 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			const connections = listMcpConnections();
 			return text(selected, connections.length ? connections.map((c) => `${c.id}: ${c.worktree}`).join("\n") : "No MCP connections.", { connections });
 		}
-		case "setup.show":
-			return text(selected, JSON.stringify(settings, null, 2), { settings });
+		case "setup.show": {
+			const safe = redact(settings);
+			return text(selected, JSON.stringify(safe, null, 2), { settings: safe });
+		}
 		case "setup.update": {
 			const changed = updates(settings, input);
 			if (!changed.length) throw new Error("setup.update requires at least one settings field.");

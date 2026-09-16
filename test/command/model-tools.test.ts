@@ -59,6 +59,20 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "no consent or wizard for read action", h.confirms.length === 0 && h.selections.length === 0);
 	}, { hasUI: false }));
 
+	test("setup.show never emits persisted API keys", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const seeded = loadSettings().settings;
+		seeded.embedding = { ...seeded.embedding, apiKey: "emb-secret" };
+		seeded.llm = { ...seeded.llm, apiKey: "llm-secret" };
+		saveSettings(seeded, "global");
+		const result = await execute(h, { action: "setup.show" });
+		const body = result.content.map((part) => part.text).join("\n");
+		const details = JSON.stringify(result.details);
+		await check(t, "embedding key never emitted", !body.includes("emb-secret") && !details.includes("emb-secret"));
+		await check(t, "llm key never emitted", !body.includes("llm-secret") && !details.includes("llm-secret"));
+		await check(t, "redaction is visible", body.includes("[redacted]") || body.includes("setup.show"));
+	}, { hasUI: false }));
+
 	test("renderResult tolerates every action payload", async (t) => withPiHarness(async (h) => {
 		await runExtension(h.pi);
 		const renderer = h.tools.get(MODEL_TOOL_NAME)?.renderResult;
