@@ -19,6 +19,7 @@ import { registerSetupCommand } from "./setup/command.js";
 import { registerStatusCommand } from "./status/command.js";
 import { registerWorktreeCommand } from "./worktree/command.js";
 import { registerModelTools } from "./model-tools.js";
+import { createGlobalWebManager, registerGlobalWebTools } from "./mcp/global-web.js";
 
 export default function (pi: ExtensionAPI): void {
 	const state: PluginState = {};
@@ -27,6 +28,7 @@ export default function (pi: ExtensionAPI): void {
 	registerStatusCommand(pi, state);
 	registerMcpCommand(pi, state);
 	registerModelTools(pi, state);
+	registerGlobalWebTools(pi, createGlobalWebManager());
 
 	// Replay live MCP bridge tools into this session's extension object. pi
 	// re-runs the factory per session (main, spawned children, /reload registry

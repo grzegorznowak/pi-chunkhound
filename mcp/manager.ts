@@ -31,6 +31,8 @@ const CONNECT_TIMEOUT_MS = 30_000;
 const CALL_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_LINES = 2000;
 const DEFAULT_MAX_BYTES = 50 * 1024;
+/** Repository-independent tools are served by the shared global no-daemon backend. */
+export const GLOBAL_TOOL_NAMES = new Set(["websearch", "fetchurl"]);
 
 /** Raw MCP tool metadata as listed by the server — replayable into other sessions. */
 export interface McpToolMeta {
@@ -228,6 +230,7 @@ export async function connectMcp(pi: ExtensionAPI, entry: SandboxEntry, opts: Co
 	}
 	const toolNames: string[] = [];
 	for (const tool of mcpTools) {
+		if (GLOBAL_TOOL_NAMES.has(tool.name)) continue;
 		const piName = `${prefix}_${tool.name}`;
 		registerBridgeTool(pi, id, piName, tool, indexLabel);
 		toolNames.push(piName);
@@ -300,6 +303,7 @@ export function reRegisterBridgeTools(
 ): void {
 	for (const conn of conns) {
 		for (const tool of conn.tools) {
+			if (GLOBAL_TOOL_NAMES.has(tool.name)) continue;
 			registerBridgeTool(pi, conn.id, `${conn.prefix}_${tool.name}`, tool, conn.indexLabel);
 		}
 	}
@@ -316,13 +320,14 @@ function isAlive(pid: number): boolean {
 
 // ── tool bridging ──────────────────────────────────────────────────────────
 
-function registerBridgeTool(
+export function registerBridgeTool(
 	pi: ExtensionAPI,
 	id: string,
 	piName: string,
 	tool: { name: string; description?: string; inputSchema?: unknown },
 	indexLabel: string,
 ): void {
+	if (GLOBAL_TOOL_NAMES.has(tool.name)) return;
 	// Index-scoped tools name their target index right after the id so the
 	// model can pick the right namespace without decoding opaque ids.
 	// websearch/fetchurl are shared web tools — deliberately unscoped.
