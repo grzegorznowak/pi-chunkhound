@@ -22,6 +22,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },
 	"command/worktree-wizard-outcome.test.ts": { tier: "command", subject: "worktree-wizard-outcome" },
 	"engine/baseline.test.ts": { tier: "engine", subject: "baseline" },
+	"engine/global-web-prime.test.ts": { tier: "engine", subject: "global-web-prime" },
 	"engine/mcp-bridge.test.ts": { tier: "engine", subject: "mcp-bridge" },
 	"engine/mcp-restore.test.ts": { tier: "engine", subject: "mcp-restore" },
 	"engine/pr-baseline.test.ts": { tier: "engine", subject: "pr-baseline" },

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -80,20 +79,19 @@ async function defaultPrimeDatabase(databasePath: string): Promise<void> {
 	try {
 		const settings = loadSettings().settings;
 		const config = materializeConfig(temp, { settings, dbDir: databasePath });
-		const child = spawn(chhoundBinary(), ["mcp", "--no-daemon", "--config", config], { cwd: temp, stdio: "ignore" });
-		let exited = false;
-		let spawnError: Error | undefined;
-		child.once("exit", () => { exited = true; });
-		child.once("error", (error) => { spawnError = error; exited = true; });
-		const deadline = Date.now() + 15_000;
-		while (!exited && !(await hasDuckDbHeader(databasePath)) && Date.now() < deadline) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
+		// The engine connects (and auto-creates) the DB from a deferred background
+		// task kicked off by the MCP initialize handshake — so prime through a real
+		// client that keeps the session open until the DuckDB file exists.
+		const handle = await defaultSpawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--config", config], cwd: temp, env: process.env as Record<string, string> });
+		try {
+			const deadline = Date.now() + 30_000;
+			while (!(await hasDuckDbHeader(databasePath)) && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+		} finally {
+			await handle.client.close().catch(() => undefined);
+			try { handle.child.kill("SIGTERM"); } catch { /* already gone */ }
 		}
-		if (!exited) {
-			child.kill("SIGTERM");
-			while (!exited) await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-		if (spawnError) throw spawnError;
 	} finally {
 		await fs.rm(temp, { recursive: true, force: true });
 	}
