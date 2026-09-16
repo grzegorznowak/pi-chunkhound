@@ -1,5 +1,4 @@
 import * as fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -9,6 +8,7 @@ import { chhoundBinary } from "../chhound/cli.js";
 import { materializeConfig } from "../chhound/config.js";
 import { xdgStateHome, PKG_DIR_NAME } from "../chhound/paths.js";
 import { loadSettings } from "../chhound/settings.js";
+import type { ChhoundSettings } from "../chhound/types.js";
 
 const CONNECT_TIMEOUT_MS = 30_000;
 const CALL_TIMEOUT_MS = 600_000;
@@ -60,7 +60,14 @@ async function defaultSpawnServer(spec: SpawnSpec): Promise<ServerHandle> {
 	};
 }
 
-/** Create the empty shared DB once, from a disposable RW server cwd. */
+/**
+ * Cache-artifact patterns for the shared global dir: the priming scan must
+ * never index the config (it carries provider API keys), the DuckDB files, or
+ * engine logs.
+ */
+const WEB_CACHE_EXCLUDES = ["**/.chunkhound.json", ".chunkhound.json", "**/*.duckdb", "**/*.duckdb.*", "**/*.log"];
+
+/** Create the shared DB once, under the same indexed root the runtime uses. */
 async function hasDuckDbHeader(databasePath: string): Promise<boolean> {
 	try {
 		const file = await fs.open(databasePath, "r");
@@ -72,28 +79,65 @@ async function hasDuckDbHeader(databasePath: string): Promise<boolean> {
 	} catch { return false; }
 }
 
-async function defaultPrimeDatabase(databasePath: string): Promise<void> {
-	if (await hasDuckDbHeader(databasePath)) return;
-	await fs.mkdir(path.dirname(databasePath), { recursive: true });
-	const temp = await fs.mkdtemp(path.join(os.tmpdir(), "pi-chhound-global-prime-"));
+/** The engine's own root normalization for the sidecar (`Path.absolute()` + posix). */
+function engineRoot(p: string): string {
+	return path.resolve(p).split(path.sep).join("/");
+}
+
+/**
+ * Root recorded in the DuckDB root-claim sidecar: a string when valid,
+ * undefined when the sidecar is absent (the engine treats that as a legacy DB
+ * and allows the open), null when present but malformed (the engine fails
+ * closed; our disposable web cache may rebuild instead).
+ */
+async function readClaimedRoot(databasePath: string): Promise<string | null | undefined> {
+	let raw: string;
 	try {
-		const settings = loadSettings().settings;
-		const config = materializeConfig(temp, { settings, dbDir: databasePath });
-		// The engine connects (and auto-creates) the DB from a deferred background
-		// task kicked off by the MCP initialize handshake — so prime through a real
-		// client that keeps the session open until the DuckDB file exists.
-		const handle = await defaultSpawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--config", config], cwd: temp, env: process.env as Record<string, string> });
-		try {
-			const deadline = Date.now() + 30_000;
-			while (!(await hasDuckDbHeader(databasePath)) && Date.now() < deadline) {
-				await new Promise((resolve) => setTimeout(resolve, 100));
-			}
-		} finally {
-			await handle.client.close().catch(() => undefined);
-			try { handle.child.kill("SIGTERM"); } catch { /* already gone */ }
+		raw = await fs.readFile(`${databasePath}.root.json`, "utf8");
+	} catch {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(raw) as { indexed_root_path?: unknown };
+		return typeof parsed.indexed_root_path === "string" ? parsed.indexed_root_path : null;
+	} catch {
+		return null;
+	}
+}
+
+async function defaultPrimeDatabase(databasePath: string): Promise<void> {
+	const dir = path.dirname(databasePath);
+	if (await hasDuckDbHeader(databasePath)) {
+		const claimed = await readClaimedRoot(databasePath);
+		if (claimed === undefined || claimed === engineRoot(dir)) return;
+		// Pre-fix caches were primed from a disposable temp cwd, so the engine
+		// stamped that (now deleted) root and every open under the global dir is
+		// refused. A web cache is disposable — rebuild it under the right root.
+		await fs.rm(databasePath, { force: true });
+		await fs.rm(`${databasePath}.root.json`, { force: true });
+		await fs.rm(`${databasePath}.wal`, { force: true });
+	}
+	await fs.mkdir(dir, { recursive: true });
+	const settings = loadSettings().settings;
+	// Prime under the SAME indexed root the runtime server opens from: the
+	// engine stamps the DB's root-claim from the server's project dir, so
+	// priming anywhere else (the old temp cwd) makes the DB unopenable later.
+	// Polling avoids acquiring a watchman runtime for a throwaway primer, and
+	// the cache excludes keep this dir's own artifacts out of the index.
+	const priming: ChhoundSettings = { ...settings, indexing: { ...settings.indexing, realtimeBackend: "polling" } };
+	const config = materializeConfig(dir, { settings: priming, dbDir: databasePath, extraExcludes: WEB_CACHE_EXCLUDES });
+	// The engine connects (and auto-creates) the DB from a deferred background
+	// task kicked off by the MCP initialize handshake — so prime through a real
+	// client that keeps the session open until the DuckDB file exists.
+	const handle = await defaultSpawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--config", config], cwd: dir, env: process.env as Record<string, string> });
+	try {
+		const deadline = Date.now() + 30_000;
+		while (!(await hasDuckDbHeader(databasePath)) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 	} finally {
-		await fs.rm(temp, { recursive: true, force: true });
+		await handle.client.close().catch(() => undefined);
+		try { handle.child.kill("SIGTERM"); } catch { /* already gone */ }
 	}
 	if (!(await hasDuckDbHeader(databasePath))) throw new Error("could not prime the shared web database: invalid DuckDB header");
 }
@@ -112,7 +156,7 @@ export function createGlobalWebManager(options: Options = {}): GlobalWebManager 
 			const dir = globalDir();
 			const databasePath = path.join(dir, "web.duckdb");
 			await primeDatabase(databasePath);
-			const configPath = materializeConfig(dir, { settings: loadSettings().settings, dbDir: databasePath });
+			const configPath = materializeConfig(dir, { settings: loadSettings().settings, dbDir: databasePath, extraExcludes: WEB_CACHE_EXCLUDES });
 			const next = await spawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--read-only", "--config", configPath], cwd: dir, env: process.env as Record<string, string> });
 			// Shutdown can land while the first spawn is in flight; never leave an
 			// orphan holding the stdio pipes.
