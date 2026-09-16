@@ -105,7 +105,9 @@ export function createGlobalWebManager(options: Options = {}): GlobalWebManager 
 	const primeDatabase = options.primeDatabase ?? defaultPrimeDatabase;
 	let handle: ServerHandle | undefined;
 	let starting: Promise<ServerHandle> | undefined;
+	let closed = false;
 	async function server(): Promise<ServerHandle> {
+		if (closed) throw new Error("shared websearch/fetchurl server is closed");
 		if (handle) return handle;
 		if (!configured()) throw setupError();
 		if (!starting) starting = (async () => {
@@ -114,6 +116,13 @@ export function createGlobalWebManager(options: Options = {}): GlobalWebManager 
 			await primeDatabase(databasePath);
 			const configPath = materializeConfig(dir, { settings: loadSettings().settings, dbDir: databasePath });
 			const next = await spawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--read-only", "--config", configPath], cwd: dir, env: process.env as Record<string, string> });
+			// Shutdown can land while the first spawn is in flight; never leave an
+			// orphan holding the stdio pipes.
+			if (closed) {
+				await next.client.close().catch(() => undefined);
+				try { next.child.kill("SIGTERM"); } catch { /* already gone */ }
+				throw new Error("shared websearch/fetchurl server closed during startup");
+			}
 			handle = next;
 			return next;
 		})();
@@ -121,13 +130,14 @@ export function createGlobalWebManager(options: Options = {}): GlobalWebManager 
 	}
 	return {
 		async execute(name, input, signal, onUpdate) {
-			const result = await (await server()).client.callTool({ name, arguments: input }, undefined, { signal, timeout: CALL_TIMEOUT_MS, resetTimeoutOnProgress: true, onprogress: onUpdate });
+			const result = await (await server()).client.callTool({ name, arguments: input }, undefined, { signal, timeout: CALL_TIMEOUT_MS, resetTimeoutOnProgress: true, onprogress: (progress: unknown) => onUpdate?.({ content: [{ type: "text", text: `websearch/fetchurl progress: ${JSON.stringify(progress)}` }], details: { progress } }) });
 			if (!result || typeof result !== "object") return { content: [{ type: "text", text: String(result) }], details: { mcp: result } };
 			const mcp = result as { isError?: boolean; content?: ToolResult["content"] };
 			if (mcp.isError) throw new Error(mcp.content?.map((part) => part.text ?? "").join("\n") || "shared web MCP tool failed");
 			return { content: Array.isArray(mcp.content) ? mcp.content : [{ type: "text", text: JSON.stringify(result) }], details: { mcp: result } };
 		},
 		async close() {
+			closed = true;
 			const current = handle;
 			handle = undefined;
 			starting = undefined;
