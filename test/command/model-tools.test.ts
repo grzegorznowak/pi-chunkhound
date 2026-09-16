@@ -6,7 +6,7 @@ import { loadSettings, saveSettings } from "../../chhound/settings.js";
 import { sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxMeta } from "../../chhound/types.js";
 import { listMcpConnections } from "../../mcp/manager.js";
-import { progressRelay, worktreeOutcomeText } from "../../model-tools.js";
+import { MODEL_WORKTREE_WIDGET_KEY, progressRelay, worktreeOutcomeText } from "../../model-tools.js";
 import { resolveSandboxLocation } from "../../worktree/command.js";
 import { check } from "../lib/checks.js";
 import { fireToolCall, MODEL_ACTIONS, MODEL_TOOL_NAME, MUTATING_ACTIONS, READ_ACTIONS, runExtension, withPiHarness, type PiHarness } from "../lib/pi-harness.js";
@@ -22,6 +22,17 @@ async function errorText(body: () => Promise<unknown>): Promise<string> {
 function forbiddenSchema(node: unknown): boolean {
 	if (!node || typeof node !== "object") return false;
 	return Object.entries(node).some(([key, value]) => ["anyOf", "oneOf", "$ref", "const"].includes(key) || forbiddenSchema(value));
+}
+/** Real git repo + commit in the harness fixture (worktree.create needs one). */
+function makeGitRepo(h: PiHarness, name = "repo"): string {
+	const repo = path.join(h.ctx.cwd, name);
+	fs.mkdirSync(repo, { recursive: true });
+	const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+	git("init", "-q", "-b", "main");
+	fs.writeFileSync(path.join(repo, "a.txt"), "hello\n");
+	git("add", "-A");
+	git("-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-qm", "init");
+	return repo;
 }
 
 describe("model dispatcher contract (initially RED)", () => {
@@ -90,7 +101,8 @@ describe("model dispatcher contract (initially RED)", () => {
 		const updates: Array<Record<string, unknown>> = [];
 		const relay = progressRelay("mcp.connect", (update) => updates.push(update as Record<string, unknown>));
 		relay({ message: "Connected to sb", type: "info" });
-		relay({ kind: "line", line: "Indexing 1/3" });
+		// {kind:"line"} is raw engine output → curated (only WARNING/ERROR pass).
+		relay({ kind: "line", line: "2026-09-17 12:00:02 | WARNING | index:run:9 - slow batch" });
 		relay({ kind: "phase", phase: "index" });
 		relay({ kind: "note", note: "warm start" });
 		relay("plain line");
@@ -107,7 +119,7 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(
 			t,
 			"frames keep their text",
-			updates.map((u) => (u.content as Array<{ text?: string }>)[0]?.text).join(" | ") === "Connected to sb | Indexing 1/3 | [index] | warm start | plain line",
+			updates.map((u) => (u.content as Array<{ text?: string }>)[0]?.text).join(" | ") === "Connected to sb | ⚠ slow batch | [index] | warm start | plain line",
 			JSON.stringify(updates),
 		);
 		const passthrough = { content: [{ type: "text", text: "already pi shaped" }], details: { action: "mcp.connect" } };
@@ -166,9 +178,7 @@ describe("model dispatcher contract (initially RED)", () => {
 
 	test("worktree.create refusal keeps the command's reason", async (t) => withPiHarness(async (h) => {
 		await runExtension(h.pi);
-		const repo = path.join(h.ctx.cwd, "repo");
-		fs.mkdirSync(repo, { recursive: true });
-		execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "pipe" });
+		const repo = makeGitRepo(h);
 		// A non-empty target is refused by oneGoLocation before create runs; the
 		// refusal reason must reach the model instead of a generic message.
 		const location = resolveSandboxLocation(repo, "feature-x", loadSettings(repo).settings);
@@ -178,6 +188,71 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "refusal reason is the error", error.includes("exists and is not empty"), error);
 		await check(t, "generic location failure is not the message", !error.includes("could not select a safe worktree location"), error);
 	}, { hasUI: false }));
+
+	test("TUI worktree.create drives the namespaced widget with quiet toasts", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute("create-tui", { action: "worktree.create", repo, newBranch: "feature-tui" }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		const own = h.widgets.filter((w) => w.key === MODEL_WORKTREE_WIDGET_KEY);
+		const rendered = own.filter((w) => Array.isArray(w.content));
+		await check(t, "widget renders under the namespaced key only", own.length >= 2 && h.widgets.every((w) => w.key === MODEL_WORKTREE_WIDGET_KEY), JSON.stringify(h.widgets.map((w) => w.key)));
+		await check(t, "widget shows the baseline phase before the engine runs", rendered.some((w) => (w.content as string[]).some((line) => line.includes("baseline index"))), JSON.stringify(rendered));
+		await check(t, "widget placement is aboveEditor", rendered.every((w) => (w.options as { placement?: string } | undefined)?.placement === "aboveEditor"));
+		await check(t, "widget is cleared in finally", own[own.length - 1]?.content === undefined, JSON.stringify(own.slice(-1)));
+		const notifies = h.notices;
+		await check(t, "warning toast passes", notifies.some((n) => n.type === "warning" && n.message.includes("Indexing started")), JSON.stringify(notifies));
+		await check(t, "terminal error toast passes", notifies.some((n) => n.type === "error"), JSON.stringify(notifies));
+		await check(
+			t,
+			"transient info toasts are suppressed",
+			!notifies.some((n) => n.type === "info" && (n.message.includes("Creating worktree") || n.message.includes("Indexing "))),
+			JSON.stringify(notifies),
+		);
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		await check(t, "outcome reporting is unchanged", (result.details as { ok?: boolean }).ok === false && /failed/i.test(body), body);
+		await check(t, "partial updates still flow pi-shaped", updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content)), JSON.stringify(updates).slice(0, 200));
+	}, { hasUI: true }));
+
+	test("RPC worktree.create keeps text partials and emits no widget", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute("create-rpc", { action: "worktree.create", repo, newBranch: "feature-rpc" }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		await check(t, "no widget writes in RPC mode", h.widgets.length === 0, JSON.stringify(h.widgets));
+		await check(t, "text partials keep flowing", updates.length > 0, `updates=${updates.length}`);
+		await check(
+			t,
+			"RPC partials are pi-shaped",
+			updates.every((u) => Array.isArray((u as { content?: unknown }).content) && (u as { details?: { action?: string } }).details?.action === "worktree.create"),
+			JSON.stringify(updates).slice(0, 200),
+		);
+		await check(t, "no toasts outside the widget path", h.notices.length === 0, JSON.stringify(h.notices));
+		await check(t, "outcome reporting still works", (result.details as { ok?: boolean }).ok === false, JSON.stringify(result.details));
+	}, { hasUI: true, mode: "rpc" }));
+
+	test("fallback relay curates raw engine lines like the widget does", async (t) => {
+		const updates: Array<Record<string, unknown>> = [];
+		const relay = progressRelay("worktree.create", (update) => updates.push(update as Record<string, unknown>));
+		relay({ kind: "line", line: "2026-09-17 12:00:00 | DEBUG | chunker:index:1 - Parsing 3 files with 2 workers" });
+		relay({ kind: "line", line: "2026-09-17 12:00:01 | INFO | index:run:9 - done" });
+		relay({ kind: "line", line: "2026-09-17 12:00:02 | WARNING | index:run:9 - watchman unavailable" });
+		relay({ kind: "line", line: "2026-09-17 12:00:03 | ERROR | index:run:11 - embedding batch failed" });
+		relay({ kind: "line", line: "plain non-loguru engine output" });
+		relay({ line: "untyped line producer stays raw" });
+		relay({ kind: "phase", phase: "baseline index" });
+		relay({ message: "Indexing …", type: "info" });
+		const texts = updates.map((u) => (u.content as Array<{ text?: string }>)[0]?.text ?? "").join(" | ");
+		await check(t, "DEBUG/INFO noise and non-loguru output are dropped", !/Parsing 3 files|index:run:9 - done|plain non-loguru/.test(texts), texts);
+		await check(t, "warnings and errors surface as ⚠ lines", texts.includes("⚠ watchman unavailable") && texts.includes("⚠ embedding batch failed"), texts);
+		await check(t, "untyped line producers keep their raw text", texts.includes("untyped line producer stays raw"), texts);
+		await check(t, "phase and notify frames are untouched", texts.includes("[baseline index]") && texts.includes("Indexing …"), texts);
+		await check(t, "every emitted update stays pi-shaped", updates.every((u) => Array.isArray(u.content) && (u.details as { action?: string }).action === "worktree.create"), JSON.stringify(updates));
+	});
 
 	test("mcp.connect progress is pi-shaped end to end", async (t) => withPiHarness(async (h) => {
 		const settings = loadSettings().settings;

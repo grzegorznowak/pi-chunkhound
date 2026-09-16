@@ -6,6 +6,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { ensureBaseline } from "./chhound/baseline.js";
 import { chhoundVersion } from "./chhound/cli.js";
 import { findRepoRoot, gitRootOrNull } from "./chhound/git.js";
+import { classifyChhoundLine } from "./chhound/progress.js";
 import { listSandboxes } from "./chhound/sandbox.js";
 import { loadSettings, saveSettings } from "./chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "./chhound/types.js";
@@ -16,6 +17,10 @@ import { buildStatusLines } from "./status/command.js";
 import { createIndexedWorktree, oneGoLocation } from "./worktree/command.js";
 
 export const MODEL_TOOL_NAME = "ch-chhound";
+/** Widget key for model-driven creates — namespaced away from the slash
+ * command's "chhound" so a concurrently running /ch-worktree (pi executes
+ * extension commands even mid-stream) can't clobber the same widget. */
+export const MODEL_WORKTREE_WIDGET_KEY = "chhound:model-worktree";
 export const READ_ACTIONS = ["status", "worktree.list", "mcp.list", "setup.show"] as const;
 export const MUTATING_ACTIONS = ["worktree.create", "baseline.refresh", "mcp.connect", "mcp.disconnect", "setup.update"] as const;
 export const MODEL_ACTIONS = [...READ_ACTIONS, ...MUTATING_ACTIONS] as const;
@@ -110,13 +115,33 @@ function progressText(update: unknown): string | undefined {
 	if (!update || typeof update !== "object") return undefined;
 	const value = update as Record<string, unknown>;
 	if (typeof value.message === "string") return value.message;
-	if (typeof value.line === "string") return value.line;
+	if (typeof value.line === "string") {
+		// Worktree fallback frames are raw engine output: curate like the widget
+		// does (default-deny), so loguru chatter never reaches the tool cell.
+		if (value.kind !== "line") return value.line;
+		const signal = classifyChhoundLine(value.line);
+		return signal.kind === "event" ? `⚠ ${signal.message}` : undefined;
+	}
 	if (typeof value.note === "string") return value.note;
 	if (typeof value.phase === "string") return `[${value.phase}]`;
 	return undefined; // {kind:"watch"|"done"} and unknown UI frames carry no text
 }
 
 export type NotifyFrame = { message: string; type?: string };
+
+/**
+ * TUI toast policy for the widget path: transient info notifies already live in
+ * the widget and the tool cell, so only warnings/errors and the terminal ✓
+ * completion block pop a notification.
+ */
+function quietNotifyUI(ui: ExtensionContext["ui"]): ExtensionContext["ui"] {
+	return {
+		...ui,
+		notify: (message, type) => {
+			if (type !== "info" || message.startsWith("✓ ")) ui.notify(message, type);
+		},
+	};
+}
 
 /**
  * Terminal outcome text for worktree.create, lifted from the reporter's own
@@ -246,7 +271,14 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			if (typeof input.config === "string") flags.config = input.config;
 			if (input.forceReindex) flags["force-reindex"] = true;
 			if (input.refreshBaseline) flags["refresh-baseline"] = true;
-			const created = await createIndexedWorktree(report, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
+			// TUI parity: the slash command's live widget needs a real ui/hasUI
+			// report. RPC/print/json stay on the text-partial fallback — widget
+			// events are not their documented progress surface. opts.connect is
+			// always boolean here, so a UI report adds no connect prompt.
+			const tuiReport = ctx.mode === "tui" && ctx.hasUI
+				? { ...report, hasUI: true, widgetKey: MODEL_WORKTREE_WIDGET_KEY, ui: quietNotifyUI(ctx.ui) }
+				: report;
+			const created = await createIndexedWorktree(tuiReport, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
 			// The ✓ completion/error notify carries the real outcome (elapsed,
 			// baseline copy + top-up vs full index); never claim success on
 			// `ok:false`. Plain-data details only: ok/sandboxId/location.

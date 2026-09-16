@@ -10,7 +10,7 @@ export const MODEL_ACTIONS = [...READ_ACTIONS, ...MUTATING_ACTIONS] as const;
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
 type Command = { handler: (args: string, ctx: any) => unknown | Promise<unknown> };
-export function makePiHarness(cwd: string, options: { hasUI?: boolean; answers?: boolean[] } = {}) {
+export function makePiHarness(cwd: string, options: { hasUI?: boolean; answers?: boolean[]; mode?: "tui" | "rpc" | "print" | "json" } = {}) {
 	const tools = new Map<string, ToolDefinition>();
 	const registrations: ToolDefinition[] = [];
 	const handlers = new Map<string, Handler[]>();
@@ -21,6 +21,7 @@ export function makePiHarness(cwd: string, options: { hasUI?: boolean; answers?:
 	const confirms: Array<{ title: string; message: string }> = [];
 	const notices: Array<{ message: string; type?: string }> = [];
 	const selections: string[] = [];
+	const widgets: Array<{ key: string; content: unknown; options?: unknown }> = [];
 	const answers = [...(options.answers ?? [])];
 	const hasUI = options.hasUI ?? true;
 	const pi = {
@@ -37,19 +38,19 @@ export function makePiHarness(cwd: string, options: { hasUI?: boolean; answers?:
 		appendEntry(customType: string, data: unknown) { entries.push({ type: "custom", customType, data }); },
 	} as unknown as ExtensionAPI;
 	const ctx = {
-		cwd, hasUI, mode: hasUI ? "tui" : "print",
+		cwd, hasUI, mode: options.mode ?? (hasUI ? "tui" : "print"),
 		ui: {
 			// Record attempted noOp calls, but never grant consent without UI.
 			confirm: async (title: string, message: string) => { confirms.push({ title, message }); return hasUI ? (answers.shift() ?? false) : false; },
 			notify: (message: string, type?: string) => { notices.push({ message, type }); },
 			select: async (title: string) => { selections.push(title); return undefined; },
 			input: async () => undefined, editor: async () => undefined, custom: async () => undefined,
-			setStatus() {}, setWidget() {}, addAutocompleteProvider() {},
+			setStatus() {}, setWidget(key: string, content: unknown, options?: unknown) { widgets.push({ key, content, options }); }, addAutocompleteProvider() {},
 		},
 		sessionManager: { getBranch: () => [...entries], getEntries: () => [...entries], getSessionId: () => "test-session", getSessionFile: () => undefined, getCwd: () => cwd },
 		isIdle: () => true, isProjectTrusted: () => true,
 	} as unknown as ExtensionContext;
-	return { pi, ctx, tools, registrations, handlers, commands, activeChanges, entries, confirms, notices, selections };
+	return { pi, ctx, tools, registrations, handlers, commands, activeChanges, entries, confirms, notices, selections, widgets };
 }
 export type PiHarness = ReturnType<typeof makePiHarness>;
 
@@ -74,7 +75,7 @@ export async function fireSessionShutdown(harness: PiHarness): Promise<void> {
 }
 
 /** Factory execution, not session_start: no automatic connection restoration. */
-export async function withPiHarness(body: (h: PiHarness) => Promise<void>, options: { hasUI?: boolean; answers?: boolean[] } = {}): Promise<void> {
+export async function withPiHarness(body: (h: PiHarness) => Promise<void>, options: { hasUI?: boolean; answers?: boolean[]; mode?: "tui" | "rpc" | "print" | "json" } = {}): Promise<void> {
 	const env = snapshotEnv();
 	const root = await makeFixtureRoot("pi-chhound-model-tools-");
 	try {

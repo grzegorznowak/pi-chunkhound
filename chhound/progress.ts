@@ -314,8 +314,9 @@ export interface ProgressUICtx {
 	};
 }
 
-export function createProgressUI(ctx: ProgressUICtx, opts: { watchPath?: string } = {}): ProgressUI {
+export function createProgressUI(ctx: ProgressUICtx, opts: { watchPath?: string; widgetKey?: string } = {}): ProgressUI {
 	const hasUI = ctx.hasUI;
+	const widgetKey = opts.widgetKey ?? KEY;
 	const startedAt = Date.now();
 	const completedBatches = new Set<number>();
 	const state: ProgressState = { phase: "indexing", events: [], tick: 0, elapsedMs: 0 };
@@ -335,7 +336,7 @@ export function createProgressUI(ctx: ProgressUICtx, opts: { watchPath?: string 
 		if (!hasUI) return;
 		state.elapsedMs = Date.now() - startedAt;
 		// The widget is the single progress surface (footer status is unused).
-		ctx.ui.setWidget(KEY, buildWidgetLines(state, palette), { placement: "aboveEditor" });
+		ctx.ui.setWidget(widgetKey, buildWidgetLines(state, palette), { placement: "aboveEditor" });
 	};
 
 	const sampleDb = () => {
@@ -429,7 +430,7 @@ export function createProgressUI(ctx: ProgressUICtx, opts: { watchPath?: string 
 		if (heartbeat) clearInterval(heartbeat);
 		heartbeat = undefined;
 		if (!hasUI) return;
-		ctx.ui.setWidget(KEY, undefined);
+		ctx.ui.setWidget(widgetKey, undefined);
 	};
 
 	return { setLine, setPhase, setNote, setWatchDir, done, elapsed: () => Date.now() - startedAt };

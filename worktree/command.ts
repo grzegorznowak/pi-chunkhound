@@ -475,6 +475,9 @@ export type WorktreeReporter = {
 	cwd: string;
 	hasUI: boolean;
 	ui?: WizardUI;
+	/** Widget key override (default "chhound") — the model path namespaces it so
+	 * a concurrently running /ch-worktree can't clobber the same widget. */
+	widgetKey?: string;
 	pi: ExtensionAPI;
 	state: PluginState;
 	onProgress?: (...updates: unknown[]) => void;
@@ -487,7 +490,7 @@ function reporterNotify(ctx: WorktreeReporter, msg: string, type: "info" | "warn
 }
 
 function reporterProgress(ctx: WorktreeReporter): ProgressUI {
-	if (ctx.hasUI && ctx.ui) return createProgressUI(ctx as ProgressUICtx);
+	if (ctx.hasUI && ctx.ui) return createProgressUI(ctx as ProgressUICtx, { widgetKey: ctx.widgetKey });
 	const startedAt = Date.now();
 	return {
 		setLine: (line) => ctx.onProgress?.({ kind: "line", line }),
@@ -594,7 +597,7 @@ export async function createIndexedWorktree(
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
-				"Progress updates in the footer. Tip: /ch-worktree --no-index creates the worktree without indexing.",
+				"Progress updates above the editor. Tip: /ch-worktree --no-index creates the worktree without indexing.",
 			"warning",
 		);
 		const baseline = await ensureBaseline({
