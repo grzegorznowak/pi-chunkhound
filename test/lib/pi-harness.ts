@@ -66,6 +66,13 @@ export async function fireToolCall(harness: PiHarness, event: { toolName: string
 	return undefined;
 }
 
+/** Fire and await every captured session_shutdown hook (including async cleanup). */
+export async function fireSessionShutdown(harness: PiHarness): Promise<void> {
+	for (const handler of harness.handlers.get("session_shutdown") ?? []) {
+		await handler({ type: "session_shutdown" }, harness.ctx);
+	}
+}
+
 /** Factory execution, not session_start: no automatic connection restoration. */
 export async function withPiHarness(body: (h: PiHarness) => Promise<void>, options: { hasUI?: boolean; answers?: boolean[] } = {}): Promise<void> {
 	const env = snapshotEnv();
