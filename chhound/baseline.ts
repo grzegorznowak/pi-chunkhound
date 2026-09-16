@@ -34,6 +34,8 @@ export interface EnsureBaselineOptions {
 	apiKey?: string;
 	/** Extra args for the priming index (e.g. --no-embeddings in smoke tests). */
 	extraArgs?: string[];
+	/** Abort an in-flight chunkhound indexing process. */
+	signal?: AbortSignal;
 }
 
 const LOCK_FILE = ".prime.lock";
@@ -281,6 +283,7 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 				env: apiKeyEnv(opts.apiKey),
 				onLine: opts.onLine,
 				extraArgs: opts.extraArgs,
+				signal: opts.signal,
 			});
 			if (r.code !== 0) {
 				throw new Error(`baseline index failed (code ${r.code}) — run /ch-setup --verify for configuration help`);
