@@ -10,7 +10,7 @@ import { listSandboxes } from "./chhound/sandbox.js";
 import { loadSettings, saveSettings } from "./chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "./chhound/types.js";
 import { connectEntry, disconnectEntry, resolveSandboxMatches } from "./mcp/command.js";
-import { listMcpConnections } from "./mcp/manager.js";
+import { listMcpConnections, mcpConnectionSummary } from "./mcp/manager.js";
 import { refreshMaterializedConfigs } from "./setup/command.js";
 import { buildStatusLines } from "./status/command.js";
 import { createIndexedWorktree, oneGoLocation } from "./worktree/command.js";
@@ -82,6 +82,40 @@ async function projectRoot(cwd: string): Promise<string> {
 	return (await gitRootOrNull(cwd)) ?? cwd;
 }
 
+/**
+ * Reporter progress → pi tool-update relay.
+ *
+ * The worktree/MCP reporter seams speak UI shapes ({message,type},
+ * {kind:"line",line}, …). pi forwards whatever `onUpdate` receives straight
+ * into the TUI as a partial result and expects a ToolResult patch — forwarding
+ * a raw UI shape makes its renderer read `result.content.filter` on undefined
+ * and crash the process (seen live on mcp.connect). Only pi's shape may pass.
+ */
+export function progressRelay(action: string, onUpdate: ((update: unknown) => void) | undefined): (update: unknown) => void {
+	return (update) => {
+		if (!onUpdate) return;
+		if (update && typeof update === "object" && Array.isArray((update as { content?: unknown }).content)) {
+			onUpdate(update); // already a ToolResult patch (e.g. the web relay)
+			return;
+		}
+		const text = progressText(update);
+		if (text === undefined) return;
+		onUpdate({ content: [{ type: "text", text }], details: { action } });
+	};
+}
+
+/** Text a reporter update should surface; undefined = nothing model-facing. */
+function progressText(update: unknown): string | undefined {
+	if (typeof update === "string") return update;
+	if (!update || typeof update !== "object") return undefined;
+	const value = update as Record<string, unknown>;
+	if (typeof value.message === "string") return value.message;
+	if (typeof value.line === "string") return value.line;
+	if (typeof value.note === "string") return value.note;
+	if (typeof value.phase === "string") return `[${value.phase}]`;
+	return undefined; // {kind:"watch"|"done"} and unknown UI frames carry no text
+}
+
 function updates(settings: ChhoundSettings, input: Input): string[] {
 	const changed: string[] = [];
 	if (typeof input.provider === "string") { settings.embedding = { ...settings.embedding, provider: input.provider }; changed.push("provider"); }
@@ -113,7 +147,7 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 	access(selected, ctx.cwd);
 	const root = await projectRoot(ctx.cwd);
 	const settings = loadSettings(root).settings;
-	const report = { cwd: ctx.cwd, hasUI: false, pi, state, signal, onProgress: onUpdate as ((update: unknown) => void) | undefined };
+	const report = { cwd: ctx.cwd, hasUI: false, pi, state, signal, onProgress: progressRelay(selected, onUpdate as ((update: unknown) => void) | undefined) };
 
 	switch (selected) {
 		case "status": {
@@ -126,7 +160,10 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 		}
 		case "mcp.list": {
 			const connections = listMcpConnections();
-			return text(selected, connections.length ? connections.map((c) => `${c.id}: ${c.worktree}`).join("\n") : "No MCP connections.", { connections });
+			// Plain-data projection only: raw connections hold the live MCP client
+			// (functions + cyclic ajv validators), which breaks pi's session JSON
+			// write and its per-request structuredClone of the message history.
+			return text(selected, connections.length ? connections.map((c) => `${c.id}: ${c.worktree}`).join("\n") : "No MCP connections.", { connections: connections.map(mcpConnectionSummary) });
 		}
 		case "setup.show": {
 			const safe = redact(settings);
@@ -188,7 +225,10 @@ export function registerModelTools(pi: ExtensionAPI, state: PluginState): void {
 		executionMode: "sequential",
 		execute: (_id, input, signal, onUpdate, ctx) => execute(pi, state, input as Input, signal, onUpdate as any, ctx),
 		renderResult(result) {
-			const body = result.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+			// pi forwards onUpdate payloads into this renderer as partial results;
+			// tolerate a content-less carry so its own fallback (which assumes
+			// `result.content` exists) is never reached on a renderer throw.
+			const body = (result.content ?? []).map((part) => part.type === "text" ? part.text : "").join("\n");
 			switch ((result.details as { action?: string } | undefined)?.action) {
 				case "status": case "worktree.list": case "mcp.list": case "setup.show": case "worktree.create": case "baseline.refresh": case "mcp.connect": case "mcp.disconnect": case "setup.update": return new Text(body, 0, 0);
 				default: return new Text(body, 0, 0);

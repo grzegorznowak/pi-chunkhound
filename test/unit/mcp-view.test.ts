@@ -1,10 +1,10 @@
 import { describe, test } from "node:test";
-import { mcpFooterStatusText, mcpToolPrefix, indexLabelFor, indexDisambigToken } from "../../mcp/manager.js";
+import { mcpFooterStatusText, mcpToolPrefix, indexLabelFor, indexDisambigToken, mcpConnectionSummary } from "../../mcp/manager.js";
 import { mcpStatusLines, buildStatusLines } from "../../status/command.js";
 import { check } from "../lib/checks.js";
 import type { SandboxEntry } from "../../chhound/sandbox.js";
 
-// Inventory: 28 checks — 7 legacy checks moved from smoke.ts section 5b (mcp
+// Inventory: 35 checks — 7 legacy checks moved from smoke.ts section 5b (mcp
 // bridge integration) — the pure text helpers over supplied values: tool-prefix
 // derivation and the /ch-status mcp section + footer text (no fs, no
 // registry: the connection lists are arguments, not global state) — plus 16
@@ -18,7 +18,9 @@ import type { SandboxEntry } from "../../chhound/sandbox.js";
 // unreadable library warned instead of a false-empty hint, true-empty hint
 // intact, worktree+baseline listing sections gone). The fs-backed
 // target/picker lists moved to fs/sandbox-catalog.test.ts; the live
-// protocol/replay to engine/mcp-bridge.test.ts.
+// protocol/replay to engine/mcp-bridge.test.ts. The 5 model-facing summary
+// checks pin plain-data projection of live connections (functions/cycles must
+// never reach tool `details` — pi JSON-serializes results and clones history).
 
 /** Sandbox entry builder for the pure join/identity checks below. */
 function mkSandbox(over: { dir?: string; worktree?: string; repoRoot?: string; branch?: string; createdAt?: string; claimedRoot?: string; dirExists?: boolean } = {}): SandboxEntry {
@@ -354,6 +356,57 @@ describe("mcp view", () => {
 			"status: a genuinely empty library keeps the create hint",
 			emptyLibrary.includes("index roots (0):") && emptyLibrary.includes("(no sandboxes — run /ch-worktree <path>)") && !emptyLibrary.includes("⚠"),
 			emptyLibrary,
+		);
+	});
+
+	test("model-facing connection summary is plain data (session-safe)", async (t) => {
+		// The live client is hostile to BOTH serializers pi applies to tool
+		// results: a request-handler function breaks structuredClone (context
+		// emission before every request) and a cyclic validator breaks
+		// JSON.stringify (session-log write). The fixture reproduces both.
+		const client: Record<string, unknown> = { callTool: () => undefined };
+		client.self = client;
+		const live = {
+			id: "conn-a",
+			worktree: "/wt/conn-a",
+			prefix: "chh_a",
+			indexLabel: "chunkhound @ main",
+			toolNames: ["chh_a_search", "chh_a_code_research"],
+			connectedAt: "2026-01-02T00:00:00.000Z",
+			client,
+			transport: { pid: 4711, stderr: { on: () => undefined } },
+			tools: [{ name: "search", inputSchema: { type: "object" } }],
+		};
+		const throws = (fn: () => unknown): boolean => {
+			try {
+				fn();
+				return false;
+			} catch {
+				return true;
+			}
+		};
+		await check(
+			t,
+			"fixture: raw connection is hostile to structuredClone and JSON.stringify",
+			throws(() => structuredClone(live)) && throws(() => JSON.stringify(live)),
+		);
+		const summary = mcpConnectionSummary(live);
+		await check(t, "summary: survives the per-request structuredClone", !throws(() => structuredClone(summary)));
+		await check(
+			t,
+			"summary: survives the session-log JSON round-trip",
+			JSON.stringify(JSON.parse(JSON.stringify(summary))) === JSON.stringify(summary),
+		);
+		await check(
+			t,
+			"summary: exposes only plain connection fields",
+			Object.keys(summary).sort().join(",") === "connectedAt,id,indexLabel,prefix,toolNames,worktree",
+			Object.keys(summary).join(","),
+		);
+		await check(
+			t,
+			"summary: keeps the model-facing identity",
+			summary.id === "conn-a" && summary.toolNames.join(",") === "chh_a_search,chh_a_code_research" && summary.indexLabel === "chunkhound @ main",
 		);
 	});
 });

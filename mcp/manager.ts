@@ -138,6 +138,35 @@ export function getMcpConnection(id: string): McpConnection | undefined {
 }
 
 /**
+ * Plain-data projection of a live connection for model-facing payloads.
+ *
+ * The live object carries an MCP `Client` (request-handler functions and Ajv
+ * validators whose `SchemaEnv.root` is cyclic) plus a `StdioClientTransport`.
+ * pi JSON-serializes every tool result into the session log and
+ * `structuredClone`s the whole message history before every request, so a raw
+ * connection in tool `details` breaks both paths and wedges the session.
+ */
+export interface McpConnectionSummary {
+	id: string;
+	worktree: string;
+	prefix: string;
+	indexLabel: string;
+	toolNames: string[];
+	connectedAt: string;
+}
+
+export function mcpConnectionSummary(conn: McpConnectionSummary): McpConnectionSummary {
+	return {
+		id: conn.id,
+		worktree: conn.worktree,
+		prefix: conn.prefix,
+		indexLabel: conn.indexLabel,
+		toolNames: [...conn.toolNames],
+		connectedAt: conn.connectedAt,
+	};
+}
+
+/**
  * Both storage halves still exist? A `/ch-worktree rm` deletes the sandbox dir
  * first, then the .state sibling — either missing means the sandbox is gone,
  * so a connect that raced the removal must not register (review V2-06).

@@ -1,6 +1,11 @@
 import { describe, test } from "node:test";
+import fs from "node:fs";
+import path from "node:path";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
+import { sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
+import type { SandboxMeta } from "../../chhound/types.js";
 import { listMcpConnections } from "../../mcp/manager.js";
+import { progressRelay } from "../../model-tools.js";
 import { check } from "../lib/checks.js";
 import { fireToolCall, MODEL_ACTIONS, MODEL_TOOL_NAME, MUTATING_ACTIONS, READ_ACTIONS, runExtension, withPiHarness, type PiHarness } from "../lib/pi-harness.js";
 
@@ -59,6 +64,101 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "no consent or wizard for read action", h.confirms.length === 0 && h.selections.length === 0);
 	}, { hasUI: false }));
 
+	test("read-action details survive both serializers pi applies", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		// pi JSON-serializes tool results into the session log and
+		// structuredClone()s the message history before every request; any
+		// non-cloneable/non-JSON value in `details` wedges the whole session.
+		const survives = (value: unknown): boolean => {
+			try {
+				structuredClone(value);
+				JSON.stringify(value);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		for (const action of READ_ACTIONS) {
+			const result = await execute(h, { action });
+			await check(t, `${action}: details are JSON + structuredClone safe`, survives(result.details));
+		}
+	}, { hasUI: false }));
+
+	test("progress relay forwards only pi-shaped partial results", async (t) => {
+		const updates: Array<Record<string, unknown>> = [];
+		const relay = progressRelay("mcp.connect", (update) => updates.push(update as Record<string, unknown>));
+		relay({ message: "Connected to sb", type: "info" });
+		relay({ kind: "line", line: "Indexing 1/3" });
+		relay({ kind: "phase", phase: "index" });
+		relay({ kind: "note", note: "warm start" });
+		relay("plain line");
+		relay({ kind: "watch", dir: "/tmp/x" });
+		relay({ kind: "done" });
+		relay(undefined);
+		await check(t, "UI frames with model-facing text are translated", updates.length === 5, JSON.stringify(updates));
+		await check(
+			t,
+			"every emitted update is a pi partial result",
+			updates.every((u) => Array.isArray(u.content) && (u.details as { action?: string } | undefined)?.action === "mcp.connect"),
+			JSON.stringify(updates),
+		);
+		await check(
+			t,
+			"frames keep their text",
+			updates.map((u) => (u.content as Array<{ text?: string }>)[0]?.text).join(" | ") === "Connected to sb | Indexing 1/3 | [index] | warm start | plain line",
+			JSON.stringify(updates),
+		);
+		const passthrough = { content: [{ type: "text", text: "already pi shaped" }], details: { action: "mcp.connect" } };
+		relay(passthrough);
+		await check(t, "pi-shaped updates pass through untouched", updates[updates.length - 1] === passthrough);
+	});
+
+	test("mcp.connect progress is pi-shaped end to end", async (t) => withPiHarness(async (h) => {
+		const settings = loadSettings().settings;
+		settings.sandboxRoot = path.join(h.ctx.cwd, "sandboxes");
+		saveSettings(settings, "global");
+		const sandboxDir = path.join(settings.sandboxRoot, "sb-test");
+		const stateDir = sandboxStateDir(sandboxDir);
+		const dbDir = sandboxDbDir(sandboxDir);
+		fs.mkdirSync(sandboxDir, { recursive: true });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(dbDir, "fake db bytes\n");
+		const meta: SandboxMeta = {
+			version: 1,
+			worktree: path.join(h.ctx.cwd, "wt"),
+			repoRoot: h.ctx.cwd,
+			branch: "main",
+			baseRef: "main",
+			baseCommit: "0".repeat(40),
+			chhoundVersion: "test",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			copiedFrom: "",
+			dbPath: dbDir,
+		};
+		writeSandboxMeta(stateDir, meta);
+		await runExtension(h.pi);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		// The isolated env points CHHOUND_BINARY at a missing file, so connect
+		// fails — through the same report() path that crashed the TUI before.
+		const updates: unknown[] = [];
+		await tool
+			.execute("connect-test", { action: "mcp.connect", target: "sb-test" }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx)
+			.catch(() => undefined);
+		await check(t, "connect reported progress", updates.length > 0, `updates=${updates.length}`);
+		await check(
+			t,
+			"every connect update is a pi partial result",
+			updates.every(
+				(u) =>
+					Array.isArray((u as { content?: unknown }).content) &&
+					(u as { details?: { action?: string } }).details?.action === "mcp.connect",
+			),
+			JSON.stringify(updates).slice(0, 300),
+		);
+		await check(t, "the failure message reaches the partial", JSON.stringify(updates).includes("Connect failed"), JSON.stringify(updates).slice(0, 300));
+	}));
+
 	test("setup.show never emits persisted API keys", async (t) => withPiHarness(async (h) => {
 		await runExtension(h.pi);
 		const seeded = loadSettings().settings;
@@ -83,6 +183,11 @@ describe("model dispatcher contract (initially RED)", () => {
 			const error = await errorText(async () => { renderer({ content: [{ type: "text", text: `${action}: test result` }], details: { action } }, { expanded: false, isPartial: false }, theme as never, { args: { action }, toolCallId: "test-call", invalidate() {}, lastComponent: undefined, state: {}, cwd: h.ctx.cwd, executionStarted: true, argsComplete: true, isPartial: false, expanded: false, showImages: false, isError: false }); });
 			await check(t, `renders ${action} without throwing`, error === "", error);
 		}
+		// pi forwards partial progress through this renderer as-is; a UI-shaped
+		// update has no `content`, which used to throw here and then crash pi's
+		// fallback (`result.content.filter` on undefined).
+		const partialError = await errorText(async () => { renderer({ details: { action: "mcp.connect" } } as never, { expanded: false, isPartial: true }, theme as never, { args: { action: "mcp.connect" }, toolCallId: "test-call", invalidate() {}, lastComponent: undefined, state: {}, cwd: h.ctx.cwd, executionStarted: true, argsComplete: true, isPartial: true, expanded: false, showImages: false, isError: false }); });
+		await check(t, "renders a content-less progress partial without throwing", partialError === "", partialError);
 	}));
 
 	test("settings enforce call-time access while registration stays unconditional", async (t) => withPiHarness(async (h) => {

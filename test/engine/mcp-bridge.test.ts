@@ -7,14 +7,16 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chhoundBinary } from "../../chhound/cli.js";
 import { listSandboxes, readClaimedRoot } from "../../chhound/sandbox.js";
-import type { ChhoundSettings } from "../../chhound/types.js";
+import type { ChhoundSettings, PluginState } from "../../chhound/types.js";
 import { connectMcp, disconnectMcp, listMcpConnections, reRegisterBridgeTools } from "../../mcp/manager.js";
 import { check } from "../lib/checks.js";
 import { resolveEngineBinary } from "../lib/engine.js";
 import { buildIndexedSandbox } from "../lib/fixtures.js";
+import { makePiHarness } from "../lib/pi-harness.js";
+import { MODEL_TOOL_NAME, registerModelTools } from "../../model-tools.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
-// Inventory: 22 checks — 16 legacy checks moved from smoke.ts section 5b (mcp
+// Inventory: 23 checks — 16 legacy checks moved from smoke.ts section 5b (mcp
 // bridge integration) — the live stdio protocol (--no-daemon single-process
 // server, default daemonized proxy+daemon with lock/daemon.log/root-claim
 // lifecycle) and connectMcp + per-session bridge-tool replay (registration,
@@ -23,7 +25,10 @@ import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } fro
 // connection; index-scoped tools name their target in description and
 // promptSnippet; shared web tools stay unscoped in BOTH fields; unknown tools
 // stay index-scoped (denylist semantics); pinned on the live connection and
-// with fabricated metadata). SELF-OWNED fixture (lib/fixtures
+// with fabricated metadata), plus 1 end-to-end model-facing payload check (the
+// dispatcher's mcp.list run against a live connection must yield JSON +
+// structuredClone-safe details — pi serializes results into the session log and
+// clones the message history every request). SELF-OWNED fixture (lib/fixtures
 // buildIndexedSandbox). The SIGKILL death cluster moved to
 // robustness/engine/mcp-death.test.ts; pure prefix/status/footer text to
 // unit/mcp-view.test.ts; target/picker view to fs/sandbox-catalog.test.ts;
@@ -163,6 +168,41 @@ describe("mcp bridge", () => {
 			// the live connection, then pinned with fabricated metadata below in
 			// case this server lists no web tools.
 			await check(tc, "mcp: connection carries an index label", conn.indexLabel.length > 0, conn.indexLabel);
+			// Model-facing payload safety (regression): running the dispatcher's
+			// mcp.list against THIS live connection must yield details that survive
+			// both serializers pi applies — JSON.stringify (session log) and
+			// structuredClone (per-request context emission). A raw connection
+			// (handler functions + cyclic ajv validators) fails both and wedges the
+			// session, so the payload must be the plain-data summary.
+			const mh = makePiHarness(sandboxDir, { hasUI: false });
+			registerModelTools(mh.pi, {} as PluginState);
+			const listTool = mh.tools.get(MODEL_TOOL_NAME);
+			if (!listTool) throw new Error("model dispatcher did not register");
+			const listResult = await listTool.execute("mcp-list-regression", { action: "mcp.list" }, new AbortController().signal, undefined, mh.ctx);
+			const modelListed = listResult as { details?: unknown };
+			const payloadSafe = (() => {
+				try {
+					structuredClone(modelListed.details);
+					JSON.stringify(modelListed.details);
+					return true;
+				} catch {
+					return false;
+				}
+			})();
+			const payloadDetail = (() => {
+				try {
+					return JSON.stringify(modelListed.details)?.slice(0, 200);
+				} catch {
+					return "(details are not JSON-serializable)";
+				}
+			})();
+			const firstSummary = (modelListed.details as { connections?: Array<Record<string, unknown>> } | undefined)?.connections?.[0];
+			await check(
+				tc,
+				"mcp: mcp.list details are JSON + structuredClone safe with a live connection",
+				payloadSafe && firstSummary?.id === conn.id && !("client" in (firstSummary ?? {})) && !("transport" in (firstSummary ?? {})),
+				payloadDetail,
+			);
 			const scopedDefs = [...firstApi.entries()].filter(([n]) => n.endsWith("_search") || n.endsWith("_code_research") || n.endsWith("_daemon_status"));
 			const webDefs = [...firstApi.entries()].filter(([n]) => n.endsWith("_websearch") || n.endsWith("_fetchurl"));
 			await check(
