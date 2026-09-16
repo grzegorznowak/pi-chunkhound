@@ -1,11 +1,13 @@
 import { describe, test } from "node:test";
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
 import { sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxMeta } from "../../chhound/types.js";
 import { listMcpConnections } from "../../mcp/manager.js";
-import { progressRelay } from "../../model-tools.js";
+import { progressRelay, worktreeOutcomeText } from "../../model-tools.js";
+import { resolveSandboxLocation } from "../../worktree/command.js";
 import { check } from "../lib/checks.js";
 import { fireToolCall, MODEL_ACTIONS, MODEL_TOOL_NAME, MUTATING_ACTIONS, READ_ACTIONS, runExtension, withPiHarness, type PiHarness } from "../lib/pi-harness.js";
 
@@ -112,6 +114,70 @@ describe("model dispatcher contract (initially RED)", () => {
 		relay(passthrough);
 		await check(t, "pi-shaped updates pass through untouched", updates[updates.length - 1] === passthrough);
 	});
+
+	test("worktree create outcome follows the command's notify terminus", async (t) => {
+		// The ✓ block is the only terminal success frame (it carries elapsed +
+		// baseline-copy vs full-index); failures end on the last error frame.
+		const success = [
+			{ message: "Creating worktree /lib/x/wt…", type: "info" },
+			{ message: "⏳ Indexing started — the session is busy until it completes…", type: "warning" },
+			{ message: "✓ new branch x @ /lib/x/wt indexed (baseline copy + top-up) in 0:12.", type: "info" },
+		];
+		await check(t, "success keeps the ✓ baseline copy + top-up block", worktreeOutcomeText(true, success) === success[2]!.message, String(worktreeOutcomeText(true, success)));
+		const full = [...success.slice(0, 2), { message: "✓ branch x @ /lib/x/wt indexed (full index) in 1:02.", type: "info" }];
+		await check(t, "force-reindex reports a full index", worktreeOutcomeText(true, full)?.includes("full index") === true, String(worktreeOutcomeText(true, full)));
+		const afterConnect = [...success, { message: "Connect failed: boom", type: "error" }];
+		await check(t, "a late connect error never flips a successful create", worktreeOutcomeText(true, afterConnect) === success[2]!.message);
+		const failure = [
+			{ message: "Creating worktree /lib/x/wt…", type: "info" },
+			{ message: "Index failed after 0:30 (code 1):\nboom", type: "error" },
+		];
+		await check(t, "failure returns the terminal error", worktreeOutcomeText(false, failure) === failure[1]!.message);
+		await check(t, "no terminal frame falls through to the caller fallback", worktreeOutcomeText(true, []) === undefined && worktreeOutcomeText(false, [{ message: "Creating…", type: "info" }]) === undefined);
+	});
+
+	test("worktree.create failure is reported, never as a created request", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = path.join(h.ctx.cwd, "repo");
+		fs.mkdirSync(repo, { recursive: true });
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: "pipe" });
+		git("init", "-q", "-b", "main");
+		fs.writeFileSync(path.join(repo, "a.txt"), "hello\n");
+		git("add", "-A");
+		git("-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-qm", "init");
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		// CHHOUND_BINARY points at a missing file: git worktree add succeeds, the
+		// baseline/index step fails for real through the same reporter seam.
+		const updates: unknown[] = [];
+		const result = await tool.execute("create-test", { action: "worktree.create", repo, newBranch: "feature-x" }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		await check(t, "never claims a created worktree", !body.includes("Created worktree request"), body);
+		await check(t, "never claims a ✓ index outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "the terminal error reaches the model", /failed/i.test(body), body);
+		await check(t, "details carry ok:false", (result.details as { ok?: boolean }).ok === false, JSON.stringify(result.details));
+		await check(
+			t,
+			"partial updates stay pi-shaped through the notify capture",
+			updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content) && (u as { details?: { action?: string } }).details?.action === "worktree.create"),
+			JSON.stringify(updates).slice(0, 300),
+		);
+	}, { hasUI: false }));
+
+	test("worktree.create refusal keeps the command's reason", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = path.join(h.ctx.cwd, "repo");
+		fs.mkdirSync(repo, { recursive: true });
+		execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo, stdio: "pipe" });
+		// A non-empty target is refused by oneGoLocation before create runs; the
+		// refusal reason must reach the model instead of a generic message.
+		const location = resolveSandboxLocation(repo, "feature-x", loadSettings(repo).settings);
+		fs.mkdirSync(location.wtPath, { recursive: true });
+		fs.writeFileSync(path.join(location.wtPath, "leftover.txt"), "x");
+		const error = await errorText(() => execute(h, { action: "worktree.create", repo, newBranch: "feature-x" }));
+		await check(t, "refusal reason is the error", error.includes("exists and is not empty"), error);
+		await check(t, "generic location failure is not the message", !error.includes("could not select a safe worktree location"), error);
+	}, { hasUI: false }));
 
 	test("mcp.connect progress is pi-shaped end to end", async (t) => withPiHarness(async (h) => {
 		const settings = loadSettings().settings;

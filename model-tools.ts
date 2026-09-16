@@ -116,6 +116,24 @@ function progressText(update: unknown): string | undefined {
 	return undefined; // {kind:"watch"|"done"} and unknown UI frames carry no text
 }
 
+export type NotifyFrame = { message: string; type?: string };
+
+/**
+ * Terminal outcome text for worktree.create, lifted from the reporter's own
+ * notify stream so the model sees the command's exact wording: the `✓ …
+ * indexed (baseline copy + top-up|full index) in Xs` completion block on
+ * success, the last error otherwise. Frames after the terminal notify (a
+ * post-create MCP connect) never flip a successful outcome to a failure.
+ */
+export function worktreeOutcomeText(ok: boolean, frames: readonly NotifyFrame[]): string | undefined {
+	if (!ok) {
+		const errors = frames.filter((frame) => frame.type === "error");
+		return errors[errors.length - 1]?.message;
+	}
+	const done = frames.filter((frame) => frame.type !== "error" && frame.message.startsWith("✓ "));
+	return done[done.length - 1]?.message;
+}
+
 function updates(settings: ChhoundSettings, input: Input): string[] {
 	const changed: string[] = [];
 	if (typeof input.provider === "string") { settings.embedding = { ...settings.embedding, provider: input.provider }; changed.push("provider"); }
@@ -147,7 +165,24 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 	access(selected, ctx.cwd);
 	const root = await projectRoot(ctx.cwd);
 	const settings = loadSettings(root).settings;
-	const report = { cwd: ctx.cwd, hasUI: false, pi, state, signal, onProgress: progressRelay(selected, onUpdate as ((update: unknown) => void) | undefined) };
+	// Terminal outcome checks (worktree.create) read the notify stream, so
+	// capture it alongside the pi-shaped relay. Captured frames are plain
+	// strings and never reach `details`.
+	const notifyFrames: NotifyFrame[] = [];
+	const relay = progressRelay(selected, onUpdate as ((update: unknown) => void) | undefined);
+	const report = {
+		cwd: ctx.cwd,
+		hasUI: false,
+		pi,
+		state,
+		signal,
+		onProgress: (update: unknown) => {
+			if (update && typeof update === "object" && typeof (update as { message?: unknown }).message === "string") {
+				notifyFrames.push({ message: (update as { message: string }).message, type: (update as { type?: string }).type });
+			}
+			relay(update);
+		},
+	};
 
 	switch (selected) {
 		case "status": {
@@ -203,14 +238,22 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			if (input.branch !== undefined && input.newBranch !== undefined) throw new Error("worktree.create accepts either branch or newBranch, not both.");
 			const slot = typeof input.newBranch === "string" ? input.newBranch : typeof input.branch === "string" ? input.branch : undefined;
 			const dest = typeof input.dest === "string" ? path.resolve(ctx.cwd, input.dest) : undefined;
-			const location = await oneGoLocation(repo, slot, settings, dest, () => {});
-			if (!location) throw new Error("worktree.create could not select a safe worktree location.");
+			const location = await oneGoLocation(repo, slot, settings, dest, (message, type) => report.onProgress?.({ message, type }));
+			if (!location) {
+				throw new Error(worktreeOutcomeText(false, notifyFrames) ?? "worktree.create could not select a safe worktree location.");
+			}
 			const flags: Record<string, string | true> = {};
 			if (typeof input.config === "string") flags.config = input.config;
 			if (input.forceReindex) flags["force-reindex"] = true;
 			if (input.refreshBaseline) flags["refresh-baseline"] = true;
-			await createIndexedWorktree(report, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
-			return text(selected, `Created worktree request for ${location.wtPath}.`, { location });
+			const created = await createIndexedWorktree(report, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
+			// The ✓ completion/error notify carries the real outcome (elapsed,
+			// baseline copy + top-up vs full index); never claim success on
+			// `ok:false`. Plain-data details only: ok/sandboxId/location.
+			const details = { ok: created.ok, ...(created.sandboxId ? { sandboxId: created.sandboxId } : {}), location };
+			const summary = worktreeOutcomeText(created.ok, notifyFrames);
+			if (!created.ok) return text(selected, summary ?? `worktree.create failed for ${location.wtPath} (no index was written).`, details);
+			return text(selected, summary ?? `Worktree ready: ${location.wtPath}.`, details);
 		}
 	}
 }
