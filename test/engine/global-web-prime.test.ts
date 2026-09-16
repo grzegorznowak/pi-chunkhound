@@ -2,6 +2,7 @@ import { describe, test } from "node:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { check } from "../lib/checks.js";
+import { resolveEngineBinary } from "../lib/engine.js";
 import { applyEnv, isolatedEnv, makeFakeHome, makeFixtureRoot, snapshotEnv } from "../lib/isolation.js";
 
 // Engine tier: exercises the REAL default prime path (a real chunkhound RW
@@ -26,7 +27,11 @@ describe("shared global web backend prime", () => {
 					llm: { provider: "openai", model: "gpt-4o-mini", apiKey: "dummy-llm" },
 				}),
 			);
-			applyEnv(isolatedEnv({ home }));
+			// Engine resolution must happen BEFORE env isolation (isolatedEnv strips
+			// CHHOUND_BINARY); the resolved binary is re-injected via overrides.
+			const engine = await resolveEngineBinary();
+			console.log(`engine: ${engine.binary} (${engine.version})`);
+			applyEnv(isolatedEnv({ home, overrides: { CHHOUND_BINARY: engine.binary } }));
 
 			const { createGlobalWebManager } = (await import("../../mcp/global-web.js")) as {
 				createGlobalWebManager: (options?: unknown) => { execute: (name: string, input: Record<string, unknown>) => Promise<unknown>; close: () => Promise<void> };
