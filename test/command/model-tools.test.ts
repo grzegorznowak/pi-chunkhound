@@ -66,7 +66,7 @@ describe("model dispatcher contract (initially RED)", () => {
 		seeded.llm = { ...seeded.llm, apiKey: "llm-secret" };
 		saveSettings(seeded, "global");
 		const result = await execute(h, { action: "setup.show" });
-		const body = result.content.map((part) => part.text).join("\n");
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
 		const details = JSON.stringify(result.details);
 		await check(t, "embedding key never emitted", !body.includes("emb-secret") && !details.includes("emb-secret"));
 		await check(t, "llm key never emitted", !body.includes("llm-secret") && !details.includes("llm-secret"));
