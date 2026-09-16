@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -22,9 +23,14 @@ function registrationsNamed(registrations: readonly { name: string }[], names: r
 
 function fixtureEntry(root: string): SandboxEntry {
 	const dir = path.join(root, "fixture-sandbox");
+	const stateDir = path.join(root, ".state", "fixture-sandbox");
+	// main's connect path re-checks storage presence mid-flight (review V2-06),
+	// so the fixture sandbox must exist on disk while connecting.
+	fs.mkdirSync(dir, { recursive: true });
+	fs.mkdirSync(stateDir, { recursive: true });
 	return {
 		dir,
-		stateDir: path.join(root, ".state", "fixture-sandbox"),
+		stateDir,
 		dbSizeBytes: 0,
 		meta: {
 			version: 1,

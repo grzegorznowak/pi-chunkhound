@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { ensureBaseline, listBaselines } from "./chhound/baseline.js";
+import { ensureBaseline } from "./chhound/baseline.js";
 import { chhoundVersion } from "./chhound/cli.js";
 import { findRepoRoot, gitRootOrNull } from "./chhound/git.js";
 import { listSandboxes } from "./chhound/sandbox.js";
@@ -117,7 +117,7 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 
 	switch (selected) {
 		case "status": {
-			const lines = buildStatusLines({ version: await chhoundVersion(), settings, sandboxes: listSandboxes(settings), baselines: listBaselines(settings), conns: listMcpConnections() });
+			const lines = buildStatusLines({ version: await chhoundVersion(), settings, sandboxes: listSandboxes(settings), conns: listMcpConnections() });
 			return text(selected, lines.join("\n"));
 		}
 		case "worktree.list": {
