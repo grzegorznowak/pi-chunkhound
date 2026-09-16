@@ -2,12 +2,12 @@ import * as fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import { parseArgs } from "../chhound/args.js";
-import { baselineDbDirFor, baselineDbPathIn, ensureBaseline, listBaselines } from "../chhound/baseline.js";
+import { baselineDbDirFor, baselineDbPathIn, ensureBaseline, listBaselines, resolveBaselineRef } from "../chhound/baseline.js";
 import { chhoundApiKeyEnv } from "../chhound/cli.js";
 import { expandHome, worktreeArgumentCompletions } from "../chhound/completions.js";
 import { WORKTREE_VALUE_FLAGS } from "../chhound/args.js";
 import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
-import { currentBranch, checkedOutBranches, defaultRemoteBranch, fetchRef, findRepoRoot, gitRootOrNull, gitWorktreeAdd, remoteNames, revParse, runGit } from "../chhound/git.js";
+import { currentBranch, checkedOutBranches, fetchRef, findRepoRoot, gitRootOrNull, gitWorktreeAdd, remoteNames, revParse, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
 import { createProgressUI, formatElapsed, type ProgressUI, type ProgressUICtx } from "../chhound/progress.js";
@@ -418,9 +418,9 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 				createBranch,
 				branch,
 				commitIsh,
-				// Remote-branch checkouts: baseline anchored at the remote ref
-				// itself; the sandbox carries the remote name as its identity.
-				...(remoteRef ? { baseRef: remoteRef, branchLabel: remoteRef } : {}),
+				// Remote-branch checkout: the sandbox carries the remote name as
+				// its identity (the baseline anchors the repo default ref).
+				...(remoteRef ? { branchLabel: remoteRef } : {}),
 				flags,
 			});
 		},
@@ -515,8 +515,6 @@ export async function createIndexedWorktree(
 		createBranch?: string;
 		branch?: string;
 		commitIsh?: string;
-		/** Baseline anchor ref override (PRs: the PR's base branch; remote-branch checkouts: the remote ref). */
-		baseRef?: string;
 		/** Logical branch recorded in meta + summary when the checkout is detached (remote refs, PRs) — otherwise the checkout's branch. */
 		branchLabel?: string;
 		/** PR head branch name — recorded in sandbox meta for /ch-worktree display. */
@@ -540,8 +538,9 @@ export async function createIndexedWorktree(
 		// the indexed root) exist before `git worktree add`.
 		fs.mkdirSync(sandboxDir, { recursive: true });
 		fs.mkdirSync(sandboxStateDir(sandboxDir), { recursive: true });
+		let createdBranchHere = false;
 		try {
-			await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh });
+			({ createdBranch: createdBranchHere } = await gitWorktreeAdd({ cwd: repoRoot, path: wtPath, createBranch, branch, commitIsh }));
 		} catch (err) {
 			notify(err instanceof Error ? err.message : String(err), "error");
 			return { ok: false };
@@ -570,30 +569,12 @@ export async function createIndexedWorktree(
 			return { ok: true, sandboxId };
 		}
 
-		// Anchor the baseline to the LOCAL ref the worktree's tree comes from, so
-		// the top-up stays small. An existing-branch checkout (positional branch,
-		// no --from) → that branch's own local tip. A branch created/derived by
-		// this invocation (-b, wizard, path-derived, no --from) → the source
-		// repo's checked-out branch: git bases `worktree add -b` on the source
-		// HEAD. Detached / --from checkouts → no override (default resolution;
-		// the top-up cost then tracks divergence from the default ref). PRs and
-		// remote-branch checkouts pass an explicit anchor (opts.baseRef) — the
-		// PR's base branch / the remote ref.
-		let baseRef = opts.baseRef;
-		if (!baseRef && !commitIsh) {
-			if (branch) baseRef = branch;
-			else {
-				const headBranch = await currentBranch(repoRoot);
-				if (headBranch !== "(detached)") baseRef = headBranch;
-			}
-		}
-
-		// 1) Baseline (primed/refreshed from the local anchor ref when stale)
+		// 1) Baseline — ALWAYS the repo default ref (or settings.baseline.ref),
+		// never the branch this checkout comes from (operator decision
+		// 2026-09-15). Resolved ONCE and used for both the ensure call and the
+		// watch dir, so the footer observes the exact db being primed.
 		progress.setPhase("baseline index");
-		// Watch the baseline db dir so the footer shows live growth (and
-		// embedding batch progress) during the prime — resolved the same
-		// way ensureBaseline computes it internally.
-		const baselineRef = baseRef ?? (settings.baseline?.ref || (await defaultRemoteBranch(repoRoot)) || "main");
+		const baselineRef = await resolveBaselineRef(repoRoot, settings);
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
@@ -603,7 +584,7 @@ export async function createIndexedWorktree(
 		const baseline = await ensureBaseline({
 			repoRoot,
 			settings,
-			ref: baseRef,
+			ref: baselineRef,
 			onLine: progress.setLine,
 			onNote: (note) => progress.setNote(note),
 			force: flags["refresh-baseline"] === true,
@@ -670,6 +651,12 @@ export async function createIndexedWorktree(
 			baseCommit: baseline.meta.baseCommit,
 			chhoundVersion: baseline.meta.chhoundVersion,
 			createdAt: new Date().toISOString(),
+			// Derived at the git layer from what the add ACTUALLY did: a
+			// path-derived add checks out an existing `<folder>` branch instead
+			// of creating one, so request shape alone cannot tell them apart
+			// (review F2-01). A pre-existing checkout, remote-ref slot or
+			// detached create never reads as deletable on rm.
+			createdBranch: createdBranchHere,
 			copiedFrom: baseline.dbDir,
 			dbPath: dbDir,
 			...(opts.headRef ? { headRef: opts.headRef } : {}),
@@ -824,9 +811,9 @@ export async function runBranchWizard(ctx: WizardCtx, state: PluginState, repoRo
 		createBranch,
 		branch,
 		commitIsh,
-		// Remote-branch checkouts: baseline anchored at the remote ref itself;
-		// the sandbox carries the remote name as its identity.
-		...(remoteRef ? { baseRef: remoteRef, branchLabel: remoteRef } : {}),
+		// Remote-branch checkout: the sandbox carries the remote name as its
+		// identity (the baseline anchors the repo default ref).
+		...(remoteRef ? { branchLabel: remoteRef } : {}),
 		flags: {},
 	});
 	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
@@ -1048,10 +1035,9 @@ export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: strin
 		sandboxDir: pick.value.sandboxDir,
 		wtPath: pick.value.wtPath,
 		settings: host.settings,
-		// Detached at the PR head; baseline anchored at the PR's BASE branch so
-		// the top-up only indexes the PR delta.
+		// Detached at the PR head; the baseline anchors the repo default ref
+		// (operator decision 2026-09-15), never the PR's base branch.
 		commitIsh: host.headSha,
-		baseRef: host.info.baseRefName,
 		branchLabel: slot,
 		headRef: host.info.headRefName,
 		headOid: host.headSha,
@@ -1082,7 +1068,6 @@ export async function runPrOneGo(
 		wtPath: loc.wtPath,
 		settings: host.settings,
 		commitIsh: host.headSha,
-		baseRef: host.info.baseRefName,
 		branchLabel: slot,
 		headRef: host.info.headRefName,
 		headOid: host.headSha,

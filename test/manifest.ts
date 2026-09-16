@@ -20,6 +20,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"command/worktree-manage-rm.test.ts": { tier: "command", subject: "worktree-manage" },
 	"command/worktree-manager-rpc.test.ts": { tier: "command", subject: "worktree-manager-rpc" },
 	"command/worktree-manager-tui.test.ts": { tier: "command", subject: "worktree-manager-tui" },
+	"command/worktree-baseline-anchor.test.ts": { tier: "command", subject: "worktree-baseline-anchor" },
 	"command/worktree-wizard-outcome.test.ts": { tier: "command", subject: "worktree-wizard-outcome" },
 	"engine/baseline.test.ts": { tier: "engine", subject: "baseline" },
 	"engine/global-web-prime.test.ts": { tier: "engine", subject: "global-web-prime" },

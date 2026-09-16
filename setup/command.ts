@@ -277,9 +277,10 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 						return;
 					}
 				}
-				// Baseline ref: the shared index cache is primed at this branch's
-				// commit and every new worktree is seeded from a copy of it, so it
-				// should be the branch worktrees branch off (usually the mainline).
+				// Baseline ref override: the shared index cache is primed at this
+				// ref's commit and every new worktree is seeded from a copy of it.
+				// Leave empty for the repo default branch (the normal policy) and
+				// set it only when default-branch detection is wrong for this repo.
 				const baseRef = await ask(
 					"Baseline ref (branch the shared index cache is primed at)",
 					settings.baseline?.ref ?? "",
