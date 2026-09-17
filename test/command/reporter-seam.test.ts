@@ -1,4 +1,5 @@
 import { describe, test } from "node:test";
+import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -70,6 +71,36 @@ describe("returning cores and reporter seam (initially RED)", () => {
 			await check(t, "SDK boundary stubbed exactly once", connection.mock.callCount() === 1);
 			await check(t, "no interactive flow", h.confirms.length === 0 && h.selections.length === 0);
 		} finally { connection.mock.restore(); }
+	}, { hasUI: false }));
+
+	test("connectEntry success data and disconnectEntry teardown (SDK stub, no spawn)", async (t) => withPiHarness(async (h) => {
+		const connect = t.mock.method(Client.prototype, "connect", async () => undefined);
+		const listTools = t.mock.method(Client.prototype, "listTools", (async () => ({
+			tools: [{ name: "search", description: "fixture", inputSchema: { type: "object" } }],
+		})) as unknown as typeof Client.prototype.listTools);
+		const close = t.mock.method(Client.prototype, "close", async () => undefined);
+		try {
+			const dir = path.join(h.ctx.cwd, "sandbox");
+			const stateDir = path.join(h.ctx.cwd, ".state", "sandbox");
+			fs.mkdirSync(dir, { recursive: true });
+			fs.mkdirSync(stateDir, { recursive: true });
+			const entry: SandboxEntry = {
+				dir, stateDir, dbSizeBytes: 0,
+				meta: { version: 1, worktree: path.join(dir, "tree"), branch: "test", baseRef: "main", baseCommit: "0".repeat(40), chhoundVersion: "fixture", createdAt: new Date(0).toISOString(), copiedFrom: "", dbPath: path.join(h.ctx.cwd, "db") },
+			};
+			const reporter: Reporter = { cwd: h.ctx.cwd, hasUI: false, pi: h.pi, state: {}, onProgress: () => {}, signal: new AbortController().signal };
+			const connected = await mcp.connectEntry(h.pi, reporter, {}, entry, {});
+			await check(t, "success core has ok:true, kind, id and message", connected.ok === true && connected.kind.length > 0 && connected.id === "sandbox" && typeof connected.message === "string" && connected.message.includes("Connected chhound MCP"), JSON.stringify(connected));
+			await check(t, "SDK boundary stubbed exactly once", connect.mock.callCount() === 1 && listTools.mock.callCount() === 1, `connect=${connect.mock.callCount()} listTools=${listTools.mock.callCount()}`);
+			const disconnected = await mcp.disconnectEntry(h.pi, reporter, "sandbox");
+			await check(t, "disconnect success core has ok:true, kind, id and message", disconnected.ok === true && disconnected.kind === "disconnected" && disconnected.id === "sandbox" && typeof disconnected.message === "string", JSON.stringify(disconnected));
+			await check(t, "client closed exactly once", close.mock.callCount() === 1, `close=${close.mock.callCount()}`);
+			await check(t, "no interactive flow", h.confirms.length === 0 && h.selections.length === 0);
+		} finally {
+			connect.mock.restore();
+			listTools.mock.restore();
+			close.mock.restore();
+		}
 	}, { hasUI: false }));
 
 	test("tool reporter gets progress without UI or wizard on early worktree failure", async (t) => withPiHarness(async (h) => {

@@ -578,7 +578,7 @@ export async function createIndexedWorktree(
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
-				"Progress updates above the editor. Tip: /ch-worktree --no-index creates the worktree without indexing.",
+				"Progress updates stream while it runs. Tip: /ch-worktree --no-index creates the worktree without indexing.",
 			"warning",
 		);
 		const baseline = await ensureBaseline({

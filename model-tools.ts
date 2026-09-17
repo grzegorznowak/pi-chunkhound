@@ -288,15 +288,18 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 		}
 		case "mcp.disconnect": {
 			const target = required(selected, input, "target");
-			const match = resolveSandboxMatches(target, settings, ctx.cwd);
-			const id = match.length === 1 ? path.basename(match[0]!.dir) : target;
+			const matches = resolveSandboxMatches(target, settings, ctx.cwd);
+			if (matches.length > 1) throw new Error(`mcp.disconnect target '${target}' is ambiguous (${matches.length} worktrees match); use a unique worktree path or storage id.`);
+			// 0 matches keep the direct connection-ID fallback: a live connection
+			// whose sandbox was already removed is only addressable by id.
+			const id = matches.length === 1 ? path.basename(matches[0]!.dir) : target;
 			const result = await disconnectEntry(pi, report, id);
 			return text(selected, result.message ?? result.kind, { result });
 		}
 		case "baseline.refresh": {
 			const repo = typeof input.repo === "string" ? (await findRepoRoot(path.resolve(ctx.cwd, input.repo))) : await gitRootOrNull(ctx.cwd);
 			if (!repo) throw new Error("baseline.refresh requires repo when the current directory is not a git repository.");
-			const baseline = await ensureBaseline({ repoRoot: repo, settings, ref: typeof input.ref === "string" ? input.ref : undefined, force: input.force === true, signal, onLine: (line) => (onUpdate as any)?.({ content: [{ type: "text", text: line }], details: { action: selected } }) });
+			const baseline = await ensureBaseline({ repoRoot: repo, settings, ref: typeof input.ref === "string" ? input.ref : undefined, force: input.force === true, signal, onLine: (line) => relay({ kind: "line", line }) });
 			return text(selected, `Baseline ${baseline.ref}: ${baseline.reason}`, { baseline });
 		}
 		case "worktree.create": {

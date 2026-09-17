@@ -1,8 +1,9 @@
-import { describe, test } from "node:test";
+import { describe, test, type TestContext } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
 import { globalSettingsPath, projectSettingsPath } from "../../chhound/paths.js";
 import { sandboxConfigPath, sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
@@ -38,6 +39,48 @@ function makeGitRepo(h: PiHarness, name = "repo"): string {
 	git("add", "-A");
 	git("-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-qm", "init");
 	return repo;
+}
+
+/** Sandbox library fixture: storage dir + meta in the hidden state dir. */
+function makeSandbox(h: PiHarness, name: string, worktree: string): string {
+	const dir = path.join(h.ctx.cwd, "sandboxes", name);
+	const stateDir = sandboxStateDir(dir);
+	fs.mkdirSync(dir, { recursive: true });
+	fs.mkdirSync(stateDir, { recursive: true });
+	fs.writeFileSync(sandboxDbDir(dir), "fake db bytes\n");
+	const meta: SandboxMeta = {
+		version: 1,
+		worktree,
+		repoRoot: h.ctx.cwd,
+		branch: "main",
+		baseRef: "main",
+		baseCommit: "0".repeat(40),
+		chhoundVersion: "test",
+		createdAt: "2026-01-01T00:00:00.000Z",
+		copiedFrom: "",
+		dbPath: sandboxDbDir(dir),
+	};
+	writeSandboxMeta(stateDir, meta);
+	return dir;
+}
+
+/** Point the global settings at the fixture sandbox library. */
+function seedSandboxRoot(h: PiHarness): string {
+	const root = path.join(h.ctx.cwd, "sandboxes");
+	saveSettings({ ...loadSettings().settings, sandboxRoot: root }, "global");
+	return root;
+}
+
+function sdkStubs(t: TestContext) {
+	const connect = t.mock.method(Client.prototype, "connect", async () => undefined);
+	const listTools = t.mock.method(Client.prototype, "listTools", (async () => ({
+		tools: [{ name: "search", description: "fixture", inputSchema: { type: "object" } }],
+	})) as unknown as typeof Client.prototype.listTools);
+	const close = t.mock.method(Client.prototype, "close", async () => undefined);
+	return {
+		connect, listTools, close,
+		restore: () => { connect.mock.restore(); listTools.mock.restore(); close.mock.restore(); },
+	};
 }
 
 describe("model dispatcher contract (initially RED)", () => {
@@ -237,6 +280,7 @@ describe("model dispatcher contract (initially RED)", () => {
 			JSON.stringify(updates).slice(0, 200),
 		);
 		await check(t, "no toasts outside the widget path", h.notices.length === 0, JSON.stringify(h.notices));
+		await check(t, "non-TUI progress never claims an editor", !JSON.stringify(updates).includes("editor"), JSON.stringify(updates).slice(0, 300));
 		await check(t, "outcome reporting still works", (result.details as { ok?: boolean }).ok === false, JSON.stringify(result.details));
 	}, { hasUI: true, mode: "rpc" }));
 
@@ -424,6 +468,71 @@ describe("model dispatcher contract (initially RED)", () => {
 		const bad = await errorText(() => execute(h, { action: "setup.update", modelTools: "banana" }));
 		await check(t, "invalid modelTools is rejected with the valid values", /modelTools/.test(bad) && /off, read-only, on/.test(bad), bad);
 		await check(t, "rejected mode never lands in settings", fs.readFileSync(globalSettingsPath(), "utf8") === before);
+	}, { hasUI: false }));
+
+	test("mcp.disconnect rejects ambiguous targets without disconnecting", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		seedSandboxRoot(h);
+		// Two sandboxes whose worktrees share a basename match one target.
+		makeSandbox(h, "sb-one", path.join(h.ctx.cwd, "one", "feature-x"));
+		makeSandbox(h, "sb-two", path.join(h.ctx.cwd, "two", "feature-x"));
+		const error = await errorText(() => execute(h, { action: "mcp.disconnect", target: "feature-x" }));
+		await check(t, "ambiguous target is rejected", /ambiguous/i.test(error), error);
+		await check(t, "ambiguity never reaches the disconnect attempt", !error.includes("Disconnect failed"), error);
+		await check(t, "nothing was disconnected", listMcpConnections().length === 0, JSON.stringify(listMcpConnections()));
+	}, { hasUI: false }));
+
+	test("mcp.disconnect uses a unique sandbox id and the direct id fallback", async (t) => withPiHarness(async (h) => {
+		const stubs = sdkStubs(t);
+		try {
+			await runExtension(h.pi);
+			seedSandboxRoot(h);
+			makeSandbox(h, "sb-live", path.join(h.ctx.cwd, "wt-live"));
+			const connected = await execute(h, { action: "mcp.connect", target: "sb-live" });
+			const core = (connected.details as { result?: { ok?: boolean; kind?: string; id?: string; message?: string } }).result;
+			await check(t, "connectEntry success returns ok/kind/id/message", core?.ok === true && core.kind === "connected" && core.id === "sb-live" && typeof core.message === "string", JSON.stringify(core));
+			const disconnected = await execute(h, { action: "mcp.disconnect", target: "sb-live" });
+			const result = (disconnected.details as { result?: { ok?: boolean; kind?: string; id?: string } }).result;
+			await check(t, "unique sandbox target disconnects the live connection", result?.ok === true && result.kind === "disconnected" && result.id === "sb-live", JSON.stringify(result));
+			await check(t, "connection registry is empty", listMcpConnections().length === 0, JSON.stringify(listMcpConnections()));
+			// A live connection whose sandbox was removed is only addressable by id.
+			makeSandbox(h, "sb-gone", path.join(h.ctx.cwd, "wt-gone"));
+			await execute(h, { action: "mcp.connect", target: "sb-gone" });
+			fs.rmSync(path.join(h.ctx.cwd, "sandboxes", "sb-gone"), { recursive: true, force: true });
+			fs.rmSync(sandboxStateDir(path.join(h.ctx.cwd, "sandboxes", "sb-gone")), { recursive: true, force: true });
+			const fallback = await execute(h, { action: "mcp.disconnect", target: "sb-gone" });
+			const fallbackResult = (fallback.details as { result?: { ok?: boolean; kind?: string; id?: string } }).result;
+			await check(t, "0-match fallback disconnects by direct connection id", fallbackResult?.ok === true && fallbackResult.kind === "disconnected" && fallbackResult.id === "sb-gone", JSON.stringify(fallbackResult));
+		} finally {
+			stubs.restore();
+		}
+	}, { hasUI: false }));
+
+	test("baseline.refresh curates engine lines through the default-deny relay", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		const script = path.join(h.ctx.cwd, "fake-engine");
+		fs.writeFileSync(
+			script,
+			"#!/bin/sh\ncase \"$1\" in\n  --version) echo 9.9.9; exit 0;;\nesac\necho \"2026-09-17 12:00:00 | DEBUG | chunker:index:1 - Parsing 3 files\" >&2\necho \"2026-09-17 12:00:01 | WARNING | index:run:9 - watchman unavailable\" >&2\nexit 0\n",
+			{ mode: 0o755 },
+		);
+		process.env.CHHOUND_BINARY = script;
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute("baseline-test", { action: "baseline.refresh", repo, ref: "main" }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		const rendered = JSON.stringify(updates);
+		await check(t, "DEBUG chatter never reaches the model", updates.length > 0 && !rendered.includes("Parsing 3 files"), rendered.slice(0, 300));
+		await check(t, "classified engine events surface", rendered.includes("watchman unavailable"), rendered.slice(0, 300));
+		await check(
+			t,
+			"every update stays pi-shaped",
+			updates.every((u) => Array.isArray((u as { content?: unknown }).content) && (u as { details?: { action?: string } }).details?.action === "baseline.refresh"),
+			rendered.slice(0, 300),
+		);
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		await check(t, "baseline refresh still reports success", body.includes("Baseline main: "), body);
 	}, { hasUI: false }));
 
 	test("renderResult tolerates every action payload", async (t) => withPiHarness(async (h) => {
