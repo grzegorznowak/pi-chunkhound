@@ -6,9 +6,9 @@ import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
 import { globalSettingsPath, projectSettingsPath } from "../../chhound/paths.js";
-import { sandboxConfigPath, sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
+import { sandboxConfigPath, sandboxDbDir, sandboxStateDir, readSandboxMeta, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxMeta } from "../../chhound/types.js";
-import { listMcpConnections } from "../../mcp/manager.js";
+import { listMcpConnections, disconnectMcp } from "../../mcp/manager.js";
 import { MODEL_WORKTREE_WIDGET_KEY, progressRelay, worktreeOutcomeText } from "../../model-tools.js";
 import { resolveSandboxLocation } from "../../worktree/command.js";
 import { check } from "../lib/checks.js";
@@ -81,6 +81,57 @@ function sdkStubs(t: TestContext) {
 		connect, listTools, close,
 		restore: () => { connect.mock.restore(); listTools.mock.restore(); close.mock.restore(); },
 	};
+}
+
+/**
+ * Minimal chunkhound stand-in for the create path: `--version` plus
+ * `index … --config <cfg>` (writes the db FILE at `database.path` and appends
+ * one JSON line per index run — the same shape the anchor suite uses). `mcp`
+ * is unsupported, so a post-create connect attempt fails AFTER a successful
+ * create, exercising the late-failure path without a real engine.
+ */
+function writeFakeEngine(root: string, opts: { failIndex?: boolean } = {}): string {
+	const script = [
+		`#!${process.execPath}`,
+		`const fs = require("node:fs");`,
+		`const path = require("node:path");`,
+		`const args = process.argv.slice(2);`,
+		`if (args.includes("--version")) { process.stdout.write("chunkhound 0.0.0-fake\\n"); process.exit(0); }`,
+		...(opts.failIndex
+			? [`process.stderr.write("fake engine: index failed\\n"); process.exit(6);`]
+			: [
+				`if (args[0] !== "index") { process.stderr.write("fake engine: unsupported command: " + args.join(" ") + "\\n"); process.exit(2); }`,
+				`const ci = args.indexOf("--config");`,
+				`if (ci < 0 || typeof args[ci + 1] !== "string") { process.stderr.write("fake engine: missing --config\\n"); process.exit(3); }`,
+				`const cfg = JSON.parse(fs.readFileSync(args[ci + 1], "utf8"));`,
+				`const dbPath = cfg && cfg.database && cfg.database.path;`,
+				`if (typeof dbPath !== "string" || !dbPath) { process.stderr.write("fake engine: missing database.path\\n"); process.exit(5); }`,
+				`fs.mkdirSync(path.dirname(dbPath), { recursive: true });`,
+				`fs.writeFileSync(dbPath, "fake-db-bytes");`,
+				`fs.appendFileSync(path.join(path.dirname(__filename), "fake-chhound.log"), JSON.stringify({ dbPath }) + "\\n");`,
+				`process.exit(0);`,
+			]),
+	].join("\n") + "\n";
+	const p = path.join(root, "fake-chhound");
+	fs.writeFileSync(p, script);
+	fs.chmodSync(p, 0o755);
+	return p;
+}
+
+/** db paths recorded for each engine `index` invocation (baseline + top-up). */
+function engineInvocations(root: string): string[] {
+	const p = path.join(root, "fake-chhound.log");
+	if (!fs.existsSync(p)) return [];
+	return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { dbPath: string }).dbPath);
+}
+
+/** Global settings pinned to fixture library roots for a REAL create run. */
+function seedCreateRoots(h: PiHarness): void {
+	saveSettings({ ...loadSettings().settings, sandboxRoot: path.join(h.ctx.cwd, "sandboxes"), baseRoot: path.join(h.ctx.cwd, "bases") }, "global");
+}
+
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content.map((part) => (part.type === "text" ? part.text ?? "" : "")).join("\n");
 }
 
 describe("model dispatcher contract (initially RED)", () => {
@@ -596,4 +647,158 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "unrelated input unchanged", JSON.stringify(event) === before);
 		await check(t, "no confirmations", h.confirms.length === 0);
 	}));
+
+	test("worktree.create success e2e: ✓ completion, ok:true, sandboxId; connect only when requested", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		seedCreateRoots(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const connect = t.mock.method(Client.prototype, "connect", async () => undefined);
+		try {
+			const tool = h.tools.get(MODEL_TOOL_NAME);
+			if (!tool) return;
+			const updates: unknown[] = [];
+			const result = await tool.execute(
+				"create-success",
+				{ action: "worktree.create", repo, newBranch: "feature-ok", connect: false },
+				new AbortController().signal,
+				(update) => { updates.push(update); },
+				h.ctx,
+			);
+			const body = resultText(result);
+			const details = result.details as { ok?: boolean; sandboxId?: string };
+			await check(t, "success body is the reporter's ✓ completion terminus", /^✓ .*indexed \(baseline copy \+ top-up\) in /.test(body), body);
+			await check(t, "details carry ok:true and a non-empty sandboxId", details.ok === true && typeof details.sandboxId === "string" && details.sandboxId.length > 0, JSON.stringify(details));
+			const sandboxId = details.sandboxId ?? "";
+			const sandboxDir = path.join(h.ctx.cwd, "sandboxes", sandboxId);
+			await check(
+				t,
+				"the indexed sandbox exists on disk with its meta",
+				fs.existsSync(sandboxDir) && readSandboxMeta(sandboxStateDir(sandboxDir))?.branch === "feature-ok",
+				sandboxDir,
+			);
+			await check(t, "two engine runs happened (baseline + sandbox top-up)", engineInvocations(h.ctx.cwd).length === 2, JSON.stringify(engineInvocations(h.ctx.cwd)));
+			await check(t, "connect:false never attempts an MCP connect", connect.mock.callCount() === 0 && listMcpConnections().length === 0, `connects=${connect.mock.callCount()}`);
+			await check(
+				t,
+				"success updates stay pi-shaped throughout",
+				updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content) && (u as { details?: { action?: string } }).details?.action === "worktree.create"),
+				JSON.stringify(updates).slice(0, 300),
+			);
+		} finally {
+			connect.mock.restore();
+		}
+	}, { hasUI: false }));
+
+	test("worktree.create connect:true connects only after a successful index", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		seedCreateRoots(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		let engineRunsAtConnect = -1;
+		let createdId: string | undefined;
+		const connect = t.mock.method(Client.prototype, "connect", async () => { engineRunsAtConnect = engineInvocations(h.ctx.cwd).length; });
+		const listTools = t.mock.method(Client.prototype, "listTools", (async () => ({
+			tools: [{ name: "search", description: "fixture", inputSchema: { type: "object" } }],
+		})) as unknown as typeof Client.prototype.listTools);
+		const close = t.mock.method(Client.prototype, "close", async () => undefined);
+		try {
+			const tool = h.tools.get(MODEL_TOOL_NAME);
+			if (!tool) return;
+			const result = await tool.execute(
+				"create-connect",
+				{ action: "worktree.create", repo, newBranch: "feature-connect", connect: true },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			);
+			const body = resultText(result);
+			const details = result.details as { ok?: boolean; sandboxId?: string };
+			createdId = details.sandboxId;
+			await check(t, "create still succeeds with an explicit connect request", /^✓ /.test(body) && details.ok === true && Boolean(details.sandboxId), body);
+			await check(t, "connect is attempted exactly once", connect.mock.callCount() === 1 && listMcpConnections().length === 1, `connects=${connect.mock.callCount()} live=${listMcpConnections().length}`);
+			await check(t, "both index runs completed before the connect handshake", engineRunsAtConnect === 2, `engine runs at connect=${engineRunsAtConnect}`);
+		} finally {
+			if (createdId && listMcpConnections().some((conn) => conn.id === createdId)) await disconnectMcp(createdId).catch(() => undefined);
+			connect.mock.restore();
+			listTools.mock.restore();
+			close.mock.restore();
+		}
+	}, { hasUI: false }));
+
+	test("a late connect failure preserves the create success (ok:true)", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		seedCreateRoots(h);
+		// The fake engine indexes fine but does not implement `mcp`, so the
+		// post-create connect fails for real AFTER the ✓ completion.
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute(
+			"create-late-connect-failure",
+			{ action: "worktree.create", repo, newBranch: "feature-late", connect: true },
+			new AbortController().signal,
+			(update) => { updates.push(update); },
+			h.ctx,
+		);
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the create keeps its ✓ success terminus", /^✓ /.test(body) && details.ok === true && Boolean(details.sandboxId), body);
+		await check(t, "the late connect failure is surfaced without flipping the outcome", JSON.stringify(updates).includes("Connect failed"), JSON.stringify(updates).slice(-400));
+		await check(t, "a failed connect registers no connection", listMcpConnections().length === 0, listMcpConnections().map((conn) => conn.id).join(",") || "(none)");
+	}, { hasUI: false }));
+
+	test("worktree.create connect:true never connects when the index fails", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		seedCreateRoots(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd, { failIndex: true });
+		const connect = t.mock.method(Client.prototype, "connect", async () => undefined);
+		try {
+			const tool = h.tools.get(MODEL_TOOL_NAME);
+			if (!tool) return;
+			const result = await tool.execute(
+				"create-fail-connect",
+				{ action: "worktree.create", repo, newBranch: "feature-fail", connect: true },
+				new AbortController().signal,
+				undefined,
+				h.ctx,
+			);
+			const body = resultText(result);
+			const details = result.details as { ok?: boolean };
+			await check(t, "the failed create reports ok:false and never a ✓ outcome", details.ok === false && !body.startsWith("✓ ") && /failed/i.test(body), body);
+			await check(t, "connect is never attempted before success", connect.mock.callCount() === 0 && listMcpConnections().length === 0, `connects=${connect.mock.callCount()} live=${listMcpConnections().map((conn) => conn.id).join(",") || "(none)"}`);
+		} finally {
+			connect.mock.restore();
+		}
+	}, { hasUI: false }));
+
+	test("worktree.create abort yields no false success and clears the widget", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		seedCreateRoots(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const controller = new AbortController();
+		controller.abort();
+		const updates: unknown[] = [];
+		const result = await tool.execute(
+			"create-abort",
+			{ action: "worktree.create", repo, newBranch: "feature-abort" },
+			controller.signal,
+			(update) => { updates.push(update); },
+			h.ctx,
+		);
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "an aborted create never claims success", details.ok === false && details.sandboxId === undefined && !body.startsWith("✓ "), body);
+		await check(t, "the abort failure reaches the model", /failed|abort/i.test(body), body);
+		await check(t, "an aborted create never spawns the engine", engineInvocations(h.ctx.cwd).length === 0, JSON.stringify(engineInvocations(h.ctx.cwd)));
+		await check(t, "abort updates stay pi-shaped", updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content)), JSON.stringify(updates).slice(0, 200));
+		const own = h.widgets.filter((w) => w.key === MODEL_WORKTREE_WIDGET_KEY);
+		await check(t, "the TUI widget is cleared in the finally", own.length >= 1 && own[own.length - 1]!.content === undefined, JSON.stringify(own.slice(-1)));
+	}, { hasUI: true }));
 });

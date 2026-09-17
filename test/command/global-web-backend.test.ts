@@ -263,7 +263,7 @@ describe("shared global web MCP backend seam (initially RED)", () => {
 			await check(
 				t,
 				`${name} returns an actionable setup error`,
-				Boolean(outcome.error.includes("/ch-setup") && /llm|embedding|provider|model|configure/i.test(outcome.error)),
+				Boolean(outcome.error.includes("/ch-setup") && /global/i.test(outcome.error) && /llm|embedding|provider|model|configure/i.test(outcome.error)),
 				outcome.error || JSON.stringify(outcome.result),
 			);
 		}
@@ -489,5 +489,211 @@ describe("shared global web MCP backend seam (initially RED)", () => {
 		try { await manager.execute("websearch", { query: "after shutdown" }); } catch (error) { shutdownError = String(error); }
 		await check(t, "execute after shutdown reports the closed server", shutdownError.includes("closed"), shutdownError);
 		await check(t, "a late close neither respawns nor touches the backend again", backend.spawns.length === 1 && backend.requests.length === 1, `spawns=${backend.spawns.length} requests=${backend.requests.length}`);
+	}));
+
+	test("startup single-flight: concurrent first calls share one prime and one spawn", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const backend = fakeBackend();
+		let spawns = 0;
+		let releaseSpawn: (() => void) | undefined;
+		const manager = mod.createGlobalWebManager({
+			async primeDatabase(databasePath) {
+				await backend.primeDatabase(databasePath);
+			},
+			spawnServer(spec) {
+				spawns++;
+				backend.spawns.push(spec);
+				// Deferred resolution: both first calls must join this ONE startup.
+				return new Promise<ServerHandle>((resolve) => {
+					releaseSpawn = () => resolve({
+						client: {
+							async callTool(request) {
+								backend.requests.push(request);
+								return { content: [{ type: "text", text: `fixture ${request.name}` }] };
+							},
+							async close() { /* closed by the manager */ },
+						},
+						child: { kill() { return true; } },
+					});
+				});
+			},
+		});
+
+		const first = manager.execute("websearch", { query: "first" });
+		const second = manager.execute("fetchurl", { url: "https://example.invalid/fixture" });
+		const spawnDeadline = Date.now() + 5_000;
+		while (spawns === 0 && Date.now() < spawnDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+		await check(t, "both first calls joined one pending startup", spawns === 1 && backend.primeCalls === 1 && releaseSpawn !== undefined, `spawns=${spawns} primes=${backend.primeCalls}`);
+		releaseSpawn?.();
+		const [a, b] = await Promise.all([first, second]);
+		await check(t, "both calls succeed on the single warm server", a.content[0]?.text === "fixture websearch" && b.content[0]?.text === "fixture fetchurl", JSON.stringify([a.content[0]?.text, b.content[0]?.text]));
+		await check(t, "exactly one spawn served both requests", spawns === 1 && backend.requests.map((r) => r.name).join(",") === "websearch,fetchurl", backend.requests.map((r) => r.name).join(","));
+		await manager.close();
+	}));
+
+	test("startup failure is retryable: a rejecting prime or spawn never wedges the manager", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+
+		// Prime rejects once: the call fails, the next one primes again.
+		const backend = fakeBackend();
+		let primes = 0;
+		let spawns = 0;
+		const manager = mod.createGlobalWebManager({
+			async primeDatabase(databasePath) {
+				if (++primes === 1) throw new Error("prime boom");
+				await backend.primeDatabase(databasePath);
+			},
+			async spawnServer(spec) { spawns++; return backend.spawnServer(spec); },
+		});
+		let primeError = "";
+		try { await manager.execute("websearch", { query: "one" }); } catch (error) { primeError = String(error); }
+		await check(t, "a failed prime fails the call without spawning", primeError.includes("prime boom") && spawns === 0, primeError || `spawns=${spawns}`);
+		const afterPrime = await manager.execute("websearch", { query: "two" });
+		await check(t, "the next call primes again and spawns", afterPrime.content[0]?.text === "fixture websearch" && primes === 2 && spawns === 1, `primes=${primes} spawns=${spawns}`);
+		await manager.close();
+
+		// Spawn rejects once: the call fails, the next one spawns a fresh server.
+		const backend2 = fakeBackend();
+		let spawns2 = 0;
+		const manager2 = mod.createGlobalWebManager({
+			primeDatabase: backend2.primeDatabase,
+			async spawnServer(spec) {
+				spawns2++;
+				if (spawns2 === 1) throw new Error("spawn boom");
+				return backend2.spawnServer(spec);
+			},
+		});
+		let spawnError = "";
+		try { await manager2.execute("fetchurl", { url: "https://example.invalid/fixture" }); } catch (error) { spawnError = String(error); }
+		await check(t, "a failed spawn fails the call", spawnError.includes("spawn boom") && spawns2 === 1, spawnError);
+		const afterSpawn = await manager2.execute("fetchurl", { url: "https://example.invalid/fixture" });
+		await check(t, "the next call spawns again and succeeds", afterSpawn.content[0]?.text === "fixture fetchurl" && spawns2 === 2 && backend2.requests.length === 1, `spawns=${spawns2} requests=${backend2.requests.length}`);
+		await manager2.close();
+	}));
+
+	test("shutdown during startup closes the resolving runtime and publishes nothing", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		let clientCloses = 0;
+		let childKills = 0;
+		let spawns = 0;
+		let requests = 0;
+		let releaseSpawn: (() => void) | undefined;
+		const manager = mod.createGlobalWebManager({
+			async primeDatabase() { /* ready immediately */ },
+			spawnServer() {
+				spawns++;
+				// Pending startup: the handle only exists once the test resolves it.
+				return new Promise<ServerHandle>((resolve) => {
+					releaseSpawn = () => resolve({
+						client: {
+							async callTool() { requests++; return {}; },
+							async close() { clientCloses++; },
+						},
+						child: { kill() { childKills++; return true; } },
+					});
+				});
+			},
+		});
+
+		const pending = manager.execute("websearch", { query: "during startup" }).then(() => "resolved", (error) => String(error));
+		await new Promise((resolve) => setImmediate(resolve));
+		await manager.close();
+		await check(t, "close while the spawn is pending reaches no runtime and opens no new startup", spawns === 1 && requests === 0, `spawns=${spawns} requests=${requests}`);
+		releaseSpawn?.();
+		const outcome = await pending;
+		await check(t, "the in-flight call fails as closed during startup", outcome.includes("closed during startup"), outcome);
+		await check(t, "the resolved handle is closed and killed, never published", clientCloses === 1 && childKills === 1, `closes=${clientCloses} kills=${childKills}`);
+		const later = await manager.execute("fetchurl", { url: "https://example.invalid/fixture" }).then(() => "resolved", (error) => String(error));
+		await check(t, "later calls report the manager closed and spawn nothing new", later.includes("is closed") && spawns === 1, later);
+	}));
+
+	test("execute forwards the call signal and a pi-shaped progress bridge to the SDK client", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		type CallOptions = { signal?: AbortSignal; onprogress?: (progress: unknown) => void };
+		let seen: CallOptions | undefined;
+		let requestName = "";
+		const manager = mod.createGlobalWebManager({
+			async primeDatabase() { /* ready immediately */ },
+			async spawnServer() {
+				return {
+					client: {
+						async callTool(request, _schema?: unknown, options?: CallOptions) {
+							requestName = request.name;
+							seen = options;
+							return { content: [{ type: "text", text: `fixture ${request.name}` }] };
+						},
+						async close() { /* closed by the manager */ },
+					},
+					child: { kill() { return true; } },
+				};
+			},
+		});
+
+		const signal = new AbortController().signal;
+		const updates: ToolResult[] = [];
+		const result = await manager.execute("websearch", { query: "forwarded" }, signal, (update) => updates.push(update));
+		await check(t, "the SDK request keeps the tool name", requestName === "websearch", requestName);
+		await check(t, "the caller's abort signal is forwarded to client.callTool", seen?.signal === signal);
+		await check(t, "an onprogress handler is installed on the request", typeof seen?.onprogress === "function");
+		await check(t, "no progress update is fabricated before the server reports", updates.length === 0);
+		const progress = { progress: 2, total: 5, message: "searching" };
+		seen!.onprogress!(progress);
+		await check(
+			t,
+			"progress reaches onUpdate as a pi-shaped partial",
+			updates.length === 1
+				&& updates[0]!.content[0]?.text === `websearch/fetchurl progress: ${JSON.stringify(progress)}`
+				&& (updates[0]!.details as { progress?: unknown }).progress === progress,
+			JSON.stringify(updates[0]),
+		);
+		await check(t, "the call result itself is untouched by the progress bridge", result.content[0]?.text === "fixture websearch");
+
+		// A call without an onUpdate consumer: progress must be a silent no-op.
+		seen = undefined;
+		await manager.execute("fetchurl", { url: "https://example.invalid/fixture" }, undefined, undefined);
+		seen!.onprogress?.({ progress: 1 });
+		await check(t, "progress without a consumer is a no-op", updates.length === 1, `updates=${updates.length}`);
+		await manager.close();
+	}));
+
+	test("project-only provider settings never satisfy the shared backend (global-only, no fallback)", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		// Global has no providers; the project overlay is fully configured. The
+		// shared backend reads GLOBAL settings only, so the overlay must not
+		// satisfy it and there is no fallback to the project-scoped config.
+		saveSettings({ version: 1 }, "global");
+		saveSettings(
+			{
+				version: 1,
+				embedding: { provider: "project-embedding-provider", model: "project-embedding-model", rerankModel: "project-reranker" },
+				llm: { provider: "project-llm-provider", model: "project-llm-model" },
+			},
+			"project",
+			h.ctx.cwd,
+		);
+		const backend = fakeBackend();
+		const manager = mod.createGlobalWebManager({ spawnServer: backend.spawnServer, primeDatabase: backend.primeDatabase });
+		for (const name of ["websearch", "fetchurl"] as const) {
+			const outcome = await manager
+				.execute(name, name === "websearch" ? { query: "fixture" } : { url: "https://example.invalid/fixture" })
+				.then(() => "", (error) => String(error));
+			await check(
+				t,
+				`${name} fails with the global setup error instead of using the project overlay`,
+				outcome.includes("Global websearch/fetchurl") && outcome.includes("/ch-setup"),
+				outcome,
+			);
+		}
+		await check(t, "a project-only config never primes or spawns the shared server", backend.primeCalls === 0 && backend.spawns.length === 0, `primes=${backend.primeCalls} spawns=${backend.spawns.length}`);
+		await manager.close();
 	}));
 });

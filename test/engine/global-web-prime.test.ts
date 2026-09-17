@@ -52,6 +52,26 @@ async function loadManager() {
 	};
 }
 
+/**
+ * Spawn/prime/connect a REAL manager with NO injected transport: the default
+ * spawn path must open the primed DB with its own `mcp --no-daemon --read-only`
+ * runtime. The web call itself is expected to fail at the tool level (an
+ * unreachable loopback URL) — reaching it at all means the read-only runtime
+ * started and opened the primed DB.
+ */
+async function realManagerOutcome(): Promise<string> {
+	const { createGlobalWebManager } = await loadManager();
+	const manager = createGlobalWebManager();
+	try {
+		const result = (await manager.execute("fetchurl", { url: "http://127.0.0.1:1/never" })) as { content?: Array<{ text?: string }> };
+		return result?.content?.[0]?.text ?? "(empty result)";
+	} catch (error) {
+		return String(error);
+	} finally {
+		await manager.close();
+	}
+}
+
 /** Fake runtime spawn: records specs, never starts a second real server. */
 function fakeRuntime(spawns: Array<{ args: readonly string[]; cwd: string }>) {
 	return {
@@ -188,6 +208,15 @@ describe("shared global web backend prime", () => {
 			const after = await fs.stat(dbPath);
 			await check(t, "valid symlinked-XDG cache is reused (no re-prime)", before.ino === after.ino && before.mtimeMs === after.mtimeMs, `ino ${before.ino}->${after.ino}, mtime ${before.mtimeMs}->${after.mtimeMs}`);
 			await check(t, "the engine claim is unchanged after reuse", (JSON.parse(await fs.readFile(`${dbPath}.root.json`, "utf8")) as { indexed_root_path?: string }).indexed_root_path === canonical);
+		});
+	});
+
+	test("the manager's own read-only spawn opens the primed DB", async (t) => {
+		await withGlobalWebFixture(async () => {
+			const outcome = await realManagerOutcome();
+			await check(t, "the default spawn starts the runtime against the primed DB", !outcome.includes("could not start shared chunkhound web MCP server"), outcome.slice(0, 400));
+			await check(t, "the tool call reached the real runtime (tool-level failure, not an open failure)", outcome.includes("fetchurl failed"), outcome.slice(0, 400));
+			await check(t, "the runtime never refuses the primed DB root", !/indexed.?root|mismatch|DuckDBIndexedRootMismatch/i.test(outcome), outcome.slice(0, 400));
 		});
 	});
 });
