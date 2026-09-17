@@ -326,7 +326,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 					notify("A PR URL takes no branch argument — the sandbox branch is pull/<n>.", "error");
 					return;
 				}
-				await runPrOneGo(wctx, state, prFromArg, flags, dest);
+				await runPrOneGo(wctx, state, prFromArg, flags, { dest });
 				return;
 			}
 			const requestedPath = wtArg ? path.resolve(ctx.cwd, wtArg) : undefined;
@@ -1046,23 +1046,26 @@ export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: strin
 	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
 }
 
-/** One-go PR path (/ch-worktree <PR URL> [--dest …]): fully non-interactive. */
+/** One-go PR path (/ch-worktree <PR URL> [--dest …]): fully non-interactive.
+ * Returning core: the slash path ignores the outcome, the model path reports it
+ * (ok/sandboxId/location). `connect` stays explicit for the model path so a
+ * tool create never hits the interactive post-create connect prompt. */
 export async function runPrOneGo(
 	ctx: WorktreeReporter,
 	state: PluginState,
 	pr: PrRef,
 	flags: Record<string, string | true>,
-	dest?: string,
-): Promise<void> {
+	opts: { dest?: string; connect?: boolean } = {},
+): Promise<{ ok: boolean; sandboxId?: string; location?: { sandboxDir: string; wtPath: string } }> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => reporterNotify(ctx, msg, type);
 	const cwdRoot = await gitRootOrNull(ctx.cwd);
 	const discovery = loadSettings(cwdRoot ?? ctx.cwd).settings;
 	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
-	if (!host) return;
+	if (!host) return { ok: false };
 	const slot = prSlot(pr.number);
-	const loc = await oneGoLocation(host.repoRoot, slot, host.settings, dest, notify);
-	if (!loc) return;
-	await createIndexedWorktree(ctx, state, {
+	const loc = await oneGoLocation(host.repoRoot, slot, host.settings, opts.dest, notify);
+	if (!loc) return { ok: false };
+	const created = await createIndexedWorktree(ctx, state, {
 		repoRoot: host.repoRoot,
 		sandboxDir: loc.sandboxDir,
 		wtPath: loc.wtPath,
@@ -1071,8 +1074,10 @@ export async function runPrOneGo(
 		branchLabel: slot,
 		headRef: host.info.headRefName,
 		headOid: host.headSha,
+		connect: opts.connect,
 		flags,
 	});
+	return { ok: created.ok, ...(created.sandboxId ? { sandboxId: created.sandboxId } : {}), location: loc };
 }
 
 /** One-go location guards — notify + undefined when the location is blocked

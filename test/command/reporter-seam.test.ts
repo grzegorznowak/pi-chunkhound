@@ -34,6 +34,10 @@ function reporterCallSites(reporter: Reporter, entry: SandboxEntry) {
 	void worktree.createIndexedWorktree(reporter, reporter.state, opts);
 	const prContext: Parameters<typeof worktree.runPrOneGo>[0] = reporter;
 	void prContext;
+	// The model path needs the PR one-go OUTCOME (ok/sandboxId/location) that
+	// the slash path ignoring the result never needed: Promise<void> is RED.
+	const prCreate: Promise<{ ok: boolean; sandboxId?: string }> = worktree.runPrOneGo(reporter, reporter.state, { owner: "ghuser", repo: "add", number: 1 }, {}, {});
+	void prCreate;
 	const location: typeof worktree.oneGoLocation = worktree.oneGoLocation;
 	void location;
 	const connection: Promise<CoreResult> = mcp.connectEntry(reporter.pi, reporter, reporter.state, entry, {});
