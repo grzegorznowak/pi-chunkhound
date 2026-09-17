@@ -29,6 +29,7 @@ export const manifest: Readonly<Record<string, TestClassification>> = {
 	"engine/pr-baseline.test.ts": { tier: "engine", subject: "pr-baseline" },
 	"engine/sandbox-hotstart.test.ts": { tier: "engine", subject: "sandbox-hotstart" },
 	"fs/baseline-gc.test.ts": { tier: "fs", subject: "baseline-gc" },
+	"fs/baseline-abort.test.ts": { tier: "fs", subject: "baseline-abort" },
 	"fs/completions.test.ts": { tier: "fs", subject: "completions" },
 	"fs/config.test.ts": { tier: "fs", subject: "config" },
 	"fs/copy-tree.test.ts": { tier: "fs", subject: "copy-tree" },

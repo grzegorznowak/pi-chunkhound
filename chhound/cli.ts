@@ -64,6 +64,13 @@ function appendCapped(buf: string, text: string, cap: number): string {
 
 export function runChhound(args: string[], opts: RunChhoundOptions = {}): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
+		// A pre-aborted signal must never spawn the engine at all.
+		if (opts.signal?.aborted) {
+			const err = new Error(`chhound ${args[0] ?? "run"} aborted before start`);
+			err.name = "AbortError";
+			reject(err);
+			return;
+		}
 		const child = spawn(chhoundBinary(), args, {
 			cwd: opts.cwd,
 			env: { ...process.env, ...opts.env },
@@ -88,14 +95,19 @@ export function runChhound(args: string[], opts: RunChhoundOptions = {}): Promis
 			}
 		};
 
+		const onAbort = () => child.kill("SIGTERM");
+		// The abort listener outlives a completed run otherwise — a long-lived
+		// signal would accumulate one killed-child closure per call.
+		const settle = () => opts.signal?.removeEventListener("abort", onAbort);
 		child.stdout.on("data", (d: Buffer) => onData(d, "out"));
 		child.stderr.on("data", (d: Buffer) => onData(d, "err"));
-		child.on("error", (e) => reject(e));
+		child.on("error", (e) => { settle(); reject(e); });
 		child.on("close", (code) => {
+			settle();
 			if (pending.trim() && opts.onLine) opts.onLine(pending.trim());
 			resolve({ code: code ?? -1, stdout, stderr });
 		});
-		opts.signal?.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+		opts.signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 
