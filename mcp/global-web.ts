@@ -16,8 +16,17 @@ type WebToolName = "websearch" | "fetchurl";
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details: unknown };
 export type SpawnSpec = { command: string; args: readonly string[]; cwd: string; env?: Record<string, string> };
 type ServerHandle = {
-	client: { callTool(request: { name: string; arguments: Record<string, unknown> }, options?: unknown, extra?: unknown): Promise<unknown>; close(): Promise<void> };
+	client: {
+		callTool(request: { name: string; arguments: Record<string, unknown> }, options?: unknown, extra?: unknown): Promise<unknown>;
+		close(): Promise<void>;
+		/** SDK Client close hook: fires when the child/daemon dies unexpectedly. */
+		onclose?: () => void;
+	};
 	child: { kill(signal?: NodeJS.Signals | number): boolean | void };
+	/** Set by a spawner when the client closed before its caller could install
+	 * its own hook (died during the connect handshake). Never publish such a
+	 * handle as the live one. */
+	dead?: boolean;
 };
 type Options = Partial<{
 	spawnServer(spec: SpawnSpec): Promise<ServerHandle>;
@@ -48,16 +57,21 @@ async function defaultSpawnServer(spec: SpawnSpec): Promise<ServerHandle> {
 		if (text) console.error(`[chhound-global-web] ${text}`);
 	});
 	const client = new Client({ name: "pi-chhound", version: "0.1.0" }, { capabilities: {} });
+	const handle: ServerHandle = {
+		client,
+		child: { kill(signal) { const pid = transport.pid; return pid === null ? false : (() => { try { process.kill(pid, signal); return true; } catch { return false; } })() } },
+	};
+	// Record a close that lands before the caller can install its own hook: the
+	// SDK can fire onclose as early as the connect handshake (the child dies
+	// immediately), and a corpse must never be published as the live handle.
+	client.onclose = () => { handle.dead = true; };
 	try {
 		await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
 	} catch (cause) {
 		await transport.close().catch(() => undefined);
 		throw new Error(`could not start shared chunkhound web MCP server: ${(cause as Error).message}`);
 	}
-	return {
-		client,
-		child: { kill(signal) { const pid = transport.pid; return pid === null ? false : (() => { try { process.kill(pid, signal); return true; } catch { return false; } })() } },
-	};
+	return handle;
 }
 
 /**
@@ -79,9 +93,22 @@ async function hasDuckDbHeader(databasePath: string): Promise<boolean> {
 	} catch { return false; }
 }
 
-/** The engine's own root normalization for the sidecar (`Path.absolute()` + posix). */
-function engineRoot(p: string): string {
-	return path.resolve(p).split(path.sep).join("/");
+/**
+ * The root the engine records in the claim sidecar, in its own format
+ * (`Path.absolute()` + posix) applied to the CANONICAL root: the engine
+ * resolves `target_dir` — symlinks included — before any sidecar compare or
+ * claim (`Config.target_dir.resolve()`; hotstart.ts's engineClaimValue does
+ * the same). A lexical `path.resolve` would treat a symlinked
+ * XDG_STATE_HOME as a different root on every session and needlessly rebuild
+ * a perfectly good cache. Falls back to the unresolved form only when the
+ * dir does not exist yet.
+ */
+async function engineRoot(p: string): Promise<string> {
+	try {
+		return (await fs.realpath(p)).split(path.sep).join("/");
+	} catch {
+		return path.resolve(p).split(path.sep).join("/");
+	}
 }
 
 /**
@@ -94,8 +121,11 @@ async function readClaimedRoot(databasePath: string): Promise<string | null | un
 	let raw: string;
 	try {
 		raw = await fs.readFile(`${databasePath}.root.json`, "utf8");
-	} catch {
-		return undefined;
+	} catch (err) {
+		// Missing is the legacy-absent case; any other read failure (EACCES,
+		// ELOOP, …) is not an absent claim — treat it as malformed so the
+		// disposable web cache is rebuilt rather than trusted.
+		return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? undefined : null;
 	}
 	try {
 		const parsed = JSON.parse(raw) as { indexed_root_path?: unknown };
@@ -107,16 +137,23 @@ async function readClaimedRoot(databasePath: string): Promise<string | null | un
 
 async function defaultPrimeDatabase(databasePath: string): Promise<void> {
 	const dir = path.dirname(databasePath);
-	if (await hasDuckDbHeader(databasePath)) {
-		const claimed = await readClaimedRoot(databasePath);
-		if (claimed === undefined || claimed === engineRoot(dir)) return;
-		// Pre-fix caches were primed from a disposable temp cwd, so the engine
-		// stamped that (now deleted) root and every open under the global dir is
-		// refused. A web cache is disposable — rebuild it under the right root.
-		await fs.rm(databasePath, { force: true });
-		await fs.rm(`${databasePath}.root.json`, { force: true });
-		await fs.rm(`${databasePath}.wal`, { force: true });
-	}
+	// Evaluate the DB file and the claim sidecar INDEPENDENTLY. A stale or
+	// malformed claim must never wedge priming just because the DB itself is
+	// missing or corrupt (the engine fails closed on the sidecar alone), while
+	// a valid cache with a matching claim — or with no claim at all (legacy
+	// DB) — is reused untouched. Pre-fix caches were primed from a disposable
+	// temp cwd, so the engine stamped that (now deleted) root and every open
+	// under the global dir is refused; a web cache is disposable, so rebuild
+	// it under the right root.
+	const hasDb = await hasDuckDbHeader(databasePath);
+	const claimed = await readClaimedRoot(databasePath);
+	if (hasDb && (claimed === undefined || claimed === (await engineRoot(dir)))) return;
+	// Regeneration required: remove ONLY the disposable web-cache artifacts
+	// (db/claim/wal — this directory holds no other databases) so the engine
+	// can create a consistent cache under the right root.
+	await fs.rm(databasePath, { force: true });
+	await fs.rm(`${databasePath}.root.json`, { force: true });
+	await fs.rm(`${databasePath}.wal`, { force: true });
 	await fs.mkdir(dir, { recursive: true });
 	const settings = loadSettings().settings;
 	// Prime under the SAME indexed root the runtime server opens from: the
@@ -158,8 +195,28 @@ export function createGlobalWebManager(options: Options = {}): GlobalWebManager 
 			await primeDatabase(databasePath);
 			const configPath = materializeConfig(dir, { settings: loadSettings().settings, dbDir: databasePath, extraExcludes: WEB_CACHE_EXCLUDES });
 			const next = await spawnServer({ command: chhoundBinary(), args: ["mcp", "--no-daemon", "--read-only", "--config", configPath], cwd: dir, env: process.env as Record<string, string> });
+			// Unexpected server death: hook the SDK Client's own close callback
+			// (same pattern as mcp/manager.ts's connect path, which must not
+			// overwrite transport.onclose either). The identity guard makes a late
+			// close from an already-replaced server a no-op; clearing BOTH the
+			// stale handle and the settled `starting` promise is what lets the
+			// next call respawn instead of reusing the corpse.
+			next.client.onclose = () => {
+				if (handle === next) {
+					handle = undefined;
+					starting = undefined;
+				}
+			};
+			// A close during the handshake (recorded by the spawner's early hook)
+			// must fail this attempt and leave nothing published: the cleared
+			// `starting` sends the next call through a fresh spawn.
+			if (next.dead) {
+				await next.client.close().catch(() => undefined);
+				try { next.child.kill("SIGTERM"); } catch { /* already gone */ }
+				throw new Error("shared websearch/fetchurl server died during startup");
+			}
 			// Shutdown can land while the first spawn is in flight; never leave an
-			// orphan holding the stdio pipes.
+			// orphan holding the stdio pipes (or publish a handle for it).
 			if (closed) {
 				await next.client.close().catch(() => undefined);
 				try { next.child.kill("SIGTERM"); } catch { /* already gone */ }

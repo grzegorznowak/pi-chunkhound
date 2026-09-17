@@ -154,4 +154,40 @@ describe("shared global web backend prime", () => {
 			await check(t, "the rebuilt cache opens with the real runtime server", opened.ok, opened.error);
 		});
 	});
+
+	test("symlinked XDG_STATE_HOME: the canonical claim is reused without re-priming", async (t) => {
+		await withGlobalWebFixture(async (home) => {
+			const { createGlobalWebManager } = await loadManager();
+			// A symlinked state home is the regression: the engine resolves
+			// target_dir (symlinks included) before claiming, so the manager must
+			// compare the claim against the canonical root — a lexical comparison
+			// rebuilds a valid cache on every session.
+			const realState = path.join(home, "real-state");
+			await fs.mkdir(realState, { recursive: true });
+			const linkState = path.join(home, "state-link");
+			await fs.symlink(realState, linkState, "dir");
+			process.env.XDG_STATE_HOME = linkState;
+			const globalDir = path.join(linkState, "pi-chhound", "global");
+			const dbPath = path.join(globalDir, "web.duckdb");
+
+			// First call: the REAL prime creates the DB; the engine stamps the claim.
+			const spawns: Array<{ args: readonly string[]; cwd: string }> = [];
+			const first = createGlobalWebManager(fakeRuntime(spawns));
+			await first.execute("fetchurl", { url: "http://127.0.0.1:1/never" }).catch(() => undefined);
+			await first.close();
+			const sidecar = JSON.parse(await fs.readFile(`${dbPath}.root.json`, "utf8")) as { indexed_root_path?: string };
+			const canonical = (await fs.realpath(globalDir)).split(path.sep).join("/");
+			await check(t, "the engine stamps the canonical (realpath) root, not the symlink form", sidecar.indexed_root_path === canonical, String(sidecar.indexed_root_path));
+
+			// Second call: reuse must not rebuild the DB. A rebuild deletes and
+			// recreates the file (new inode); reuse leaves it untouched.
+			const before = await fs.stat(dbPath);
+			const second = createGlobalWebManager(fakeRuntime(spawns));
+			await second.execute("fetchurl", { url: "http://127.0.0.1:1/never" }).catch(() => undefined);
+			await second.close();
+			const after = await fs.stat(dbPath);
+			await check(t, "valid symlinked-XDG cache is reused (no re-prime)", before.ino === after.ino && before.mtimeMs === after.mtimeMs, `ino ${before.ino}->${after.ino}, mtime ${before.mtimeMs}->${after.mtimeMs}`);
+			await check(t, "the engine claim is unchanged after reuse", (JSON.parse(await fs.readFile(`${dbPath}.root.json`, "utf8")) as { indexed_root_path?: string }).indexed_root_path === canonical);
+		});
+	});
 });

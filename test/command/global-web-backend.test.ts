@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test, type TestContext } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { saveSettings } from "../../chhound/settings.js";
 import { check } from "../lib/checks.js";
@@ -16,6 +17,7 @@ type ServerHandle = {
 	client: {
 		callTool(request: McpRequest, options?: { signal?: AbortSignal; onProgress?: (progress: unknown) => void }): Promise<unknown>;
 		close(): Promise<void>;
+		onclose?: () => void;
 	};
 	child: { kill(signal?: NodeJS.Signals | number): boolean | void };
 };
@@ -56,6 +58,81 @@ function configPathFrom(spec: SpawnSpec): string | undefined {
 	const index = spec.args.indexOf("--config");
 	return index >= 0 ? spec.args[index + 1] : undefined;
 }
+
+const GLOBAL_WEB_SETTINGS = {
+	version: 1 as const,
+	embedding: { provider: "global-embedding-provider", model: "global-embedding-model", rerankModel: "global-reranker" },
+	llm: { provider: "global-llm-provider", model: "global-llm-model" },
+};
+
+/** The shared dir the manager resolves from XDG_STATE_HOME. */
+function globalStateDir(): string {
+	return path.join(process.env.XDG_STATE_HOME!, "pi-chhound", "global");
+}
+
+async function fileExists(p: string): Promise<boolean> {
+	try { await fs.stat(p); return true; } catch { return false; }
+}
+
+/** The canonical root the engine itself stamps into the claim sidecar. */
+async function canonicalRoot(dir: string): Promise<string> {
+	return (await fs.realpath(dir)).split(path.sep).join("/");
+}
+
+/** Seed a web-cache state: valid fixture DB or corrupt bytes, claim, wal. */
+async function seedCache(databasePath: string, claim: string | null | undefined, options: { validDb: boolean; wal?: boolean }): Promise<void> {
+	await fs.mkdir(path.dirname(databasePath), { recursive: true });
+	await fs.writeFile(databasePath, options.validDb ? await fs.readFile(EMPTY_DUCKDB_FIXTURE) : Buffer.from("not a duckdb file"));
+	if (claim !== undefined) await fs.writeFile(`${databasePath}.root.json`, claim === null ? "{ not a duckdb claim" : JSON.stringify({ version: 1, indexed_root_path: claim }));
+	if (options.wal) await fs.writeFile(`${databasePath}.wal`, "wal-fixture");
+}
+
+type FakeBackend = {
+	spawns: SpawnSpec[];
+	handles: ServerHandle[];
+	requests: McpRequest[];
+	primeCalls: number;
+	/** Per-call hook; unset returns a successful fixture result. */
+	callTool?: (request: McpRequest) => unknown;
+	spawnServer(spec: SpawnSpec): Promise<ServerHandle>;
+	primeDatabase(databasePath: string): Promise<void>;
+};
+
+/** Injected runtime transport: records spawns/handles/requests, never starts a process. */
+function fakeBackend(): FakeBackend {
+	const backend: FakeBackend = {
+		spawns: [],
+		handles: [],
+		requests: [],
+		primeCalls: 0,
+		async primeDatabase(databasePath) {
+			backend.primeCalls++;
+			await fs.mkdir(path.dirname(databasePath), { recursive: true });
+			await fs.copyFile(EMPTY_DUCKDB_FIXTURE, databasePath);
+		},
+		async spawnServer(spec) {
+			backend.spawns.push(spec);
+			const handle: ServerHandle = {
+				client: {
+					async callTool(request) {
+						backend.requests.push(request);
+						const hook = backend.callTool;
+						if (hook) return await hook(request);
+						return { content: [{ type: "text", text: `fixture ${request.name}` }] };
+					},
+					async close() { /* closed by the manager */ },
+				},
+				child: { kill() { return true; } },
+			};
+			backend.handles.push(handle);
+			return handle;
+		},
+	};
+	return backend;
+}
+
+/** The default prime path spawns a real engine; the harness points CHHOUND_BINARY at a missing file. */
+const ENGINE_UNAVAILABLE = "could not start shared chunkhound web MCP server";
 
 describe("shared global web MCP backend seam (initially RED)", () => {
 	test("lazy spawn uses one warm read-only global server and shutdown closes it", async (t) => withPiHarness(async (h) => {
@@ -191,5 +268,226 @@ describe("shared global web MCP backend seam (initially RED)", () => {
 			);
 		}
 		await check(t, "configuration error never primes or spawns", spawns === 0 && primes === 0, `spawns=${spawns} primes=${primes}`);
+	}));
+
+	test("cache identity: a missing or corrupt DB with a stale claim is cleaned and regenerated", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const globalDir = globalStateDir();
+		const databasePath = path.join(globalDir, "web.duckdb");
+		const claimPath = `${databasePath}.root.json`;
+		const walPath = `${databasePath}.wal`;
+
+		// Corrupt DB + a claim for a different root + a leftover wal: the claim is
+		// disposable on its own, so priming must not wedge on it.
+		await seedCache(databasePath, "/some/other/root", { validDb: false, wal: true });
+		const corrupt = fakeBackend();
+		const corruptManager = mod.createGlobalWebManager({ spawnServer: corrupt.spawnServer });
+		let corruptError = "";
+		try { await corruptManager.execute("websearch", { query: "fixture" }); } catch (error) { corruptError = String(error); }
+		await corruptManager.close();
+		await check(t, "corrupt DB: regeneration is attempted through the engine prime", corruptError.includes(ENGINE_UNAVAILABLE), corruptError);
+		await check(t, "corrupt DB: db, claim and wal are all removed before regeneration", !(await fileExists(databasePath)) && !(await fileExists(claimPath)) && !(await fileExists(walPath)));
+		await check(t, "corrupt DB: the runtime spawn is never reached", corrupt.spawns.length === 0, `spawns=${corrupt.spawns.length}`);
+
+		// Missing DB + a malformed (non-JSON) claim: the engine fails closed on the
+		// sidecar alone, so the stale sidecar must be removed even without a DB.
+		await fs.rm(globalDir, { recursive: true, force: true });
+		await fs.mkdir(globalDir, { recursive: true });
+		await fs.writeFile(claimPath, "{ not json");
+		const malformed = fakeBackend();
+		const malformedManager = mod.createGlobalWebManager({ spawnServer: malformed.spawnServer });
+		let malformedError = "";
+		try { await malformedManager.execute("websearch", { query: "fixture" }); } catch (error) { malformedError = String(error); }
+		await malformedManager.close();
+		await check(t, "missing DB: malformed claim forces regeneration", malformedError.includes(ENGINE_UNAVAILABLE), malformedError);
+		await check(t, "missing DB: the malformed claim is removed", !(await fileExists(claimPath)));
+		await check(t, "missing DB: the runtime spawn is never reached", malformed.spawns.length === 0, `spawns=${malformed.spawns.length}`);
+	}));
+
+	test("cache identity: a valid matching cache is reused and an absent-claim legacy cache is preserved", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const globalDir = globalStateDir();
+		const databasePath = path.join(globalDir, "web.duckdb");
+		const claimPath = `${databasePath}.root.json`;
+
+		// Matching claim: the engine stamped the canonical root, so the cache is
+		// valid and must be reused without deleting/re-priming it.
+		await seedCache(databasePath, "placeholder", { validDb: true, wal: true });
+		await fs.writeFile(claimPath, JSON.stringify({ version: 1, indexed_root_path: await canonicalRoot(globalDir) }));
+		const matching = fakeBackend();
+		const matchingManager = mod.createGlobalWebManager({ spawnServer: matching.spawnServer });
+		const matchingResult = await matchingManager.execute("fetchurl", { url: "https://example.invalid/fixture" });
+		await check(t, "matching cache: call reaches the runtime on the existing DB", matchingResult.content[0]?.text === "fixture fetchurl" && matching.spawns.length === 1, matchingResult.content[0]?.text ?? "no result");
+		await check(t, "matching cache: claim and wal are left untouched", await fileExists(claimPath) && await fileExists(`${databasePath}.wal`));
+		await matchingManager.close();
+
+		// Legacy cache: a valid DB with no sidecar at all must also be preserved
+		// (the engine treats a missing sidecar as a legacy DB and allows the open).
+		await fs.rm(globalDir, { recursive: true, force: true });
+		await seedCache(databasePath, undefined, { validDb: true });
+		const legacy = fakeBackend();
+		const legacyManager = mod.createGlobalWebManager({ spawnServer: legacy.spawnServer });
+		const legacyResult = await legacyManager.execute("fetchurl", { url: "https://example.invalid/fixture" });
+		await check(t, "absent-claim legacy cache: preserved and reused", legacyResult.content[0]?.text === "fixture fetchurl" && legacy.spawns.length === 1 && !(await fileExists(claimPath)), legacyResult.content[0]?.text ?? "no result");
+		await legacyManager.close();
+	}));
+
+	test("cache identity: a symlinked XDG_STATE_HOME compares the claim against the realpath root", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const realState = path.join(h.ctx.cwd, "real-state");
+		const linkState = path.join(h.ctx.cwd, "state-link");
+		await fs.mkdir(realState, { recursive: true });
+		await fs.symlink(realState, linkState, "dir");
+		process.env.XDG_STATE_HOME = linkState;
+		const globalDir = globalStateDir();
+		const databasePath = path.join(globalDir, "web.duckdb");
+		const claimPath = `${databasePath}.root.json`;
+
+		// The engine resolves target_dir (symlinks included) before claiming, so a
+		// canonical claim must match even though the manager's dir path is lexical.
+		await seedCache(databasePath, "placeholder", { validDb: true, wal: true });
+		const canonical = await canonicalRoot(globalDir);
+		await fs.writeFile(claimPath, JSON.stringify({ version: 1, indexed_root_path: canonical }));
+		const matching = fakeBackend();
+		const matchingManager = mod.createGlobalWebManager({ spawnServer: matching.spawnServer });
+		let matchingError = "";
+		let matchingText = "";
+		try { matchingText = (await matchingManager.execute("fetchurl", { url: "https://example.invalid/fixture" })).content[0]?.text ?? ""; } catch (error) { matchingError = String(error); }
+		await check(t, "canonical claim under a symlinked state home: reused, no re-prime", matchingError === "" && matchingText === "fixture fetchurl" && matching.spawns.length === 1, matchingError || `text=${matchingText} spawns=${matching.spawns.length}`);
+		await check(t, "canonical claim: cache artifacts untouched", await fileExists(claimPath) && await fileExists(`${databasePath}.wal`));
+		await matchingManager.close();
+
+		// A lexical (symlink-form) claim is what the engine would refuse — it
+		// canonicalizes the root — so the disposable cache must be rebuilt.
+		await seedCache(databasePath, path.resolve(globalDir), { validDb: true, wal: true });
+		const lexical = fakeBackend();
+		const lexicalManager = mod.createGlobalWebManager({ spawnServer: lexical.spawnServer });
+		let lexicalError = "";
+		try { await lexicalManager.execute("fetchurl", { url: "https://example.invalid/fixture" }); } catch (error) { lexicalError = String(error); }
+		await lexicalManager.close();
+		await check(t, "lexical claim: regeneration is attempted (engine unavailable)", lexicalError.includes(ENGINE_UNAVAILABLE), lexicalError);
+		await check(t, "lexical claim: db, claim and wal are cleaned", !(await fileExists(databasePath)) && !(await fileExists(claimPath)) && !(await fileExists(`${databasePath}.wal`)));
+		await check(t, "lexical claim: no runtime spawn before a successful prime", lexical.spawns.length === 0, `spawns=${lexical.spawns.length}`);
+	}));
+
+	test("dead shared server: client close clears the stale handle so the next call respawns once", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const backend = fakeBackend();
+		const manager = mod.createGlobalWebManager({ spawnServer: backend.spawnServer, primeDatabase: backend.primeDatabase });
+
+		await manager.execute("websearch", { query: "first" });
+		await check(t, "first call spawns one server and makes one request", backend.spawns.length === 1 && backend.requests.length === 1, `spawns=${backend.spawns.length} requests=${backend.requests.length}`);
+		const deadClose = backend.handles[0]!.client.onclose;
+		await check(t, "the manager installs an SDK close hook on the live client", typeof deadClose === "function");
+
+		// Unexpected death: the SDK Client fires its own close callback.
+		deadClose?.();
+		const second = await manager.execute("websearch", { query: "after death" });
+		await check(t, "the next call respawns exactly once and serves the request", backend.spawns.length === 2 && backend.requests.length === 2 && second.content[0]?.text === "fixture websearch", second.content[0]?.text ?? `spawns=${backend.spawns.length}`);
+
+		// A late close from the dead server must not clear the replacement.
+		deadClose?.();
+		const third = await manager.execute("websearch", { query: "third" });
+		await check(t, "a late close from the dead server cannot invalidate the replacement", backend.spawns.length === 2 && backend.requests.length === 3 && third.content[0]?.text === "fixture websearch", `spawns=${backend.spawns.length} requests=${backend.requests.length}`);
+		await manager.close();
+	}));
+
+	test("cache identity: an unreadable claim sidecar is not treated as absent", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const globalDir = globalStateDir();
+		const databasePath = path.join(globalDir, "web.duckdb");
+		const claimPath = `${databasePath}.root.json`;
+		await seedCache(databasePath, undefined, { validDb: true });
+		// Self-referential symlink: readFile fails with ELOOP — the sidecar is
+		// present but unreadable, which is not the legacy "no claim" case.
+		await fs.rm(claimPath, { force: true });
+		await fs.symlink(claimPath, claimPath);
+		const backend = fakeBackend();
+		const manager = mod.createGlobalWebManager({ spawnServer: backend.spawnServer });
+		let error = "";
+		try { await manager.execute("websearch", { query: "fixture" }); } catch (cause) { error = String(cause); }
+		await manager.close();
+		await check(t, "unreadable claim forces regeneration through the prime", error.includes(ENGINE_UNAVAILABLE), error);
+		await check(t, "unreadable claim is cleared for regeneration", !(await fileExists(claimPath)));
+		await check(t, "the runtime spawn is never reached", backend.spawns.length === 0, `spawns=${backend.spawns.length}`);
+	}));
+
+	test("dead shared server: a close during startup is never published and the next call retries", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const backend = fakeBackend();
+		let connects = 0;
+		const connect = t.mock.method(Client.prototype, "connect", async function (this: Client) {
+			connects += 1;
+			if (connects === 1) this.onclose?.(); // child dies during the handshake
+		});
+		const callTool = t.mock.method(Client.prototype, "callTool", (async () => ({ content: [{ type: "text", text: "fixture websearch" }] })) as unknown as typeof Client.prototype.callTool);
+		try {
+			const manager = mod.createGlobalWebManager({ primeDatabase: backend.primeDatabase });
+			let error = "";
+			try { await manager.execute("websearch", { query: "first" }); } catch (cause) { error = String(cause); }
+			await check(t, "a startup death fails the call instead of publishing a corpse", error.includes("died during startup"), error);
+			const result = await manager.execute("websearch", { query: "retry" });
+			await check(t, "the next call retries through a fresh spawn and succeeds", result.content[0]?.text === "fixture websearch" && connects === 2, `connects=${connects} text=${result.content[0]?.text}`);
+			await manager.close();
+		} finally {
+			connect.mock.restore();
+			callTool.mock.restore();
+		}
+	}));
+
+	test("shared server: tool-level failures never invalidate or respawn the live server", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const backend = fakeBackend();
+		const manager = mod.createGlobalWebManager({ spawnServer: backend.spawnServer, primeDatabase: backend.primeDatabase });
+
+		// MCP error RESULT: a tool failure, not a dead server.
+		backend.callTool = () => ({ isError: true, content: [{ type: "text", text: "Search failed: rate limited" }] });
+		let resultError = "";
+		try { await manager.execute("websearch", { query: "boom" }); } catch (error) { resultError = String(error); }
+		await check(t, "an MCP error result surfaces to the caller", resultError.includes("rate limited"), resultError);
+		await check(t, "an MCP error result keeps the same live server", backend.spawns.length === 1 && backend.handles.length === 1, `spawns=${backend.spawns.length}`);
+
+		// Thrown request error: still a live client (e.g. timeout), no respawn.
+		backend.callTool = () => { throw new Error("request timed out"); };
+		let thrownError = "";
+		try { await manager.execute("websearch", { query: "boom again" }); } catch (error) { thrownError = String(error); }
+		await check(t, "a thrown request error surfaces to the caller", thrownError.includes("request timed out"), thrownError);
+		await check(t, "a thrown request error does not respawn", backend.spawns.length === 1, `spawns=${backend.spawns.length}`);
+
+		backend.callTool = undefined;
+		const recovered = await manager.execute("websearch", { query: "ok" });
+		await check(t, "the same warm server serves the next call", recovered.content[0]?.text === "fixture websearch" && backend.spawns.length === 1 && backend.requests.length === 3, `spawns=${backend.spawns.length} requests=${backend.requests.length}`);
+		await manager.close();
+	}));
+
+	test("shared server: shutdown wins over a late client close", async (t) => withPiHarness(async (h) => {
+		const mod = await loadGlobalWeb(t);
+		if (!mod) return;
+		saveSettings(GLOBAL_WEB_SETTINGS, "global");
+		const backend = fakeBackend();
+		const manager = mod.createGlobalWebManager({ spawnServer: backend.spawnServer, primeDatabase: backend.primeDatabase });
+
+		await manager.execute("websearch", { query: "first" });
+		const lateClose = backend.handles[0]!.client.onclose;
+		await manager.close();
+		lateClose?.();
+		let shutdownError = "";
+		try { await manager.execute("websearch", { query: "after shutdown" }); } catch (error) { shutdownError = String(error); }
+		await check(t, "execute after shutdown reports the closed server", shutdownError.includes("closed"), shutdownError);
+		await check(t, "a late close neither respawns nor touches the backend again", backend.spawns.length === 1 && backend.requests.length === 1, `spawns=${backend.spawns.length} requests=${backend.requests.length}`);
 	}));
 });
