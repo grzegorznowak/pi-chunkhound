@@ -5,6 +5,8 @@ import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { ensureBaseline } from "./chhound/baseline.js";
 import { chhoundVersion } from "./chhound/cli.js";
+import { expandHome } from "./chhound/completions.js";
+import { insideChunkhoundRoot } from "./chhound/config.js";
 import { findRepoRoot, gitRootOrNull } from "./chhound/git.js";
 import { classifyChhoundLine } from "./chhound/progress.js";
 import { listSandboxes } from "./chhound/sandbox.js";
@@ -159,7 +161,29 @@ export function worktreeOutcomeText(ok: boolean, frames: readonly NotifyFrame[])
 	return done[done.length - 1]?.message;
 }
 
-function updates(settings: ChhoundSettings, input: Input): string[] {
+/** Argument summary for the consent dialog: fixed allowlist, clipped and
+ * bounded — unknown fields (and anything secret-shaped) never surface. */
+const CONSENT_FIELDS = ["target", "repo", "branch", "newBranch", "from", "dest", "config", "ref", "provider", "model", "rerankModel", "llmProvider", "llmModel", "baselineRef", "sandboxRoot"] as const;
+const CONSENT_VALUE_LIMIT = 40;
+const CONSENT_DETAIL_LIMIT = 160;
+export function consentSummary(action: string, input: Input): string {
+	const parts: string[] = [];
+	for (const key of CONSENT_FIELDS) {
+		const value = input[key];
+		if (typeof value === "string" && value.trim()) {
+			const clipped = value.length > CONSENT_VALUE_LIMIT ? `${value.slice(0, CONSENT_VALUE_LIMIT - 1)}…` : value;
+			parts.push(`${key}=${clipped}`);
+		} else if (typeof value === "boolean" && value) {
+			parts.push(key);
+		} else if (typeof value === "number") {
+			parts.push(`${key}=${value}`);
+		}
+	}
+	const detail = parts.join(" ").slice(0, CONSENT_DETAIL_LIMIT);
+	return `Allow ch-chhound to run ${action}${detail ? `\n${detail}` : ""}?`;
+}
+
+function updates(settings: ChhoundSettings, input: Input, cwd: string): string[] {
 	const changed: string[] = [];
 	if (typeof input.provider === "string") { settings.embedding = { ...settings.embedding, provider: input.provider }; changed.push("provider"); }
 	if (typeof input.model === "string") { settings.embedding = { ...settings.embedding, model: input.model }; changed.push("model"); }
@@ -175,9 +199,22 @@ function updates(settings: ChhoundSettings, input: Input): string[] {
 		if (!Number.isFinite(input.baselineMaxAge) || Number(input.baselineMaxAge) <= 0) throw new Error("setup.update requires baselineMaxAge to be positive.");
 		settings.baseline = { ...settings.baseline, maxAgeDays: Number(input.baselineMaxAge) }; changed.push("baselineMaxAge");
 	}
-	if (typeof input.sandboxRoot === "string") { settings.sandboxRoot = path.resolve(input.sandboxRoot); changed.push("sandboxRoot"); }
+	if (typeof input.sandboxRoot === "string") {
+		const base = path.resolve(cwd, expandHome(input.sandboxRoot));
+		if (insideChunkhoundRoot(base)) {
+			throw new Error(`setup.update sandboxRoot must be outside any chunkhound index root — ${base} or a parent contains a .chunkhound.json.`);
+		}
+		settings.sandboxRoot = base;
+		changed.push("sandboxRoot");
+	}
 	if (typeof input.autoReconnect === "boolean") { settings.autoReconnect = input.autoReconnect; changed.push("autoReconnect"); }
-	if (typeof input.modelTools === "string") { settings.modelTools = input.modelTools as ChhoundSettings["modelTools"]; changed.push("modelTools"); }
+	if (typeof input.modelTools === "string") {
+		if (input.modelTools !== "off" && input.modelTools !== "read-only" && input.modelTools !== "on") {
+			throw new Error(`setup.update requires modelTools to be one of off, read-only, on (got '${input.modelTools}').`);
+		}
+		settings.modelTools = input.modelTools;
+		changed.push("modelTools");
+	}
 	return changed;
 }
 
@@ -187,8 +224,10 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 		throw new Error(`Unknown ch-chhound action '${String(action)}'. Supported actions: ${MODEL_ACTIONS.join(", ")}.`);
 	}
 	const selected = action as ModelAction;
-	access(selected, ctx.cwd);
+	// Resolve the repo root first: policy enforcement and dispatch must read the
+	// same settings scope (a project overlay at the git root governs both).
 	const root = await projectRoot(ctx.cwd);
+	access(selected, root);
 	const settings = loadSettings(root).settings;
 	// Terminal outcome checks (worktree.create) read the notify stream, so
 	// capture it alongside the pi-shaped relay. Captured frames are plain
@@ -230,11 +269,15 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			return text(selected, JSON.stringify(safe, null, 2), { settings: safe });
 		}
 		case "setup.update": {
-			const changed = updates(settings, input);
+			// Global-only mutation: never let a project overlay leak into the global
+			// file. Materialized configs are refreshed from the reloaded MERGED
+			// settings so project overlays stay in effect for existing indexes.
+			const globalSettings = loadSettings().settings;
+			const changed = updates(globalSettings, input, ctx.cwd);
 			if (!changed.length) throw new Error("setup.update requires at least one settings field.");
-			const file = saveSettings(settings, "global");
-			const refreshed = refreshMaterializedConfigs(settings);
-			return text(selected, `Updated settings: ${changed.join(", ")} → ${file}${refreshed.length ? `\nRefreshed ${refreshed.length} config(s).` : ""}`, { changed, file });
+			const file = saveSettings(globalSettings, "global");
+			const refreshed = refreshMaterializedConfigs(loadSettings(root).settings);
+			return text(selected, `Updated global settings: ${changed.join(", ")} → ${file}${refreshed.length ? `\nRefreshed ${refreshed.length} config(s).` : ""}`, { changed, file, scope: "global" });
 		}
 		case "mcp.connect": {
 			const target = required(selected, input, "target");
@@ -314,7 +357,7 @@ export function registerModelTools(pi: ExtensionAPI, state: PluginState): void {
 		if (event.toolName !== MODEL_TOOL_NAME || !(MUTATING_ACTIONS as readonly string[]).includes((event.input as Input).action ?? "")) return;
 		if (!ctx.hasUI) return { block: true, reason: "Mutating ch-chhound actions require interactive confirmation." };
 		const action = (event.input as Input).action!;
-		if (!await ctx.ui.confirm("Allow ChunkHound change?", `Allow ch-chhound to run ${action}?`)) {
+		if (!await ctx.ui.confirm("Allow ChunkHound change?", consentSummary(action, event.input as Input))) {
 			return { block: true, reason: `User declined ${action}.` };
 		}
 	});

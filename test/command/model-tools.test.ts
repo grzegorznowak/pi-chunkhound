@@ -1,9 +1,11 @@
 import { describe, test } from "node:test";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
-import { sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
+import { globalSettingsPath, projectSettingsPath } from "../../chhound/paths.js";
+import { sandboxConfigPath, sandboxDbDir, sandboxStateDir, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxMeta } from "../../chhound/types.js";
 import { listMcpConnections } from "../../mcp/manager.js";
 import { MODEL_WORKTREE_WIDGET_KEY, progressRelay, worktreeOutcomeText } from "../../model-tools.js";
@@ -12,9 +14,12 @@ import { check } from "../lib/checks.js";
 import { fireToolCall, MODEL_ACTIONS, MODEL_TOOL_NAME, MUTATING_ACTIONS, READ_ACTIONS, runExtension, withPiHarness, type PiHarness } from "../lib/pi-harness.js";
 
 async function execute(h: PiHarness, input: Record<string, unknown>) {
+	return executeWith(h, input, h.ctx);
+}
+async function executeWith(h: PiHarness, input: Record<string, unknown>, ctx: PiHarness["ctx"]) {
 	const tool = h.tools.get(MODEL_TOOL_NAME);
 	if (!tool) throw new Error(`Missing factory registration: ${MODEL_TOOL_NAME}`);
-	return tool.execute("test-call", input, new AbortController().signal, undefined, h.ctx);
+	return tool.execute("test-call", input, new AbortController().signal, undefined, ctx);
 }
 async function errorText(body: () => Promise<unknown>): Promise<string> {
 	try { await body(); return ""; } catch (error) { return String(error); }
@@ -312,6 +317,113 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "embedding key never emitted", !body.includes("emb-secret") && !details.includes("emb-secret"));
 		await check(t, "llm key never emitted", !body.includes("llm-secret") && !details.includes("llm-secret"));
 		await check(t, "redaction is visible", body.includes("[redacted]") || body.includes("setup.show"));
+	}, { hasUI: false }));
+
+	test("project settings at the git root govern access for a nested cwd", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		const nested = path.join(repo, "nested");
+		fs.mkdirSync(nested, { recursive: true });
+		// The policy lives in the repo-root project overlay, not in the nested cwd.
+		saveSettings({ version: 1, modelTools: "off" }, "project", repo);
+		const error = await errorText(() => executeWith(h, { action: "status" }, { ...h.ctx, cwd: nested }));
+		await check(t, "nested cwd still sees the repo-root policy", error.includes("/ch-setup --model-tools on"), error);
+		// read-only overlay: reads pass, mutations stay blocked with the remedy.
+		saveSettings({ version: 1, modelTools: "read-only" }, "project", repo);
+		const allowed = await errorText(() => executeWith(h, { action: "status" }, { ...h.ctx, cwd: nested }));
+		await check(t, "read-only overlay permits reads from the nested cwd", allowed === "", allowed);
+		const blocked = await errorText(() => executeWith(h, { action: "mcp.connect", target: "unused" }, { ...h.ctx, cwd: nested }));
+		await check(t, "read-only overlay still blocks mutations", blocked.includes("/ch-setup --model-tools on"), blocked);
+	}, { hasUI: false }));
+
+	test("dispatcher settings are loaded from the git root for a nested cwd", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		const nested = path.join(repo, "nested");
+		fs.mkdirSync(nested, { recursive: true });
+		saveSettings({ version: 1, llm: { provider: "proj-llm", model: "proj-model" } }, "project", repo);
+		const result = await executeWith(h, { action: "setup.show" }, { ...h.ctx, cwd: nested });
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		await check(t, "project overlay is visible from the nested cwd", body.includes("proj-llm"), body.slice(0, 200));
+	}, { hasUI: false }));
+
+	test("setup.update sandboxRoot is expanded, cwd-relative, and outside index roots", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		saveSettings({ version: 1 }, "global");
+		await execute(h, { action: "setup.update", sandboxRoot: path.join("lib", "wt") });
+		await check(t, "relative sandboxRoot resolves against ctx.cwd", loadSettings().settings.sandboxRoot === path.join(h.ctx.cwd, "lib", "wt"), String(loadSettings().settings.sandboxRoot));
+		await execute(h, { action: "setup.update", sandboxRoot: "~/wt" });
+		await check(t, "home-relative sandboxRoot is expanded", loadSettings().settings.sandboxRoot === path.join(os.homedir(), "wt"), String(loadSettings().settings.sandboxRoot));
+		// A .chunkhound.json at the repo root makes the whole tree an index root.
+		const repo = makeGitRepo(h);
+		fs.writeFileSync(path.join(repo, ".chunkhound.json"), JSON.stringify({ version: 1 }));
+		const nested = path.join(repo, "nested");
+		fs.mkdirSync(nested, { recursive: true });
+		const before = fs.readFileSync(globalSettingsPath(), "utf8");
+		const inside = await errorText(() => executeWith(h, { action: "setup.update", sandboxRoot: "." }, { ...h.ctx, cwd: nested }));
+		await check(t, "sandboxRoot inside an index root is rejected", inside.includes("outside any chunkhound index root"), inside);
+		await check(t, "rejected update never reaches the global file", fs.readFileSync(globalSettingsPath(), "utf8") === before);
+		const rootItself = await errorText(() => execute(h, { action: "setup.update", sandboxRoot: repo }));
+		await check(t, "the index root itself is rejected", rootItself.includes("outside any chunkhound index root"), rootItself);
+	}, { hasUI: false }));
+
+	test("consent dialog shows a bounded allowlisted argument summary", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		await fireToolCall(h, {
+			toolName: MODEL_TOOL_NAME,
+			input: { action: "mcp.connect", target: "sb-1", repo: "/tmp/x", apiKey: "sk-super-secret", junk: "zzz", branch: "b".repeat(200) },
+		});
+		await check(t, "one confirmation", h.confirms.length === 1);
+		const message = h.confirms[0]?.message ?? "";
+		await check(t, "action and allowlisted fields are shown", message.includes("mcp.connect") && message.includes("target=sb-1") && message.includes("repo=/tmp/x"), message);
+		await check(t, "unknown and secret-shaped inputs never reach the dialog", !message.includes("sk-super-secret") && !message.includes("junk"), message);
+		await check(t, "long values are clipped and the summary is bounded", !message.includes("b".repeat(50)) && message.length < 300, `${message.length}: ${message}`);
+		await fireToolCall(h, { toolName: MODEL_TOOL_NAME, input: { action: "baseline.refresh" } });
+		await check(t, "no-argument actions keep the plain prompt", h.confirms[1]?.message === "Allow ch-chhound to run baseline.refresh?", h.confirms[1]?.message);
+	}));
+
+	test("setup.update writes global scope only and refreshes merged configs", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const repo = makeGitRepo(h);
+		fs.writeFileSync(path.join(repo, ".chunkhound.json"), JSON.stringify({ version: 1 }));
+		// Global holds the sandbox library root; the project overlay holds a
+		// provider + model that must never be copied into the global file.
+		saveSettings({ version: 1, sandboxRoot: path.join(h.ctx.cwd, "sandboxes") }, "global");
+		saveSettings({ version: 1, embedding: { provider: "proj-provider", model: "proj-model" } }, "project", repo);
+		const sandboxDir = path.join(h.ctx.cwd, "sandboxes", "sb-test");
+		const stateDir = sandboxStateDir(sandboxDir);
+		fs.mkdirSync(sandboxDir, { recursive: true });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(sandboxDbDir(sandboxDir), "fake db bytes\n");
+		const meta: SandboxMeta = {
+			version: 1,
+			worktree: path.join(h.ctx.cwd, "wt"),
+			repoRoot: repo,
+			branch: "main",
+			baseRef: "main",
+			baseCommit: "0".repeat(40),
+			chhoundVersion: "test",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			copiedFrom: "",
+			dbPath: sandboxDbDir(sandboxDir),
+		};
+		writeSandboxMeta(stateDir, meta);
+		const result = await executeWith(h, { action: "setup.update", llmModel: "global-llm" }, { ...h.ctx, cwd: repo });
+		const body = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+		await check(t, "result names the global scope", /global/i.test(body), body);
+		const globalRaw = JSON.parse(fs.readFileSync(globalSettingsPath(), "utf8")) as Record<string, any>;
+		await check(t, "global file carries the update", globalRaw.llm?.model === "global-llm", JSON.stringify(globalRaw));
+		await check(t, "project overlay never leaks into the global file", !JSON.stringify(globalRaw).includes("proj-provider"), JSON.stringify(globalRaw));
+		const projectRaw = JSON.parse(fs.readFileSync(projectSettingsPath(repo), "utf8")) as Record<string, any>;
+		await check(t, "project overlay stays intact", projectRaw.embedding?.provider === "proj-provider", JSON.stringify(projectRaw));
+		const materialized = JSON.parse(fs.readFileSync(sandboxConfigPath(sandboxDir), "utf8")) as Record<string, any>;
+		await check(t, "refreshed config keeps the project overlay", materialized.embedding?.provider === "proj-provider", JSON.stringify(materialized).slice(0, 300));
+		await check(t, "refreshed config carries the global update", materialized.llm?.model === "global-llm", JSON.stringify(materialized).slice(0, 300));
+		// A bogus mode must never land in settings (access() would fail open to on).
+		const before = fs.readFileSync(globalSettingsPath(), "utf8");
+		const bad = await errorText(() => execute(h, { action: "setup.update", modelTools: "banana" }));
+		await check(t, "invalid modelTools is rejected with the valid values", /modelTools/.test(bad) && /off, read-only, on/.test(bad), bad);
+		await check(t, "rejected mode never lands in settings", fs.readFileSync(globalSettingsPath(), "utf8") === before);
 	}, { hasUI: false }));
 
 	test("renderResult tolerates every action payload", async (t) => withPiHarness(async (h) => {
