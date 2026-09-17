@@ -9,6 +9,7 @@ import { expandHome } from "./chhound/completions.js";
 import { insideChunkhoundRoot } from "./chhound/config.js";
 import { findRepoRoot, gitRootOrNull } from "./chhound/git.js";
 import { classifyChhoundLine } from "./chhound/progress.js";
+import { parsePrUrl } from "./chhound/pr.js";
 import { listSandboxes } from "./chhound/sandbox.js";
 import { loadSettings, saveSettings } from "./chhound/settings.js";
 import type { ChhoundSettings, PluginState } from "./chhound/types.js";
@@ -16,7 +17,7 @@ import { connectEntry, disconnectEntry, resolveSandboxMatches } from "./mcp/comm
 import { listMcpConnections, mcpConnectionSummary } from "./mcp/manager.js";
 import { refreshMaterializedConfigs } from "./setup/command.js";
 import { buildStatusLines } from "./status/command.js";
-import { createIndexedWorktree, oneGoLocation } from "./worktree/command.js";
+import { createIndexedWorktree, oneGoLocation, runPrOneGo } from "./worktree/command.js";
 
 export const MODEL_TOOL_NAME = "ch-chhound";
 /** Widget key for model-driven creates — namespaced away from the slash
@@ -38,6 +39,7 @@ const parameters = Type.Object({
 	branch: Type.Optional(Type.String()),
 	newBranch: Type.Optional(Type.String()),
 	from: Type.Optional(Type.String()),
+	pr: Type.Optional(Type.String({ description: "GitHub PR URL (https://github.com/<owner>/<repo>/pull/<n>) — creates the sandbox detached at the PR head. Conflicts with repo, branch, newBranch, and from." })),
 	dest: Type.Optional(Type.String()),
 	config: Type.Optional(Type.String()),
 	forceReindex: Type.Optional(Type.Boolean()),
@@ -163,7 +165,7 @@ export function worktreeOutcomeText(ok: boolean, frames: readonly NotifyFrame[])
 
 /** Argument summary for the consent dialog: fixed allowlist, clipped and
  * bounded — unknown fields (and anything secret-shaped) never surface. */
-const CONSENT_FIELDS = ["target", "repo", "branch", "newBranch", "from", "dest", "config", "ref", "provider", "model", "rerankModel", "llmProvider", "llmModel", "baselineRef", "sandboxRoot"] as const;
+const CONSENT_FIELDS = ["target", "repo", "branch", "newBranch", "from", "pr", "dest", "config", "ref", "provider", "model", "rerankModel", "llmProvider", "llmModel", "baselineRef", "sandboxRoot"] as const;
 const CONSENT_VALUE_LIMIT = 40;
 const CONSENT_DETAIL_LIMIT = 160;
 export function consentSummary(action: string, input: Input): string {
@@ -303,16 +305,8 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			return text(selected, `Baseline ${baseline.ref}: ${baseline.reason}`, { baseline });
 		}
 		case "worktree.create": {
-			const repoArg = typeof input.repo === "string" ? path.resolve(ctx.cwd, input.repo) : ctx.cwd;
-			const repo = await findRepoRoot(repoArg);
-			if (!repo) throw new Error(`worktree.create requires repo to name a git repository (or run it from one).`);
-			if (input.branch !== undefined && input.newBranch !== undefined) throw new Error("worktree.create accepts either branch or newBranch, not both.");
-			const slot = typeof input.newBranch === "string" ? input.newBranch : typeof input.branch === "string" ? input.branch : undefined;
-			const dest = typeof input.dest === "string" ? path.resolve(ctx.cwd, input.dest) : undefined;
-			const location = await oneGoLocation(repo, slot, settings, dest, (message, type) => report.onProgress?.({ message, type }));
-			if (!location) {
-				throw new Error(worktreeOutcomeText(false, notifyFrames) ?? "worktree.create could not select a safe worktree location.");
-			}
+			// Shared by the branch and PR paths: engine flags, the TUI widget
+			// report, and the destination override.
 			const flags: Record<string, string | true> = {};
 			if (typeof input.config === "string") flags.config = input.config;
 			if (input.forceReindex) flags["force-reindex"] = true;
@@ -324,6 +318,39 @@ async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signa
 			const tuiReport = ctx.mode === "tui" && ctx.hasUI
 				? { ...report, hasUI: true, widgetKey: MODEL_WORKTREE_WIDGET_KEY, ui: quietNotifyUI(ctx.ui) }
 				: report;
+			const dest = typeof input.dest === "string" ? path.resolve(ctx.cwd, input.dest) : undefined;
+
+			// PR path: the URL carries the repo + head identity. Nothing else may
+			// select the source tree, and no repo resolution happens from the cwd
+			// (the PR route discovers its host from the URL + library).
+			if (input.pr !== undefined) {
+				if (typeof input.pr !== "string" || !input.pr.trim()) {
+					throw new Error("worktree.create pr must be a GitHub PR URL (https://github.com/<owner>/<repo>/pull/<n>).");
+				}
+				const conflicts = (["repo", "branch", "newBranch", "from"] as const).filter((key) => input[key] !== undefined);
+				if (conflicts.length) {
+					throw new Error(`worktree.create pr conflicts with ${conflicts.join(", ")} — the PR URL carries the repo, branch, and head commit.`);
+				}
+				const pr = parsePrUrl(input.pr);
+				if (!pr) {
+					throw new Error(`Not a PR URL: ${input.pr} — paste the full URL from the browser (https://github.com/<owner>/<repo>/pull/<n>).`);
+				}
+				const outcome = await runPrOneGo(tuiReport, state, pr, flags, { dest, connect: input.connect === true });
+				const details = { ok: outcome.ok, ...(outcome.sandboxId ? { sandboxId: outcome.sandboxId } : {}), ...(outcome.location ? { location: outcome.location } : {}) };
+				const summary = worktreeOutcomeText(outcome.ok, notifyFrames);
+				if (!outcome.ok) return text(selected, summary ?? `worktree.create failed for ${input.pr} (no index was written).`, details);
+				return text(selected, summary ?? `Worktree ready: ${outcome.location?.wtPath ?? outcome.sandboxId}.`, details);
+			}
+
+			const repoArg = typeof input.repo === "string" ? path.resolve(ctx.cwd, input.repo) : ctx.cwd;
+			const repo = await findRepoRoot(repoArg);
+			if (!repo) throw new Error(`worktree.create requires repo to name a git repository (or run it from one).`);
+			if (input.branch !== undefined && input.newBranch !== undefined) throw new Error("worktree.create accepts either branch or newBranch, not both.");
+			const slot = typeof input.newBranch === "string" ? input.newBranch : typeof input.branch === "string" ? input.branch : undefined;
+			const location = await oneGoLocation(repo, slot, settings, dest, (message, type) => report.onProgress?.({ message, type }));
+			if (!location) {
+				throw new Error(worktreeOutcomeText(false, notifyFrames) ?? "worktree.create could not select a safe worktree location.");
+			}
 			const created = await createIndexedWorktree(tuiReport, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
 			// The ✓ completion/error notify carries the real outcome (elapsed,
 			// baseline copy + top-up vs full index); never claim success on

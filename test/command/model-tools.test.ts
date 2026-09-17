@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { loadSettings, saveSettings } from "../../chhound/settings.js";
 import { globalSettingsPath, projectSettingsPath } from "../../chhound/paths.js";
+import { mirrorDir } from "../../chhound/pr.js";
 import { sandboxConfigPath, sandboxDbDir, sandboxStateDir, readSandboxMeta, writeSandboxMeta } from "../../chhound/sandbox.js";
 import type { SandboxMeta } from "../../chhound/types.js";
 import { listMcpConnections, disconnectMcp } from "../../mcp/manager.js";
@@ -130,6 +131,48 @@ function seedCreateRoots(h: PiHarness): void {
 	saveSettings({ ...loadSettings().settings, sandboxRoot: path.join(h.ctx.cwd, "sandboxes"), baseRoot: path.join(h.ctx.cwd, "bases") }, "global");
 }
 
+/**
+ * Offline PR-URL fixture (the ladder test/fs/pr-host.test.ts pins): a fixture
+ * origin carrying refs/pull/1/head, a PRE-SEEDED settings mirror (so
+ * ensureMirror never reaches github.com) and a canned `gh` on PATH.
+ */
+function seedPrFixture(h: PiHarness, opts: { ghFails?: boolean } = {}): { url: string; headSha: string } {
+	const root = h.ctx.cwd;
+	const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+	const seed = path.join(root, "pr-seed");
+	fs.mkdirSync(seed);
+	run(seed, "init", "-q", "-b", "main");
+	fs.writeFileSync(path.join(seed, "a.txt"), "one\n");
+	run(seed, "add", "-A");
+	run(seed, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-qm", "init");
+	run(seed, "checkout", "-q", "-b", "feature");
+	fs.writeFileSync(path.join(seed, "a.txt"), "two\n");
+	run(seed, "add", "-A");
+	run(seed, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-qm", "feature");
+	const headSha = run(seed, "rev-parse", "feature").toString().trim();
+	const origin = path.join(root, "pr-origin.git");
+	run(root, "clone", "-q", "--bare", seed, origin);
+	run(root, "--git-dir", origin, "symbolic-ref", "HEAD", "refs/heads/main");
+	run(root, "--git-dir", origin, "update-ref", "refs/pull/1/head", headSha);
+	// Pre-seed the settings mirror: its own origin is the fixture bare repo.
+	saveSettings({ ...loadSettings().settings, sandboxRoot: path.join(root, "sandboxes"), baseRoot: path.join(root, "bases"), mirrorRoot: path.join(root, "mirrors") }, "global");
+	const mirror = mirrorDir(loadSettings().settings, "ghuser", "add");
+	fs.mkdirSync(path.dirname(mirror), { recursive: true });
+	run(root, "clone", "-q", "--bare", origin, mirror);
+	// Canned gh matching the refs/pull/1/head commit.
+	const shim = path.join(root, "gh-shim");
+	fs.mkdirSync(shim);
+	const gh = path.join(shim, "gh");
+	if (opts.ghFails) fs.writeFileSync(gh, "#!/bin/sh\necho 'boom: gh failed' >&2\nexit 1\n");
+	else {
+		const json = JSON.stringify({ number: 1, baseRefName: "main", headRefName: "feature", headRefOid: headSha, state: "OPEN", title: "fixture" });
+		fs.writeFileSync(gh, `#!/bin/sh\ncat <<'EOF'\n${json}\nEOF\n`);
+	}
+	fs.chmodSync(gh, 0o755);
+	process.env.PATH = shim + path.delimiter + (process.env.PATH ?? "");
+	return { url: "https://github.com/ghuser/add/pull/1", headSha };
+}
+
 function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.map((part) => (part.type === "text" ? part.text ?? "" : "")).join("\n");
 }
@@ -151,6 +194,7 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "no union/reference/literal nodes", !forbiddenSchema(schema));
 		await check(t, "no prefix parameter", !("prefix" in schema.properties));
 		await check(t, "target is an optional string", schema.properties.target?.type === "string" && !schema.required.includes("target"));
+		await check(t, "pr is an optional string", schema.properties.pr?.type === "string" && !schema.required.includes("pr"));
 		await check(t, "description lists every action", MODEL_ACTIONS.every((action) => tool.description.includes(action)));
 		await check(t, "promptSnippet present", Boolean(tool.promptSnippet?.trim()));
 		await check(t, "sequential execution", tool.executionMode === "sequential");
@@ -475,6 +519,9 @@ describe("model dispatcher contract (initially RED)", () => {
 		await check(t, "long values are clipped and the summary is bounded", !message.includes("b".repeat(50)) && message.length < 300, `${message.length}: ${message}`);
 		await fireToolCall(h, { toolName: MODEL_TOOL_NAME, input: { action: "baseline.refresh" } });
 		await check(t, "no-argument actions keep the plain prompt", h.confirms[1]?.message === "Allow ch-chhound to run baseline.refresh?", h.confirms[1]?.message);
+		await fireToolCall(h, { toolName: MODEL_TOOL_NAME, input: { action: "worktree.create", pr: "https://github.com/ghuser/add/pull/1" } });
+		const prMessage = h.confirms[2]?.message ?? "";
+		await check(t, "a PR URL is allowlisted into the consent summary", prMessage.includes("pr=https://github.com/ghuser/add/pull/1"), prMessage);
 	}));
 
 	test("setup.update writes global scope only and refreshes merged configs", async (t) => withPiHarness(async (h) => {
@@ -801,4 +848,110 @@ describe("model dispatcher contract (initially RED)", () => {
 		const own = h.widgets.filter((w) => w.key === MODEL_WORKTREE_WIDGET_KEY);
 		await check(t, "the TUI widget is cleared in the finally", own.length >= 1 && own[own.length - 1]!.content === undefined, JSON.stringify(own.slice(-1)));
 	}, { hasUI: true }));
+});
+
+describe("PR-URL worktree.create (initially RED)", () => {
+	test("PR create validation is actionable before any repo or gh work", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const url = "https://github.com/ghuser/add/pull/1";
+		for (const key of ["repo", "branch", "newBranch", "from"]) {
+			const error = await errorText(() => execute(h, { action: "worktree.create", pr: url, [key]: "x" }));
+			await check(t, `pr conflicts with ${key}`, error.includes("pr conflicts with") && error.includes(key), error);
+		}
+		for (const bad of ["not-a-pr-url", "https://gitlab.com/ghuser/add/pull/1", "ghuser/add#1"]) {
+			const error = await errorText(() => execute(h, { action: "worktree.create", pr: bad }));
+			await check(t, `'${bad}' is rejected with the slash wording`, error.includes("Not a PR URL") && error.includes(bad), error);
+		}
+		for (const bad of ["", "   "]) {
+			const error = await errorText(() => execute(h, { action: "worktree.create", pr: bad }));
+			await check(t, "an empty pr is rejected as a PR URL requirement", error.includes("pr") && error.includes("PR URL"), error);
+		}
+		await check(t, "validation never opens a prompt", h.confirms.length === 0 && h.selections.length === 0);
+	}, { hasUI: false }));
+
+	test("PR create e2e: gh + mirror fixture yields a detached pull/N sandbox", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const dest = path.join(h.ctx.cwd, "custom-library");
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute("create-pr", { action: "worktree.create", pr: pr.url, dest, connect: false }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string; location?: { sandboxDir?: string; wtPath?: string } };
+		await check(t, "the ✓ terminus names the PR slot and the baseline copy", /^✓ pull\/1 @ /.test(body) && body.includes("indexed (baseline copy + top-up)"), body);
+		await check(t, "details carry ok:true and a pull/1 sandboxId", details.ok === true && /^add-pull-1-/.test(details.sandboxId ?? ""), JSON.stringify(details));
+		await check(t, "dest is honored as the sandbox library root", path.dirname(details.location?.sandboxDir ?? "") === dest, JSON.stringify(details.location));
+		const sandboxDir = details.location?.sandboxDir ?? "";
+		const meta = readSandboxMeta(sandboxStateDir(sandboxDir));
+		await check(t, "meta records the PR identity", meta?.branch === "pull/1" && meta?.headRef === "feature" && meta?.headOid === pr.headSha, JSON.stringify(meta));
+		const wtPath = details.location?.wtPath ?? "";
+		const head = execFileSync("git", ["-C", wtPath, "rev-parse", "HEAD"], { stdio: "pipe" }).toString().trim();
+		const branch = execFileSync("git", ["-C", wtPath, "branch", "--show-current"], { stdio: "pipe" }).toString().trim();
+		await check(t, "the checkout is detached at the fetched PR head", head === pr.headSha && branch === "", `${head} branch='${branch}'`);
+		await check(t, "baseline + sandbox top-up ran exactly twice", engineInvocations(h.ctx.cwd).length === 2, JSON.stringify(engineInvocations(h.ctx.cwd)));
+		await check(t, "no MCP connect without connect:true", listMcpConnections().length === 0);
+		await check(t, "updates stay pi-shaped throughout", updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content) && (u as { details?: { action?: string } }).details?.action === "worktree.create"), JSON.stringify(updates).slice(0, 300));
+	}, { hasUI: false }));
+
+	test("PR create connect:true connects once after the index", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		let engineRunsAtConnect = -1;
+		const connect = t.mock.method(Client.prototype, "connect", async () => { engineRunsAtConnect = engineInvocations(h.ctx.cwd).length; });
+		const listTools = t.mock.method(Client.prototype, "listTools", (async () => ({ tools: [{ name: "search", description: "fixture", inputSchema: { type: "object" } }] })) as unknown as typeof Client.prototype.listTools);
+		const close = t.mock.method(Client.prototype, "close", async () => undefined);
+		let createdId: string | undefined;
+		try {
+			const tool = h.tools.get(MODEL_TOOL_NAME);
+			if (!tool) return;
+			const result = await tool.execute("create-pr-connect", { action: "worktree.create", pr: pr.url, connect: true }, new AbortController().signal, undefined, h.ctx);
+			const details = result.details as { ok?: boolean; sandboxId?: string };
+			createdId = details.sandboxId;
+			await check(t, "the PR create succeeds with an explicit connect", details.ok === true && Boolean(details.sandboxId), JSON.stringify(details));
+			await check(t, "connect is attempted once after both index runs", connect.mock.callCount() === 1 && engineRunsAtConnect === 2, `connects=${connect.mock.callCount()} at=${engineRunsAtConnect}`);
+			await check(t, "the connection is registered", listMcpConnections().length === 1, listMcpConnections().map((conn) => conn.id).join(",") || "(none)");
+		} finally {
+			if (createdId && listMcpConnections().some((conn) => conn.id === createdId)) await disconnectMcp(createdId).catch(() => undefined);
+			connect.mock.restore();
+			listTools.mock.restore();
+			close.mock.restore();
+		}
+	}, { hasUI: false }));
+
+	test("TUI PR create drives the namespaced widget and never prompts to connect", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const result = await tool.execute("create-pr-tui", { action: "worktree.create", pr: pr.url }, new AbortController().signal, undefined, h.ctx);
+		const details = result.details as { ok?: boolean };
+		await check(t, "PR create succeeds in TUI mode", details.ok === true, JSON.stringify(details));
+		const own = h.widgets.filter((w) => w.key === MODEL_WORKTREE_WIDGET_KEY);
+		await check(t, "widget renders under the namespaced key only", own.length >= 2 && h.widgets.every((w) => w.key === MODEL_WORKTREE_WIDGET_KEY), JSON.stringify(h.widgets.map((w) => w.key)));
+		await check(t, "widget is cleared in the finally", own[own.length - 1]?.content === undefined, JSON.stringify(own.slice(-1)));
+		await check(t, "omitted connect is an explicit false — no prompt", h.confirms.length === 0, JSON.stringify(h.confirms));
+		const notifies = h.notices;
+		await check(t, "warning + ✓ toasts surface", notifies.some((n) => n.type === "warning" && n.message.includes("Indexing started")) && notifies.some((n) => n.type === "info" && n.message.startsWith("✓ ")), JSON.stringify(notifies));
+		await check(t, "transient info toasts are suppressed", !notifies.some((n) => n.type === "info" && (n.message.includes("Creating worktree") || n.message.includes("No local checkout") || n.message.includes("Indexing "))), JSON.stringify(notifies));
+	}, { hasUI: true }));
+
+	test("PR create failure returns ok:false with the command's reason", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h, { ghFails: true });
+		const tool = h.tools.get(MODEL_TOOL_NAME);
+		if (!tool) return;
+		const updates: unknown[] = [];
+		const result = await tool.execute("create-pr-fail", { action: "worktree.create", pr: pr.url }, new AbortController().signal, (update) => { updates.push(update); }, h.ctx);
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the gh failure is returned, never thrown as a bare tool error", details.ok === false && details.sandboxId === undefined, JSON.stringify(details));
+		await check(t, "the reason reaches the model", body.includes("gh pr view") && body.includes("boom"), body);
+		await check(t, "never claims a ✓ outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "no engine or sandbox work happened", engineInvocations(h.ctx.cwd).length === 0 && listMcpConnections().length === 0);
+		await check(t, "failure updates stay pi-shaped", updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content)), JSON.stringify(updates).slice(0, 200));
+	}, { hasUI: false }));
 });
