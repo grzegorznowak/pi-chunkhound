@@ -866,6 +866,10 @@ describe("PR-URL worktree.create (initially RED)", () => {
 			const error = await errorText(() => execute(h, { action: "worktree.create", pr: bad }));
 			await check(t, "an empty pr is rejected as a PR URL requirement", error.includes("pr") && error.includes("PR URL"), error);
 		}
+		for (const bad of [1, true, null, [url], { url }] as unknown[]) {
+			const error = await errorText(() => execute(h, { action: "worktree.create", pr: bad }));
+			await check(t, `${JSON.stringify(bad)} is rejected as a non-string pr`, error.includes("pr must be a GitHub PR URL"), error);
+		}
 		await check(t, "validation never opens a prompt", h.confirms.length === 0 && h.selections.length === 0);
 	}, { hasUI: false }));
 
@@ -954,4 +958,101 @@ describe("PR-URL worktree.create (initially RED)", () => {
 		await check(t, "no engine or sandbox work happened", engineInvocations(h.ctx.cwd).length === 0 && listMcpConnections().length === 0);
 		await check(t, "failure updates stay pi-shaped", updates.length > 0 && updates.every((u) => Array.isArray((u as { content?: unknown }).content)), JSON.stringify(updates).slice(0, 200));
 	}, { hasUI: false }));
+
+	test("PR create mirror failure is returned, never thrown", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		// The pre-seeded mirror stays; killing its origin makes ensureMirror's
+		// refresh fetch fail (no clone attempt, no network).
+		fs.rmSync(path.join(h.ctx.cwd, "pr-origin.git"), { recursive: true, force: true });
+		const result = await execute(h, { action: "worktree.create", pr: pr.url });
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the mirror failure is returned, never thrown as a bare tool error", details.ok === false && details.sandboxId === undefined, JSON.stringify(details));
+		await check(t, "the reason names the mirror refresh", body.includes("could not refresh mirror"), body);
+		await check(t, "never claims a ✓ outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "no engine or sandbox work happened", engineInvocations(h.ctx.cwd).length === 0 && listMcpConnections().length === 0);
+	}, { hasUI: false }));
+
+	test("PR create pull-ref fetch failure is returned, never thrown", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		// Keep the head ref flowing for the mirror refresh; remove only the PR
+		// ref from the origin so fetchPrHead is the failure surface.
+		execFileSync("git", ["--git-dir", path.join(h.ctx.cwd, "pr-origin.git"), "update-ref", "-d", "refs/pull/1/head"], { stdio: "pipe" });
+		const result = await execute(h, { action: "worktree.create", pr: pr.url });
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the fetch failure is returned, never thrown as a bare tool error", details.ok === false && details.sandboxId === undefined, JSON.stringify(details));
+		await check(t, "the reason names the missing pull ref", body.includes("pull/1/head"), body);
+		await check(t, "never claims a ✓ outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "no engine or sandbox work happened", engineInvocations(h.ctx.cwd).length === 0 && listMcpConnections().length === 0);
+	}, { hasUI: false }));
+
+	test("PR create refuses an occupied destination (location guard)", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const dest = path.join(h.ctx.cwd, "custom-library");
+		const settings = loadSettings().settings;
+		// Same destination math the one-go path applies (dest overrides the
+		// sandbox root): a non-empty leftover at the target wtPath must be
+		// refused as a location BEFORE any create/index work starts.
+		const { wtPath } = resolveSandboxLocation(mirrorDir(settings, "ghuser", "add"), "pull/1", settings, dest);
+		fs.mkdirSync(wtPath, { recursive: true });
+		fs.writeFileSync(path.join(wtPath, "leftover.txt"), "occupied\n");
+		const result = await execute(h, { action: "worktree.create", pr: pr.url, dest });
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the location refusal is returned, never thrown", details.ok === false && details.sandboxId === undefined, JSON.stringify(details));
+		await check(t, "the refusal names the occupied path", body.includes("exists and is not empty") && body.includes(wtPath), body);
+		await check(t, "never claims a ✓ outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "no engine work happened", engineInvocations(h.ctx.cwd).length === 0, JSON.stringify(engineInvocations(h.ctx.cwd)));
+	}, { hasUI: false }));
+
+	test("PR create index failure returns ok:false, never a false ✓", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd, { failIndex: true });
+		const result = await execute(h, { action: "worktree.create", pr: pr.url });
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the index failure reports ok:false without a sandboxId", details.ok === false && details.sandboxId === undefined, JSON.stringify(details));
+		await check(t, "the baseline index failure reason reaches the model", body.includes("baseline index failed"), body);
+		await check(t, "never claims a ✓ outcome", !body.startsWith("✓ "), body.slice(0, 120));
+		await check(t, "no MCP connect was attempted", listMcpConnections().length === 0);
+	}, { hasUI: false }));
+
+	test("pr accepts config + forceReindex + refreshBaseline companions", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const config = path.join(h.ctx.cwd, "adopted-config.json");
+		fs.writeFileSync(config, JSON.stringify({}));
+		const result = await execute(h, { action: "worktree.create", pr: pr.url, config, forceReindex: true, refreshBaseline: true });
+		const body = resultText(result);
+		const details = result.details as { ok?: boolean; sandboxId?: string };
+		await check(t, "the companions are accepted and the create succeeds", details.ok === true && Boolean(details.sandboxId), JSON.stringify(details));
+		await check(t, "forceReindex is threaded through (full index, no baseline copy)", body.includes("full index"), body.slice(0, 200));
+	}, { hasUI: false }));
+});
+
+describe("PR-URL slash path keeps its interactive connect prompt (regression)", () => {
+	test("slash /ch-worktree <PR URL> still offers the MCP connect confirm", async (t) => withPiHarness(async (h) => {
+		await runExtension(h.pi);
+		const pr = seedPrFixture(h);
+		process.env.CHHOUND_BINARY = writeFakeEngine(h.ctx.cwd);
+		const command = h.commands.get("ch-worktree");
+		if (!command) throw new Error("registerWorktreeCommand did not register ch-worktree");
+		const dest = path.join(h.ctx.cwd, "custom-library");
+		await command.handler(`${pr.url} --dest ${dest}`, h.ctx);
+		// The model path pins connect: input.connect === true (never prompts);
+		// the slash path deliberately passes no connect, so the post-create UI
+		// confirmation must still fire exactly once.
+		await check(t, "the slash path still asks whether to connect", h.confirms.length === 1 && /MCP/.test(h.confirms[0]!.title), JSON.stringify(h.confirms));
+		await check(t, "the PR sandbox was created before the prompt", h.notices.some((n) => n.message.startsWith("✓ pull/1 @ ")), JSON.stringify(h.notices.slice(-3)));
+		await check(t, "declining the prompt registers no connection", listMcpConnections().length === 0);
+	}, { hasUI: true }));
 });
