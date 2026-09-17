@@ -64,12 +64,23 @@ export function resolveSandboxMatches(arg: string, settings: ChhoundSettings, cw
 	);
 }
 
-type McpCmdCtx = {
-	ui: {
+export type McpReporter = {
+	cwd?: string;
+	hasUI?: boolean;
+	ui?: {
 		notify(message: string, type?: "info" | "warning" | "error"): void;
 		select?(title: string, options: string[]): Promise<string | undefined>;
 	};
+	onProgress?: (...updates: unknown[]) => void;
+	signal?: AbortSignal;
 };
+
+export type McpCoreResult = { ok: boolean; kind: string; id: string; message?: string };
+
+function report(ctx: McpReporter, message: string, type: "info" | "warning" | "error"): void {
+	ctx.onProgress?.({ message, type });
+	if (ctx.hasUI !== false) ctx.ui?.notify(message, type);
+}
 
 /**
  * Connect one sandbox entry over MCP and report the outcome — the single
@@ -82,15 +93,16 @@ type McpCmdCtx = {
  */
 export async function connectEntry(
 	pi: ExtensionAPI,
-	ctx: McpCmdCtx,
+	ctx: McpReporter,
 	state: PluginState,
 	entry: SandboxEntry,
 	flags: Record<string, string | true>,
-): Promise<void> {
+): Promise<McpCoreResult> {
 	const id = path.basename(entry.dir);
 	if (listMcpConnections().some((c) => c.id === id)) {
-		ctx.ui.notify(`Already connected: ${id} — /ch-mcp ${id} --disconnect to stop.`, "info");
-		return;
+		const message = `Already connected: ${id} — /ch-mcp ${id} --disconnect to stop.`;
+		report(ctx, message, "info");
+		return { ok: true, kind: "already-connected", id, message };
 	}
 	try {
 		const conn = await connectMcp(pi, entry, {
@@ -110,14 +122,31 @@ export async function connectEntry(
 				prefix: typeof flags["prefix"] === "string" ? flags["prefix"] : undefined,
 			});
 		}
-		ctx.ui.notify(
+		const message =
 			`Connected chhound MCP '${conn.id}' → ${conn.worktree}\n` +
-				`tools: ${conn.toolNames.join(", ")}\n` +
-				`disconnect: /ch-mcp ${conn.id} --disconnect`,
-			"info",
-		);
+			`tools: ${conn.toolNames.join(", ")}\n` +
+			`disconnect: /ch-mcp ${conn.id} --disconnect`;
+		report(ctx, message, "info");
+		return { ok: true, kind: "connected", id: conn.id, message };
 	} catch (e) {
-		ctx.ui.notify(`Connect failed: ${(e as Error).message}`, "error");
+		const message = `Connect failed: ${(e as Error).message}`;
+		report(ctx, message, "error");
+		return { ok: false, kind: "connect-failed", id, message };
+	}
+}
+
+/** Disconnect one sandbox and persist the tombstone; never throws. */
+export async function disconnectEntry(pi: ExtensionAPI, ctx: McpReporter, id: string): Promise<McpCoreResult> {
+	try {
+		await disconnectMcp(id);
+		recordConnection(pi, { sandboxId: id, state: "disconnected" });
+		const message = `Disconnected ${id} — the chunkhound daemon exits on its own.`;
+		report(ctx, message, "info");
+		return { ok: true, kind: "disconnected", id, message };
+	} catch (e) {
+		const message = `Disconnect failed: ${(e as Error).message}`;
+		report(ctx, message, "error");
+		return { ok: false, kind: "disconnect-failed", id, message };
 	}
 }
 
@@ -180,15 +209,7 @@ export function registerMcpCommand(pi: ExtensionAPI, state: PluginState): void {
 			const id = path.basename(entry.dir);
 
 			if (flags["disconnect"] === true) {
-				try {
-					await disconnectMcp(id);
-					// Tombstone: the append-only log keeps the old `connected` record,
-					// but the latest record per sandbox wins on rehydrate.
-					recordConnection(pi, { sandboxId: id, state: "disconnected" });
-					ctx.ui.notify(`Disconnected ${id} — the chunkhound daemon exits on its own.`, "info");
-				} catch (e) {
-					ctx.ui.notify(`Disconnect failed: ${(e as Error).message}`, "error");
-				}
+				await disconnectEntry(pi, ctx, id);
 				return;
 			}
 

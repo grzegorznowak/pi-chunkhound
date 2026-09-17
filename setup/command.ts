@@ -16,7 +16,7 @@ import type { ChhoundSettings, PluginState } from "../chhound/types.js";
 const USAGE =
 	"/ch-setup [--config <chunkhound.json>] [--provider P] [--model M] [--rerank-model R] [--output-dims N] " +
 	"[--llm-provider P] [--llm-model M] [--llm-api-key <key>] " +
-	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--auto-reconnect on|off] [--verify] [--project] [--reset]";
+	"[--baseline-ref <ref>] [--baseline-max-age <days>] [--sandbox-root <dir>] [--api-key <key>] [--auto-reconnect on|off] [--model-tools off|read-only|on] [--verify] [--project] [--reset]";
 
 /**
  * Re-materialize every sandbox + baseline config from current settings,
@@ -177,6 +177,19 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				}
 				settings.autoReconnect = v === "on";
 				updates.push(`autoReconnect=${v}`);
+			}
+			if (flags["model-tools"] === true) {
+				ctx.ui.notify("--model-tools requires off, read-only, or on.", "error");
+				return;
+			}
+			if (typeof flags["model-tools"] === "string") {
+				const v = flags["model-tools"].toLowerCase();
+				if (v !== "off" && v !== "read-only" && v !== "on") {
+					ctx.ui.notify(`Invalid --model-tools: ${flags["model-tools"]} (off|read-only|on)`, "error");
+					return;
+				}
+				settings.modelTools = v;
+				updates.push(`modelTools=${v}`);
 			}
 
 			// Secret: persisted (v1 decision) — settings.json + materialized configs, 0600.
@@ -376,6 +389,7 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 					`baseline: ref=${settings.baseline?.ref ?? "default"} maxAge=${settings.baseline?.maxAgeDays ?? "1d"}`,
 					`sandbox root: ${sandboxRoot(settings)}`,
 					`auto-reconnect: ${settings.autoReconnect === false ? "off" : "on"}`,
+					`model tools: ${settings.modelTools ?? "on"}`,
 					`api key: ${settings.embedding?.apiKey ? "stored in settings ✓" : process.env.CHUNKHOUND_EMBEDDING__API_KEY ? "env ✓" : "not set (env or --api-key)"}`,
 					`llm api key: ${settings.llm?.apiKey ? "stored in settings ✓" : "not set (env or --llm-api-key)"}`,
 				];

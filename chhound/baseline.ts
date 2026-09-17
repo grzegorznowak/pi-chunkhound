@@ -34,6 +34,8 @@ export interface EnsureBaselineOptions {
 	apiKey?: string;
 	/** Extra args for the priming index (e.g. --no-embeddings in smoke tests). */
 	extraArgs?: string[];
+	/** Abort an in-flight chunkhound indexing process. */
+	signal?: AbortSignal;
 }
 
 const LOCK_FILE = ".prime.lock";
@@ -161,20 +163,55 @@ function isLockStale(lockPath: string): boolean {
 	}
 }
 
+function abortError(): Error {
+	const err = new Error("baseline priming aborted");
+	err.name = "AbortError";
+	return err;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw abortError();
+}
+
+/** setTimeout that rejects immediately on abort (and removes its listener). */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(abortError());
+			return;
+		}
+		const cleanup = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const onAbort = () => {
+			cleanup();
+			reject(abortError());
+		};
+		const timer = setTimeout(() => {
+			cleanup();
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 /** O_EXCL lock with pid + staleness detection (node has no flock). */
-async function withPrimeLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+async function withPrimeLock<T>(dir: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 	const lockPath = path.join(dir, LOCK_FILE);
 	fs.mkdirSync(dir, { recursive: true });
 	const deadline = Date.now() + LOCK_WAIT_MS;
 	for (;;) {
+		throwIfAborted(signal);
 		try {
 			const fd = fs.openSync(lockPath, "wx");
 			fs.writeSync(fd, String(process.pid));
 			fs.closeSync(fd);
 			try {
+				throwIfAborted(signal); // aborted while another owner held the lock
 				return await fn();
 			} finally {
-				fs.rmSync(lockPath, { force: true });
+				fs.rmSync(lockPath, { force: true }); // released only after WE acquired it
 			}
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
@@ -185,7 +222,7 @@ async function withPrimeLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 			if (Date.now() > deadline) {
 				throw new Error(`Timed out waiting for baseline lock ${lockPath} (another process is priming)`);
 			}
-			await new Promise((r) => setTimeout(r, 500));
+			await sleep(500, signal);
 		}
 	}
 }
@@ -237,6 +274,9 @@ export async function resolveBaselineRef(repoRoot: string, settings: ChhoundSett
  * refresh, full index only when no reusable baseline db exists).
  */
 export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<BaselineInfo> {
+	// A pre-aborted call must not touch the filesystem, spawn git/chunkhound or
+	// create a lock/db — clear it before any side effect.
+	throwIfAborted(opts.signal);
 	const emitNote = opts.onNote ?? opts.onLine;
 	const ref = opts.ref ?? (await resolveBaselineRef(opts.repoRoot, opts.settings));
 	const version = await chhoundVersion();
@@ -293,7 +333,9 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 				env: apiKeyEnv(opts.apiKey),
 				onLine: opts.onLine,
 				extraArgs: opts.extraArgs,
+				signal: opts.signal,
 			});
+			throwIfAborted(opts.signal); // aborted mid-prime: no meta, no half-written db
 			if (r.code !== 0) {
 				throw new Error(`baseline index failed (code ${r.code}) — run /ch-setup --verify for configuration help`);
 			}
@@ -314,7 +356,8 @@ export async function ensureBaseline(opts: EnsureBaselineOptions): Promise<Basel
 			chhoundVersion: version,
 			updatedAt: new Date().toISOString(),
 		});
-	});
+	}, opts.signal);
+	throwIfAborted(opts.signal); // the wait/prime was cancelled: surface, don't report success
 
 	meta = readBaselineMeta(dir);
 	if (!meta) throw new Error(`baseline priming failed for ${ref} (no meta written)`);

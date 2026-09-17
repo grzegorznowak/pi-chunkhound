@@ -1,0 +1,394 @@
+import path from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
+import { ensureBaseline } from "./chhound/baseline.js";
+import { chhoundVersion } from "./chhound/cli.js";
+import { expandHome } from "./chhound/completions.js";
+import { insideChunkhoundRoot } from "./chhound/config.js";
+import { findRepoRoot, gitRootOrNull } from "./chhound/git.js";
+import { classifyChhoundLine } from "./chhound/progress.js";
+import { parsePrUrl } from "./chhound/pr.js";
+import { listSandboxes } from "./chhound/sandbox.js";
+import { loadSettings, saveSettings } from "./chhound/settings.js";
+import type { ChhoundSettings, PluginState } from "./chhound/types.js";
+import { connectEntry, disconnectEntry, resolveSandboxMatches } from "./mcp/command.js";
+import { listMcpConnections, mcpConnectionSummary } from "./mcp/manager.js";
+import { refreshMaterializedConfigs } from "./setup/command.js";
+import { buildStatusLines } from "./status/command.js";
+import { createIndexedWorktree, oneGoLocation, runPrOneGo } from "./worktree/command.js";
+
+export const MODEL_TOOL_NAME = "ch-chhound";
+/** Widget key for model-driven creates — namespaced away from the slash
+ * command's "chhound" so a concurrently running /ch-worktree (pi executes
+ * extension commands even mid-stream) can't clobber the same widget. */
+export const MODEL_WORKTREE_WIDGET_KEY = "chhound:model-worktree";
+export const READ_ACTIONS = ["status", "worktree.list", "mcp.list", "setup.show"] as const;
+export const MUTATING_ACTIONS = ["worktree.create", "baseline.refresh", "mcp.connect", "mcp.disconnect", "setup.update"] as const;
+export const MODEL_ACTIONS = [...READ_ACTIONS, ...MUTATING_ACTIONS] as const;
+type ModelAction = (typeof MODEL_ACTIONS)[number];
+
+type Input = Record<string, unknown> & { action?: string };
+type ToolResult = { content: Array<{ type: "text"; text: string }>; details: { action: string; [key: string]: unknown } };
+
+const parameters = Type.Object({
+	action: StringEnum(MODEL_ACTIONS, { description: "Operation to perform." }),
+	target: Type.Optional(Type.String()),
+	repo: Type.Optional(Type.String()),
+	branch: Type.Optional(Type.String()),
+	newBranch: Type.Optional(Type.String()),
+	from: Type.Optional(Type.String()),
+	pr: Type.Optional(Type.String({ description: "GitHub PR URL (https://github.com/<owner>/<repo>/pull/<n>) — creates the sandbox detached at the PR head. Conflicts with repo, branch, newBranch, and from." })),
+	dest: Type.Optional(Type.String()),
+	config: Type.Optional(Type.String()),
+	forceReindex: Type.Optional(Type.Boolean()),
+	refreshBaseline: Type.Optional(Type.Boolean()),
+	connect: Type.Optional(Type.Boolean()),
+	ref: Type.Optional(Type.String()),
+	force: Type.Optional(Type.Boolean()),
+	provider: Type.Optional(Type.String()),
+	model: Type.Optional(Type.String()),
+	rerankModel: Type.Optional(Type.String()),
+	outputDims: Type.Optional(Type.Number()),
+	llmProvider: Type.Optional(Type.String()),
+	llmModel: Type.Optional(Type.String()),
+	baselineRef: Type.Optional(Type.String()),
+	baselineMaxAge: Type.Optional(Type.Number()),
+	sandboxRoot: Type.Optional(Type.String()),
+	autoReconnect: Type.Optional(Type.Boolean()),
+	modelTools: Type.Optional(StringEnum(["off", "read-only", "on"] as const)),
+});
+
+/** Settings safe to hand to the model: persisted API keys must never leave the host. */
+function redact(settings: ChhoundSettings): ChhoundSettings {
+	return {
+		...settings,
+		embedding: settings.embedding ? { ...settings.embedding, apiKey: settings.embedding.apiKey ? "[redacted]" : undefined } : settings.embedding,
+		llm: settings.llm ? { ...settings.llm, apiKey: settings.llm.apiKey ? "[redacted]" : undefined } : settings.llm,
+	};
+}
+
+function text(action: string, value: string, extra: Record<string, unknown> = {}): ToolResult {
+	return { content: [{ type: "text", text: value || `${action}: complete` }], details: { action, ...extra } };
+}
+
+function required(action: string, input: Input, name: string): string {
+	const value = input[name];
+	if (typeof value !== "string" || !value.trim()) throw new Error(`${action} requires '${name}'.`);
+	return value;
+}
+
+function access(action: string, cwd: string): void {
+	const mode = loadSettings(cwd).settings.modelTools ?? "on";
+	if (mode === "off") throw new Error(`${action} is disabled by modelTools=off. Enable it with /ch-setup --model-tools on.`);
+	if (mode === "read-only" && (MUTATING_ACTIONS as readonly string[]).includes(action)) {
+		throw new Error(`${action} is blocked while model tools are read-only. Enable mutations with /ch-setup --model-tools on.`);
+	}
+}
+
+async function projectRoot(cwd: string): Promise<string> {
+	return (await gitRootOrNull(cwd)) ?? cwd;
+}
+
+/**
+ * Reporter progress → pi tool-update relay.
+ *
+ * The worktree/MCP reporter seams speak UI shapes ({message,type},
+ * {kind:"line",line}, …). pi forwards whatever `onUpdate` receives straight
+ * into the TUI as a partial result and expects a ToolResult patch — forwarding
+ * a raw UI shape makes its renderer read `result.content.filter` on undefined
+ * and crash the process (seen live on mcp.connect). Only pi's shape may pass.
+ */
+export function progressRelay(action: string, onUpdate: ((update: unknown) => void) | undefined): (update: unknown) => void {
+	return (update) => {
+		if (!onUpdate) return;
+		if (update && typeof update === "object" && Array.isArray((update as { content?: unknown }).content)) {
+			onUpdate(update); // already a ToolResult patch (e.g. the web relay)
+			return;
+		}
+		const text = progressText(update);
+		if (text === undefined) return;
+		onUpdate({ content: [{ type: "text", text }], details: { action } });
+	};
+}
+
+/** Text a reporter update should surface; undefined = nothing model-facing. */
+function progressText(update: unknown): string | undefined {
+	if (typeof update === "string") return update;
+	if (!update || typeof update !== "object") return undefined;
+	const value = update as Record<string, unknown>;
+	if (typeof value.message === "string") return value.message;
+	if (typeof value.line === "string") {
+		// Worktree fallback frames are raw engine output: curate like the widget
+		// does (default-deny), so loguru chatter never reaches the tool cell.
+		if (value.kind !== "line") return value.line;
+		const signal = classifyChhoundLine(value.line);
+		return signal.kind === "event" ? `⚠ ${signal.message}` : undefined;
+	}
+	if (typeof value.note === "string") return value.note;
+	if (typeof value.phase === "string") return `[${value.phase}]`;
+	return undefined; // {kind:"watch"|"done"} and unknown UI frames carry no text
+}
+
+export type NotifyFrame = { message: string; type?: string };
+
+/**
+ * TUI toast policy for the widget path: transient info notifies already live in
+ * the widget and the tool cell, so only warnings/errors and the terminal ✓
+ * completion block pop a notification.
+ */
+function quietNotifyUI(ui: ExtensionContext["ui"]): ExtensionContext["ui"] {
+	return {
+		...ui,
+		notify: (message, type) => {
+			if (type !== "info" || message.startsWith("✓ ")) ui.notify(message, type);
+		},
+	};
+}
+
+/**
+ * Terminal outcome text for worktree.create, lifted from the reporter's own
+ * notify stream so the model sees the command's exact wording: the `✓ …
+ * indexed (baseline copy + top-up|full index) in Xs` completion block on
+ * success, the last error otherwise. Frames after the terminal notify (a
+ * post-create MCP connect) never flip a successful outcome to a failure.
+ */
+export function worktreeOutcomeText(ok: boolean, frames: readonly NotifyFrame[]): string | undefined {
+	if (!ok) {
+		const errors = frames.filter((frame) => frame.type === "error");
+		return errors[errors.length - 1]?.message;
+	}
+	const done = frames.filter((frame) => frame.type !== "error" && frame.message.startsWith("✓ "));
+	return done[done.length - 1]?.message;
+}
+
+/** Argument summary for the consent dialog: fixed allowlist, clipped and
+ * bounded — unknown fields (and anything secret-shaped) never surface. */
+const CONSENT_FIELDS = ["target", "repo", "branch", "newBranch", "from", "pr", "dest", "config", "ref", "provider", "model", "rerankModel", "llmProvider", "llmModel", "baselineRef", "sandboxRoot"] as const;
+const CONSENT_VALUE_LIMIT = 40;
+const CONSENT_DETAIL_LIMIT = 160;
+export function consentSummary(action: string, input: Input): string {
+	const parts: string[] = [];
+	for (const key of CONSENT_FIELDS) {
+		const value = input[key];
+		if (typeof value === "string" && value.trim()) {
+			const clipped = value.length > CONSENT_VALUE_LIMIT ? `${value.slice(0, CONSENT_VALUE_LIMIT - 1)}…` : value;
+			parts.push(`${key}=${clipped}`);
+		} else if (typeof value === "boolean" && value) {
+			parts.push(key);
+		} else if (typeof value === "number") {
+			parts.push(`${key}=${value}`);
+		}
+	}
+	const detail = parts.join(" ").slice(0, CONSENT_DETAIL_LIMIT);
+	return `Allow ch-chhound to run ${action}${detail ? `\n${detail}` : ""}?`;
+}
+
+function updates(settings: ChhoundSettings, input: Input, cwd: string): string[] {
+	const changed: string[] = [];
+	if (typeof input.provider === "string") { settings.embedding = { ...settings.embedding, provider: input.provider }; changed.push("provider"); }
+	if (typeof input.model === "string") { settings.embedding = { ...settings.embedding, model: input.model }; changed.push("model"); }
+	if (typeof input.rerankModel === "string") { settings.embedding = { ...settings.embedding, rerankModel: input.rerankModel }; changed.push("rerankModel"); }
+	if (input.outputDims !== undefined) {
+		if (!Number.isInteger(input.outputDims) || Number(input.outputDims) <= 0) throw new Error("setup.update requires outputDims to be a positive integer.");
+		settings.embedding = { ...settings.embedding, outputDims: Number(input.outputDims) }; changed.push("outputDims");
+	}
+	if (typeof input.llmProvider === "string") { settings.llm = { ...settings.llm, provider: input.llmProvider }; changed.push("llmProvider"); }
+	if (typeof input.llmModel === "string") { settings.llm = { ...settings.llm, model: input.llmModel }; changed.push("llmModel"); }
+	if (typeof input.baselineRef === "string") { settings.baseline = { ...settings.baseline, ref: input.baselineRef }; changed.push("baselineRef"); }
+	if (input.baselineMaxAge !== undefined) {
+		if (!Number.isFinite(input.baselineMaxAge) || Number(input.baselineMaxAge) <= 0) throw new Error("setup.update requires baselineMaxAge to be positive.");
+		settings.baseline = { ...settings.baseline, maxAgeDays: Number(input.baselineMaxAge) }; changed.push("baselineMaxAge");
+	}
+	if (typeof input.sandboxRoot === "string") {
+		const base = path.resolve(cwd, expandHome(input.sandboxRoot));
+		if (insideChunkhoundRoot(base)) {
+			throw new Error(`setup.update sandboxRoot must be outside any chunkhound index root — ${base} or a parent contains a .chunkhound.json.`);
+		}
+		settings.sandboxRoot = base;
+		changed.push("sandboxRoot");
+	}
+	if (typeof input.autoReconnect === "boolean") { settings.autoReconnect = input.autoReconnect; changed.push("autoReconnect"); }
+	if (typeof input.modelTools === "string") {
+		if (input.modelTools !== "off" && input.modelTools !== "read-only" && input.modelTools !== "on") {
+			throw new Error(`setup.update requires modelTools to be one of off, read-only, on (got '${input.modelTools}').`);
+		}
+		settings.modelTools = input.modelTools;
+		changed.push("modelTools");
+	}
+	return changed;
+}
+
+async function execute(pi: ExtensionAPI, state: PluginState, input: Input, signal: AbortSignal | undefined, onUpdate: ((update: unknown) => void) | undefined, ctx: ExtensionContext): Promise<ToolResult> {
+	const action = input.action;
+	if (!(MODEL_ACTIONS as readonly string[]).includes(action ?? "")) {
+		throw new Error(`Unknown ch-chhound action '${String(action)}'. Supported actions: ${MODEL_ACTIONS.join(", ")}.`);
+	}
+	const selected = action as ModelAction;
+	// Resolve the repo root first: policy enforcement and dispatch must read the
+	// same settings scope (a project overlay at the git root governs both).
+	const root = await projectRoot(ctx.cwd);
+	access(selected, root);
+	const settings = loadSettings(root).settings;
+	// Terminal outcome checks (worktree.create) read the notify stream, so
+	// capture it alongside the pi-shaped relay. Captured frames are plain
+	// strings and never reach `details`.
+	const notifyFrames: NotifyFrame[] = [];
+	const relay = progressRelay(selected, onUpdate as ((update: unknown) => void) | undefined);
+	const report = {
+		cwd: ctx.cwd,
+		hasUI: false,
+		pi,
+		state,
+		signal,
+		onProgress: (update: unknown) => {
+			if (update && typeof update === "object" && typeof (update as { message?: unknown }).message === "string") {
+				notifyFrames.push({ message: (update as { message: string }).message, type: (update as { type?: string }).type });
+			}
+			relay(update);
+		},
+	};
+
+	switch (selected) {
+		case "status": {
+			const lines = buildStatusLines({ version: await chhoundVersion(), settings, sandboxes: listSandboxes(settings), conns: listMcpConnections() });
+			return text(selected, lines.join("\n"));
+		}
+		case "worktree.list": {
+			const entries = listSandboxes(settings);
+			return text(selected, entries.length ? entries.map((s) => `${s.meta.worktree} (${path.basename(s.dir)})`).join("\n") : "No indexed worktrees.", { worktrees: entries });
+		}
+		case "mcp.list": {
+			const connections = listMcpConnections();
+			// Plain-data projection only: raw connections hold the live MCP client
+			// (functions + cyclic ajv validators), which breaks pi's session JSON
+			// write and its per-request structuredClone of the message history.
+			return text(selected, connections.length ? connections.map((c) => `${c.id}: ${c.worktree}`).join("\n") : "No MCP connections.", { connections: connections.map(mcpConnectionSummary) });
+		}
+		case "setup.show": {
+			const safe = redact(settings);
+			return text(selected, JSON.stringify(safe, null, 2), { settings: safe });
+		}
+		case "setup.update": {
+			// Global-only mutation: never let a project overlay leak into the global
+			// file. Materialized configs are refreshed from the reloaded MERGED
+			// settings so project overlays stay in effect for existing indexes.
+			const globalSettings = loadSettings().settings;
+			const changed = updates(globalSettings, input, ctx.cwd);
+			if (!changed.length) throw new Error("setup.update requires at least one settings field.");
+			const file = saveSettings(globalSettings, "global");
+			const refreshed = refreshMaterializedConfigs(loadSettings(root).settings);
+			return text(selected, `Updated global settings: ${changed.join(", ")} → ${file}${refreshed.length ? `\nRefreshed ${refreshed.length} config(s).` : ""}`, { changed, file, scope: "global" });
+		}
+		case "mcp.connect": {
+			const target = required(selected, input, "target");
+			const matches = resolveSandboxMatches(target, settings, ctx.cwd);
+			if (matches.length !== 1) throw new Error(`mcp.connect target '${target}' ${matches.length ? "is ambiguous" : "was not found"}; run status to list worktrees.`);
+			const result = await connectEntry(pi, report, state, matches[0]!, {});
+			return text(selected, result.message ?? result.kind, { result });
+		}
+		case "mcp.disconnect": {
+			const target = required(selected, input, "target");
+			const matches = resolveSandboxMatches(target, settings, ctx.cwd);
+			if (matches.length > 1) throw new Error(`mcp.disconnect target '${target}' is ambiguous (${matches.length} worktrees match); use a unique worktree path or storage id.`);
+			// 0 matches keep the direct connection-ID fallback: a live connection
+			// whose sandbox was already removed is only addressable by id.
+			const id = matches.length === 1 ? path.basename(matches[0]!.dir) : target;
+			const result = await disconnectEntry(pi, report, id);
+			return text(selected, result.message ?? result.kind, { result });
+		}
+		case "baseline.refresh": {
+			const repo = typeof input.repo === "string" ? (await findRepoRoot(path.resolve(ctx.cwd, input.repo))) : await gitRootOrNull(ctx.cwd);
+			if (!repo) throw new Error("baseline.refresh requires repo when the current directory is not a git repository.");
+			const baseline = await ensureBaseline({ repoRoot: repo, settings, ref: typeof input.ref === "string" ? input.ref : undefined, force: input.force === true, signal, onLine: (line) => relay({ kind: "line", line }) });
+			return text(selected, `Baseline ${baseline.ref}: ${baseline.reason}`, { baseline });
+		}
+		case "worktree.create": {
+			// Shared by the branch and PR paths: engine flags, the TUI widget
+			// report, and the destination override.
+			const flags: Record<string, string | true> = {};
+			if (typeof input.config === "string") flags.config = input.config;
+			if (input.forceReindex) flags["force-reindex"] = true;
+			if (input.refreshBaseline) flags["refresh-baseline"] = true;
+			// TUI parity: the slash command's live widget needs a real ui/hasUI
+			// report. RPC/print/json stay on the text-partial fallback — widget
+			// events are not their documented progress surface. opts.connect is
+			// always boolean here, so a UI report adds no connect prompt.
+			const tuiReport = ctx.mode === "tui" && ctx.hasUI
+				? { ...report, hasUI: true, widgetKey: MODEL_WORKTREE_WIDGET_KEY, ui: quietNotifyUI(ctx.ui) }
+				: report;
+			const dest = typeof input.dest === "string" ? path.resolve(ctx.cwd, input.dest) : undefined;
+
+			// PR path: the URL carries the repo + head identity. Nothing else may
+			// select the source tree, and no repo resolution happens from the cwd
+			// (the PR route discovers its host from the URL + library).
+			if (input.pr !== undefined) {
+				if (typeof input.pr !== "string" || !input.pr.trim()) {
+					throw new Error("worktree.create pr must be a GitHub PR URL (https://github.com/<owner>/<repo>/pull/<n>).");
+				}
+				const conflicts = (["repo", "branch", "newBranch", "from"] as const).filter((key) => input[key] !== undefined);
+				if (conflicts.length) {
+					throw new Error(`worktree.create pr conflicts with ${conflicts.join(", ")} — the PR URL carries the repo, branch, and head commit.`);
+				}
+				const pr = parsePrUrl(input.pr);
+				if (!pr) {
+					throw new Error(`Not a PR URL: ${input.pr} — paste the full URL from the browser (https://github.com/<owner>/<repo>/pull/<n>).`);
+				}
+				const outcome = await runPrOneGo(tuiReport, state, pr, flags, { dest, connect: input.connect === true });
+				const details = { ok: outcome.ok, ...(outcome.sandboxId ? { sandboxId: outcome.sandboxId } : {}), ...(outcome.location ? { location: outcome.location } : {}) };
+				const summary = worktreeOutcomeText(outcome.ok, notifyFrames);
+				if (!outcome.ok) return text(selected, summary ?? `worktree.create failed for ${input.pr} (no index was written).`, details);
+				return text(selected, summary ?? `Worktree ready: ${outcome.location?.wtPath ?? outcome.sandboxId}.`, details);
+			}
+
+			const repoArg = typeof input.repo === "string" ? path.resolve(ctx.cwd, input.repo) : ctx.cwd;
+			const repo = await findRepoRoot(repoArg);
+			if (!repo) throw new Error(`worktree.create requires repo to name a git repository (or run it from one).`);
+			if (input.branch !== undefined && input.newBranch !== undefined) throw new Error("worktree.create accepts either branch or newBranch, not both.");
+			const slot = typeof input.newBranch === "string" ? input.newBranch : typeof input.branch === "string" ? input.branch : undefined;
+			const location = await oneGoLocation(repo, slot, settings, dest, (message, type) => report.onProgress?.({ message, type }));
+			if (!location) {
+				throw new Error(worktreeOutcomeText(false, notifyFrames) ?? "worktree.create could not select a safe worktree location.");
+			}
+			const created = await createIndexedWorktree(tuiReport, state, { repoRoot: repo, sandboxDir: location.sandboxDir, wtPath: location.wtPath, settings, createBranch: typeof input.newBranch === "string" ? input.newBranch : undefined, branch: typeof input.branch === "string" ? input.branch : undefined, commitIsh: typeof input.from === "string" ? input.from : undefined, connect: input.connect === true, flags });
+			// The ✓ completion/error notify carries the real outcome (elapsed,
+			// baseline copy + top-up vs full index); never claim success on
+			// `ok:false`. Plain-data details only: ok/sandboxId/location.
+			const details = { ok: created.ok, ...(created.sandboxId ? { sandboxId: created.sandboxId } : {}), location };
+			const summary = worktreeOutcomeText(created.ok, notifyFrames);
+			if (!created.ok) return text(selected, summary ?? `worktree.create failed for ${location.wtPath} (no index was written).`, details);
+			return text(selected, summary ?? `Worktree ready: ${location.wtPath}.`, details);
+		}
+	}
+}
+
+export function registerModelTools(pi: ExtensionAPI, state: PluginState): void {
+	pi.registerTool({
+		name: MODEL_TOOL_NAME,
+		label: "ChunkHound",
+		description: `ChunkHound platform operations. Actions: ${MODEL_ACTIONS.join(", ")}. Use status/worktree.list/mcp.list/setup.show for inspection; mutating actions require user consent.`,
+		promptSnippet: "Use ch-chhound to inspect or operate ChunkHound worktrees, baselines, MCP, and settings.",
+		parameters,
+		executionMode: "sequential",
+		execute: (_id, input, signal, onUpdate, ctx) => execute(pi, state, input as Input, signal, onUpdate as any, ctx),
+		renderResult(result) {
+			// pi forwards onUpdate payloads into this renderer as partial results;
+			// tolerate a content-less carry so its own fallback (which assumes
+			// `result.content` exists) is never reached on a renderer throw.
+			const body = (result.content ?? []).map((part) => part.type === "text" ? part.text : "").join("\n");
+			switch ((result.details as { action?: string } | undefined)?.action) {
+				case "status": case "worktree.list": case "mcp.list": case "setup.show": case "worktree.create": case "baseline.refresh": case "mcp.connect": case "mcp.disconnect": case "setup.update": return new Text(body, 0, 0);
+				default: return new Text(body, 0, 0);
+			}
+		},
+	});
+	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName !== MODEL_TOOL_NAME || !(MUTATING_ACTIONS as readonly string[]).includes((event.input as Input).action ?? "")) return;
+		if (!ctx.hasUI) return { block: true, reason: "Mutating ch-chhound actions require interactive confirmation." };
+		const action = (event.input as Input).action!;
+		if (!await ctx.ui.confirm("Allow ChunkHound change?", consentSummary(action, event.input as Input))) {
+			return { block: true, reason: `User declined ${action}.` };
+		}
+	});
+}

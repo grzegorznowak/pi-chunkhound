@@ -3,7 +3,7 @@ import path from "node:path";
 import { globalSettingsPath, projectSettingsPath } from "./paths.js";
 import { SETTINGS_VERSION, type ChhoundSettings } from "./types.js";
 
-export const DEFAULT_SETTINGS: ChhoundSettings = { version: SETTINGS_VERSION };
+export const DEFAULT_SETTINGS: ChhoundSettings = { version: SETTINGS_VERSION, modelTools: "on" };
 
 export interface LoadedSettings {
 	settings: ChhoundSettings;

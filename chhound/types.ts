@@ -63,6 +63,8 @@ export interface ChhoundSettings {
 	 * (--auto-reconnect on|off or the wizard).
 	 */
 	autoReconnect?: boolean;
+	/** Model-facing ch-chhound dispatcher access. Defaults to "on" for v1 settings. */
+	modelTools?: "off" | "read-only" | "on";
 }
 
 export interface SandboxMeta {

@@ -10,7 +10,7 @@ import { adoptConfigFile, materializeConfig } from "../chhound/config.js";
 import { currentBranch, checkedOutBranches, fetchRef, findRepoRoot, gitRootOrNull, gitWorktreeAdd, remoteNames, revParse, runGit } from "../chhound/git.js";
 import { hotStartIndex } from "../chhound/hotstart.js";
 import { sandboxRoot } from "../chhound/paths.js";
-import { createProgressUI, formatElapsed, type ProgressUICtx } from "../chhound/progress.js";
+import { createProgressUI, formatElapsed, type ProgressUI, type ProgressUICtx } from "../chhound/progress.js";
 import { promptPath, promptText, type PathPromptUI } from "../chhound/path-input.js";
 import { promptPick } from "../chhound/pick-panel.js";
 import { ensureMirror, fetchPrHead, findLocalRepo, ghPrView, mirrorDir, parsePrUrl, type PrInfo, type PrRef } from "../chhound/pr.js";
@@ -230,7 +230,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 		handler: async (args, ctx) => {
 			const { positionals, flags } = parseArgs(args, WORKTREE_VALUE_FLAGS);
 			const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
-			const wctx: WizardCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, ui: ctx.ui, pi };
+			const wctx: WizardCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, ui: ctx.ui, pi, state };
 
 			if (flags["help"] || flags["h"]) {
 				notify(HELP, "info");
@@ -326,7 +326,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI, state: PluginState, de
 					notify("A PR URL takes no branch argument — the sandbox branch is pull/<n>.", "error");
 					return;
 				}
-				await runPrOneGo(wctx, state, prFromArg, flags, dest);
+				await runPrOneGo(wctx, state, prFromArg, flags, { dest });
 				return;
 			}
 			const requestedPath = wtArg ? path.resolve(ctx.cwd, wtArg) : undefined;
@@ -471,9 +471,40 @@ function noRepoMessage(cwd: string, wtArg: string | undefined, requestedPath: st
 	].join("\n");
 }
 
+export type WorktreeReporter = {
+	cwd: string;
+	hasUI: boolean;
+	ui?: WizardUI;
+	/** Widget key override (default "chhound") — the model path namespaces it so
+	 * a concurrently running /ch-worktree can't clobber the same widget. */
+	widgetKey?: string;
+	pi: ExtensionAPI;
+	state: PluginState;
+	onProgress?: (...updates: unknown[]) => void;
+	signal?: AbortSignal;
+};
+
+function reporterNotify(ctx: WorktreeReporter, msg: string, type: "info" | "warning" | "error"): void {
+	ctx.onProgress?.({ message: msg, type });
+	if (ctx.hasUI) ctx.ui?.notify(msg, type);
+}
+
+function reporterProgress(ctx: WorktreeReporter): ProgressUI {
+	if (ctx.hasUI && ctx.ui) return createProgressUI(ctx as ProgressUICtx, { widgetKey: ctx.widgetKey });
+	const startedAt = Date.now();
+	return {
+		setLine: (line) => ctx.onProgress?.({ kind: "line", line }),
+		setPhase: (phase) => ctx.onProgress?.({ kind: "phase", phase }),
+		setNote: (note) => ctx.onProgress?.({ kind: "note", note }),
+		setWatchDir: (dir) => ctx.onProgress?.({ kind: "watch", dir }),
+		done: () => ctx.onProgress?.({ kind: "done" }),
+		elapsed: () => Date.now() - startedAt,
+	};
+}
+
 /** Shared worktree creation: sandbox dir → git add → baseline → config → top-up → meta. */
 export async function createIndexedWorktree(
-	ctx: WizardCtx,
+	ctx: WorktreeReporter,
 	state: PluginState,
 	opts: {
 		repoRoot: string;
@@ -490,14 +521,16 @@ export async function createIndexedWorktree(
 		headRef?: string;
 		/** PR head commit — recorded in sandbox meta for /ch-worktree display. */
 		headOid?: string;
+		/** Explicit model-tool request to connect after creation. */
+		connect?: boolean;
 		flags: Record<string, string | true>;
 	},
 ): Promise<{ ok: boolean; sandboxId?: string }> {
-	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	const notify = (msg: string, type: "info" | "warning" | "error") => reporterNotify(ctx, msg, type);
 	const { repoRoot, sandboxDir, wtPath, settings, createBranch, branch, commitIsh, flags } = opts;
 	const sandboxId = path.basename(sandboxDir);
 
-	const progress = createProgressUI(ctx);
+	const progress = reporterProgress(ctx);
 	try {
 		notify(`Creating worktree ${wtPath}…`, "info");
 		// The checkout lands INSIDE the sandbox dir — make sure the sandbox
@@ -545,7 +578,7 @@ export async function createIndexedWorktree(
 		progress.setWatchDir(baselineDbDirFor(repoRoot, baselineRef, settings));
 		notify(
 			"⏳ Indexing started — the session is busy until it completes and won't accept new messages meanwhile. " +
-				"Progress updates in the footer. Tip: /ch-worktree --no-index creates the worktree without indexing.",
+				"Progress updates stream while it runs. Tip: /ch-worktree --no-index creates the worktree without indexing.",
 			"warning",
 		);
 		const baseline = await ensureBaseline({
@@ -556,6 +589,7 @@ export async function createIndexedWorktree(
 			onNote: (note) => progress.setNote(note),
 			force: flags["refresh-baseline"] === true,
 			apiKey: state.apiKey,
+			signal: ctx.signal,
 		});
 
 		// 2) Sandbox config (no secrets, pinned duckdb) + db copy target — the
@@ -599,6 +633,7 @@ export async function createIndexedWorktree(
 			pathPrefix: path.relative(sandboxDir, wtPath).split(path.sep).join("/"),
 			env: chhoundApiKeyEnv(state.apiKey),
 			onLine: progress.setLine,
+			signal: ctx.signal,
 		});
 		if (result.code !== 0) {
 			const tail = result.stderrTail.split("\n").slice(-4).join("\n");
@@ -646,9 +681,9 @@ export async function createIndexedWorktree(
 		// shared helper /ch-mcp uses — dedup, connect, record, notify — so the
 		// prompt path can never drift from the command's behavior. A failed
 		// connect is notified but never fails the worktree creation.
-		if (ctx.hasUI) {
+		if (opts.connect === true || (opts.connect === undefined && ctx.hasUI && ctx.ui)) {
 			const id = path.basename(sandboxDir);
-			const connect = await ctx.ui.confirm(
+			const connect = opts.connect === true || await ctx.ui!.confirm(
 				"Connect to this worktree via MCP now?",
 				`${id} → ${wtPath}\n` +
 					"Registers the chh_* MCP tools (as /ch-mcp does) and reconnects automatically on the next session start.\n" +
@@ -703,7 +738,7 @@ function prSlot(number: number): string {
 }
 
 /** Wizard ctx slice the prompt/flow helpers need (+ pi for the MCP connect). */
-type WizardCtx = { cwd: string; hasUI: boolean; ui: WizardUI; pi: ExtensionAPI };
+type WizardCtx = WorktreeReporter & { ui: WizardUI };
 
 export async function runWizard(ctx: WizardCtx, state: PluginState, positional?: string, deps: WizardDeps = {}): Promise<WizardOutcome> {
 	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
@@ -1011,23 +1046,26 @@ export async function runPrWizard(ctx: WizardCtx, state: PluginState, url: strin
 	return created.ok && created.sandboxId ? { kind: "created", sandboxId: created.sandboxId } : { kind: "failed" };
 }
 
-/** One-go PR path (/ch-worktree <PR URL> [--dest …]): fully non-interactive. */
-async function runPrOneGo(
-	ctx: WizardCtx,
+/** One-go PR path (/ch-worktree <PR URL> [--dest …]): fully non-interactive.
+ * Returning core: the slash path ignores the outcome, the model path reports it
+ * (ok/sandboxId/location). `connect` stays explicit for the model path so a
+ * tool create never hits the interactive post-create connect prompt. */
+export async function runPrOneGo(
+	ctx: WorktreeReporter,
 	state: PluginState,
 	pr: PrRef,
 	flags: Record<string, string | true>,
-	dest?: string,
-): Promise<void> {
-	const notify = (msg: string, type: "info" | "warning" | "error") => ctx.ui.notify(msg, type);
+	opts: { dest?: string; connect?: boolean } = {},
+): Promise<{ ok: boolean; sandboxId?: string; location?: { sandboxDir: string; wtPath: string } }> {
+	const notify = (msg: string, type: "info" | "warning" | "error") => reporterNotify(ctx, msg, type);
 	const cwdRoot = await gitRootOrNull(ctx.cwd);
 	const discovery = loadSettings(cwdRoot ?? ctx.cwd).settings;
 	const host = await resolvePrSandboxHost(ctx.cwd, discovery, pr, notify);
-	if (!host) return;
+	if (!host) return { ok: false };
 	const slot = prSlot(pr.number);
-	const loc = await oneGoLocation(host.repoRoot, slot, host.settings, dest, notify);
-	if (!loc) return;
-	await createIndexedWorktree(ctx, state, {
+	const loc = await oneGoLocation(host.repoRoot, slot, host.settings, opts.dest, notify);
+	if (!loc) return { ok: false };
+	const created = await createIndexedWorktree(ctx, state, {
 		repoRoot: host.repoRoot,
 		sandboxDir: loc.sandboxDir,
 		wtPath: loc.wtPath,
@@ -1036,13 +1074,15 @@ async function runPrOneGo(
 		branchLabel: slot,
 		headRef: host.info.headRefName,
 		headOid: host.headSha,
+		connect: opts.connect,
 		flags,
 	});
+	return { ok: created.ok, ...(created.sandboxId ? { sandboxId: created.sandboxId } : {}), location: loc };
 }
 
 /** One-go location guards — notify + undefined when the location is blocked
  * (shared by the branch and PR one-go paths so their refusals never drift). */
-async function oneGoLocation(
+export async function oneGoLocation(
 	repoRoot: string,
 	slot: string | undefined,
 	settings: ChhoundSettings,
