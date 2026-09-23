@@ -330,10 +330,16 @@ export function registerSetupCommand(pi: ExtensionAPI, state: PluginState): void
 				// Sandbox library root — suggested from the cwd unless it (or a
 				// parent) is already a chunkhound index root, then it must be elsewhere.
 				const suggested = settings.sandboxRoot ?? settings.worktreeBase ?? suggestWorktreeBase(ctx.cwd);
+				// No suggestion means the cwd is inside an index root; the field stays
+				// empty and Enter keeps the built-in default in force — say so instead
+				// of implying no default exists.
+				const rootDefaultHint = suggested
+					? `default: ${suggested}`
+					: `no suggestion — Enter keeps the effective default ${sandboxRoot(settings)}; must be outside any chunkhound index`;
 				let basePicked: string | undefined;
 				for (let attempt = 0; attempt < 3 && basePicked === undefined; attempt++) {
 					const raw = await promptPath(ctx.ui, {
-						title: `Worktree library root (worktrees + their indexes land in storage dirs under <root>; default: ${suggested ?? "none — must be outside any chunkhound index"}):`,
+						title: `Worktree library root (worktrees + their indexes land in storage dirs under <root>; ${rootDefaultHint}):`,
 						cwd: ctx.cwd,
 						startValue: suggested ?? "",
 						paramLabel: "worktree library root",
